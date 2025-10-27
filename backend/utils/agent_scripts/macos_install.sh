@@ -6,6 +6,9 @@ set -e
 # Target Cluster ID: $CLUSTER_ID
 # Script Build ID: 20250925-v1.0.2-ssl-deployment-ready
 
+# Early variable definition for backup (before interactive mode)
+HAPROXY_CONFIG_PATH="{{HAPROXY_CONFIG_PATH}}"
+
 # Quick daemon mode detection (before installer UI)
 # Suppress installer messages if running in daemon mode
 QUIET_MODE=false
@@ -24,15 +27,15 @@ if [[ "$QUIET_MODE" != "true" ]]; then
     echo "⚠️  IMPORTANT WARNING ⚠️"
     echo "=========================================="
     echo ""
-    echo "Please backup your haproxy.cfg file before proceeding!"
-    echo ""
     echo "After agent installation, ALL your existing frontend and backend"
     echo "configurations will be removed to enable full management through"
     echo "HAProxy OpenManager."
     echo ""
-    echo "You can restore your backed-up haproxy.cfg file using the Bulk Import"
-    echo "feature in the HAProxy OpenManager interface to recreate all your"
-    echo "configurations."
+    echo "An automatic backup will be created: haproxy.cfg.initial-backup"
+    echo ""
+    echo "📋 REQUIRED STEPS AFTER INSTALLATION:"
+    echo "  1. Login to HAProxy OpenManager interface"
+    echo "  2. Use the BULK IMPORT feature to restore your configuration"
     echo ""
     echo "⚠️  IMPORTANT: After installation, ALL configuration changes MUST be"
     echo "   made through the HAProxy OpenManager interface only."
@@ -40,6 +43,17 @@ if [[ "$QUIET_MODE" != "true" ]]; then
     echo ""
     echo "=========================================="
     echo ""
+    
+    # Create automatic backup BEFORE asking for confirmation
+    if [[ -f "$HAPROXY_CONFIG_PATH" ]]; then
+        BACKUP_PATH="${HAPROXY_CONFIG_PATH}.initial-backup"
+        if [[ ! -f "$BACKUP_PATH" ]]; then
+            echo "📦 Creating backup: $BACKUP_PATH"
+            cp "$HAPROXY_CONFIG_PATH" "$BACKUP_PATH" && echo "✅ Backup created successfully" || echo "⚠️  Backup failed"
+            echo ""
+        fi
+    fi
+    
     read -p "Do you understand and wish to continue? (Y/N): " -n 1 -r
     echo ""
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
