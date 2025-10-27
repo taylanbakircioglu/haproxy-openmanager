@@ -1,0 +1,297 @@
+/**
+ * Tests for SSLManagement component
+ */
+import React from 'react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { message } from 'antd';
+import SSLManagement from '../SSLManagement';
+
+// Mock Ant Design components and message
+jest.mock('antd', () => ({
+  ...jest.requireActual('antd'),
+  message: {
+    success: jest.fn(),
+    error: jest.fn(),
+    loading: jest.fn(() => jest.fn())
+  }
+}));
+
+// Mock API calls
+const mockAxios = {
+  get: jest.fn(),
+  post: jest.fn(),
+  put: jest.fn(),
+  delete: jest.fn()
+};
+
+jest.mock('axios', () => mockAxios);
+
+// Mock ClusterContext
+const mockClusterContext = {
+  selectedCluster: { id: 1, name: 'test-cluster' }
+};
+
+jest.mock('../contexts/ClusterContext', () => ({
+  useCluster: () => mockClusterContext
+}));
+
+describe('SSLManagement Component', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Mock localStorage
+    Object.defineProperty(window, 'localStorage', {
+      value: {
+        getItem: jest.fn(),
+        setItem: jest.fn(),
+        removeItem: jest.fn(),
+      },
+      writable: true,
+    });
+  });
+
+  const mockSSLCertificates = [
+    {
+      id: 1,
+      name: 'test-ssl',
+      primary_domain: 'example.com',
+      certificate_content: '-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----',
+      expiry_date: '2025-12-31T23:59:59Z',
+      is_global: false,
+      cluster_ids: [1],
+      has_pending_config: false,
+      last_config_status: 'APPLIED'
+    },
+    {
+      id: 2,
+      name: 'global-ssl',
+      primary_domain: '*.example.com',
+      certificate_content: '-----BEGIN CERTIFICATE-----\ntest2\n-----END CERTIFICATE-----',
+      expiry_date: '2026-06-30T23:59:59Z',
+      is_global: true,
+      cluster_ids: [],
+      has_pending_config: true,
+      last_config_status: 'PENDING'
+    }
+  ];
+
+  it('renders SSL certificates table', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: { ssl_certificates: mockSSLCertificates } });
+    
+    render(<SSLManagement />);
+    
+    await waitFor(() => {
+      expect(screen.getByText('test-ssl')).toBeInTheDocument();
+      expect(screen.getByText('global-ssl')).toBeInTheDocument();
+      expect(screen.getByText('example.com')).toBeInTheDocument();
+    });
+  });
+
+  it('shows global and cluster-specific filter switches', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: { ssl_certificates: mockSSLCertificates } });
+    
+    render(<SSLManagement />);
+    
+    expect(screen.getByText('Global')).toBeInTheDocument();
+    expect(screen.getByText('Cluster Specific')).toBeInTheDocument();
+  });
+
+  it('filters certificates by global/cluster-specific', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: { ssl_certificates: mockSSLCertificates } });
+    
+    render(<SSLManagement />);
+    
+    await waitFor(() => {
+      expect(screen.getByText('test-ssl')).toBeInTheDocument();
+      expect(screen.getByText('global-ssl')).toBeInTheDocument();
+    });
+
+    // Toggle off global filter
+    const globalSwitch = screen.getByRole('switch', { name: /global/i });
+    fireEvent.click(globalSwitch);
+
+    // Should only show cluster-specific certificates
+    expect(screen.getByText('test-ssl')).toBeInTheDocument();
+    expect(screen.queryByText('global-ssl')).not.toBeInTheDocument();
+  });
+
+  it('persists filter state in localStorage', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: { ssl_certificates: mockSSLCertificates } });
+    
+    render(<SSLManagement />);
+    
+    const globalSwitch = screen.getByRole('switch', { name: /global/i });
+    fireEvent.click(globalSwitch);
+
+    expect(window.localStorage.setItem).toHaveBeenCalledWith('sslFilters', JSON.stringify({
+      showGlobal: false,
+      showClusterSpecific: true
+    }));
+  });
+
+  it('opens create SSL modal', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: { ssl_certificates: mockSSLCertificates } });
+    mockAxios.get.mockResolvedValueOnce({ data: { clusters: [{ id: 1, name: 'cluster1' }] } });
+    
+    render(<SSLManagement />);
+    
+    const createButton = screen.getByText('Create SSL Certificate');
+    fireEvent.click(createButton);
+
+    expect(screen.getByText('Create SSL Certificate')).toBeInTheDocument();
+    expect(screen.getByLabelText('Certificate Name')).toBeInTheDocument();
+    expect(screen.getByLabelText('Certificate Content')).toBeInTheDocument();
+  });
+
+  it('disables target clusters when global is selected', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: { ssl_certificates: mockSSLCertificates } });
+    mockAxios.get.mockResolvedValueOnce({ data: { clusters: [{ id: 1, name: 'cluster1' }] } });
+    
+    render(<SSLManagement />);
+    
+    const createButton = screen.getByText('Create SSL Certificate');
+    fireEvent.click(createButton);
+
+    // Select Global certificate type
+    const globalRadio = screen.getByLabelText('Global (All Clusters)');
+    fireEvent.click(globalRadio);
+
+    // Target clusters should be disabled
+    const targetClustersSelect = screen.getByLabelText('Target Clusters');
+    expect(targetClustersSelect).toBeDisabled();
+  });
+
+  it('creates SSL certificate successfully', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: { ssl_certificates: [] } });
+    mockAxios.get.mockResolvedValueOnce({ data: { clusters: [{ id: 1, name: 'cluster1' }] } });
+    mockAxios.post.mockResolvedValueOnce({ data: { message: 'SSL certificate created successfully' } });
+    
+    render(<SSLManagement />);
+    
+    const createButton = screen.getByText('Create SSL Certificate');
+    fireEvent.click(createButton);
+
+    // Fill form
+    fireEvent.change(screen.getByLabelText('Certificate Name'), { target: { value: 'new-ssl' } });
+    fireEvent.change(screen.getByLabelText('Certificate Content'), { 
+      target: { value: '-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----' } 
+    });
+    fireEvent.change(screen.getByLabelText('Private Key'), { 
+      target: { value: '-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----' } 
+    });
+
+    // Submit form
+    const submitButton = screen.getByText('Create Certificate');
+    fireEvent.click(submitButton);
+
+    await waitFor(() => {
+      expect(mockAxios.post).toHaveBeenCalledWith('/api/ssl/certificates', expect.objectContaining({
+        name: 'new-ssl',
+        certificate_content: '-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----',
+        private_key_content: '-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----'
+      }));
+      expect(message.success).toHaveBeenCalledWith('SSL certificate created successfully');
+    });
+  });
+
+  it('shows apply button for pending SSL certificates', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: { ssl_certificates: mockSSLCertificates } });
+    
+    render(<SSLManagement />);
+    
+    await waitFor(() => {
+      // Should show apply button for pending certificate
+      const applyButtons = screen.getAllByText('Apply');
+      expect(applyButtons.length).toBeGreaterThan(0);
+    });
+  });
+
+  it('shows correct config status', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: { ssl_certificates: mockSSLCertificates } });
+    
+    render(<SSLManagement />);
+    
+    await waitFor(() => {
+      expect(screen.getByText('APPLIED')).toBeInTheDocument();
+      expect(screen.getByText('PENDING')).toBeInTheDocument();
+    });
+  });
+
+  it('displays expiry status correctly', async () => {
+    const certificateWithExpiry = {
+      ...mockSSLCertificates[0],
+      expiry_date: '2025-01-15T23:59:59Z', // Soon to expire
+      expires_soon: true
+    };
+    
+    mockAxios.get.mockResolvedValueOnce({ 
+      data: { ssl_certificates: [certificateWithExpiry] } 
+    });
+    
+    render(<SSLManagement />);
+    
+    await waitFor(() => {
+      expect(screen.getByText('Expires Soon')).toBeInTheDocument();
+    });
+  });
+
+  it('handles SSL certificate deletion', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: { ssl_certificates: mockSSLCertificates } });
+    mockAxios.delete.mockResolvedValueOnce({ data: { message: 'SSL certificate deleted successfully' } });
+    
+    render(<SSLManagement />);
+    
+    await waitFor(() => {
+      const deleteButtons = screen.getAllByText('Delete');
+      fireEvent.click(deleteButtons[0]);
+    });
+
+    // Confirm deletion
+    const confirmButton = screen.getByText('Yes');
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(mockAxios.delete).toHaveBeenCalledWith('/api/ssl/certificates/1');
+      expect(message.success).toHaveBeenCalledWith('SSL certificate deleted successfully');
+    });
+  });
+
+  it('shows agent sync status', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: { ssl_certificates: mockSSLCertificates } });
+    
+    render(<SSLManagement />);
+    
+    await waitFor(() => {
+      // Should show agent sync status column
+      expect(screen.getByText('Agent Sync')).toBeInTheDocument();
+    });
+  });
+
+  it('handles API errors gracefully', async () => {
+    mockAxios.get.mockRejectedValueOnce(new Error('API Error'));
+    
+    render(<SSLManagement />);
+    
+    await waitFor(() => {
+      expect(message.error).toHaveBeenCalledWith('Failed to fetch SSL certificates');
+    });
+  });
+
+  it('validates form inputs', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: { ssl_certificates: [] } });
+    mockAxios.get.mockResolvedValueOnce({ data: { clusters: [{ id: 1, name: 'cluster1' }] } });
+    
+    render(<SSLManagement />);
+    
+    const createButton = screen.getByText('Create SSL Certificate');
+    fireEvent.click(createButton);
+
+    // Try to submit empty form
+    const submitButton = screen.getByText('Create Certificate');
+    fireEvent.click(submitButton);
+
+    // Should show validation errors
+    await waitFor(() => {
+      expect(screen.getByText('Please enter certificate name')).toBeInTheDocument();
+    });
+  });
+});

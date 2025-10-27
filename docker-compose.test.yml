@@ -1,0 +1,50 @@
+# Docker Compose override for testing
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.test.yml up --build
+
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      # Build args to control test execution
+      args:
+        SKIP_TESTS: "false"  # Set to "true" to skip tests during development
+    environment:
+      - PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+      - PYTHONPATH=/app
+    
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        SKIP_TESTS: "false"  # Set to "true" to skip tests during development
+    environment:
+      - CI=true  # Enable CI mode for tests
+
+# Test-only services
+  backend-test:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.test
+    command: pytest tests/ -v --cov=backend --cov-report=html --cov-report=term
+    volumes:
+      - ./backend/htmlcov:/app/htmlcov
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - DATABASE_URL=postgresql://haproxy_user:haproxy_pass@postgres:5432/haproxy_test_db
+      - REDIS_URL=redis://redis:6379/1
+
+  frontend-test:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.test
+    command: npm run test:coverage
+    volumes:
+      - ./frontend/coverage:/app/coverage
+    environment:
+      - CI=true

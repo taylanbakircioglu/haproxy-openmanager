@@ -1,0 +1,123 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: haproxy-openmanager
+      component: postgres
+  template:
+    metadata:
+      labels:
+        app: haproxy-openmanager
+        component: postgres
+    spec:
+      serviceAccountName: haproxy-openmanager-postgres
+      initContainers:
+      - name: postgres-init
+        image: postgres:15-alpine
+        command: ['/bin/sh', '-c']
+        args:
+        - |
+          # Create postgresql data subdirectory if it doesn't exist
+          mkdir -p /var/lib/postgresql/data/pgdata
+          
+          # Remove lost+found if it exists (common in mounted volumes)
+          rm -rf /var/lib/postgresql/data/lost+found 2>/dev/null || true
+          
+          echo "🔍 Checking PostgreSQL data directory..."
+          
+          # Check if database already exists
+          if [ -d /var/lib/postgresql/data/pgdata ] && [ "$(ls -A /var/lib/postgresql/data/pgdata 2>/dev/null)" ]; then
+            echo "✅ Existing database found - preserving data"
+            echo "📊 Database will be reused (no data loss)"
+          else
+            echo "🆕 Empty database directory - init scripts will run automatically"
+          fi
+          
+          # Set proper ownership (if allowed)
+          chown -R $(id -u):$(id -g) /var/lib/postgresql/data/pgdata 2>/dev/null || true
+          
+          echo "✅ PostgreSQL data directory prepared - ready to start"
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        - name: POSTGRES_INITDB_ARGS
+          value: "--auth-host=md5 --auth-local=trust"
+        - name: POSTGRES_DB
+          value: "haproxy_openmanager"
+        - name: POSTGRES_USER
+          value: "haproxy_user"
+        envFrom:
+        - secretRef:
+            name: postgres-secret
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1024Mi"
+            cpu: "1000m"
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - haproxy_user
+            - -d
+            - haproxy_openmanager
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - haproxy_user
+            - -d
+            - haproxy_openmanager
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: postgres
+spec:
+  selector:
+    app: haproxy-openmanager
+    component: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  type: ClusterIP

@@ -1,0 +1,32 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: postgres
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: ibm02-csi-rwo-storageclass
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: redis
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: ibm02-csi-rwo-storageclass

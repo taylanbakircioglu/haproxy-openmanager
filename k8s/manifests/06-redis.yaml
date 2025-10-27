@@ -1,0 +1,79 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: haproxy-openmanager
+      component: redis
+  template:
+    metadata:
+      labels:
+        app: haproxy-openmanager
+        component: redis
+    spec:
+      serviceAccountName: haproxy-openmanager-redis
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        command:
+          - redis-server
+          - /usr/local/etc/redis/redis.conf
+        ports:
+        - containerPort: 6379
+          name: redis
+        volumeMounts:
+        - name: redis-config
+          mountPath: /usr/local/etc/redis/redis.conf
+          subPath: redis.conf
+          readOnly: true
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "100m"
+          limits:
+            memory: "3Gi"
+            cpu: 1
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: redis-config
+        configMap:
+          name: redis-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: redis
+spec:
+  selector:
+    app: haproxy-openmanager
+    component: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+    name: redis
+  type: ClusterIP

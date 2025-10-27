@@ -1,0 +1,252 @@
+/**
+ * Tests for ApplyManagement component
+ */
+import React from 'react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { message } from 'antd';
+import ApplyManagement from '../ApplyManagement';
+
+// Mock Ant Design message
+jest.mock('antd', () => ({
+  ...jest.requireActual('antd'),
+  message: {
+    success: jest.fn(),
+    error: jest.fn(),
+    loading: jest.fn(() => jest.fn()) // Returns cleanup function
+  }
+}));
+
+// Mock API calls
+const mockAxios = {
+  get: jest.fn(),
+  post: jest.fn(),
+  delete: jest.fn(),
+  patch: jest.fn()
+};
+
+jest.mock('axios', () => mockAxios);
+
+// Mock ClusterContext
+const mockClusterContext = {
+  selectedCluster: { id: 1, name: 'test-cluster' }
+};
+
+jest.mock('../contexts/ClusterContext', () => ({
+  useCluster: () => mockClusterContext
+}));
+
+describe('ApplyManagement Component', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  const mockPendingChanges = {
+    backend_changes: [
+      { id: 1, name: 'backend1', last_config_status: 'PENDING' }
+    ],
+    frontend_changes: [
+      { id: 2, name: 'frontend1', last_config_status: 'PENDING' }
+    ],
+    ssl_certificates: [
+      { id: 3, name: 'ssl1', last_config_status: 'PENDING' }
+    ],
+    other_versions: [
+      { id: 4, version_name: 'waf-1-create-123', status: 'PENDING' }
+    ]
+  };
+
+  const mockAppliedVersions = [
+    { id: 5, version_name: 'apply-consolidated-456', status: 'APPLIED', created_at: '2025-01-01T12:00:00Z' }
+  ];
+
+  const mockRejectedVersions = [
+    { id: 6, version_name: 'backend-2-update-789', status: 'REJECTED', created_at: '2025-01-01T11:00:00Z' }
+  ];
+
+  it('renders pending changes tab by default', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: mockPendingChanges });
+    
+    render(<ApplyManagement />);
+    
+    expect(screen.getByText('Pending Changes')).toBeInTheDocument();
+    expect(screen.getByText('Backend Changes')).toBeInTheDocument();
+    expect(screen.getByText('Frontend Changes')).toBeInTheDocument();
+    expect(screen.getByText('SSL Certificate Changes')).toBeInTheDocument();
+  });
+
+  it('categorizes pending changes correctly', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: mockPendingChanges });
+    
+    render(<ApplyManagement />);
+    
+    await waitFor(() => {
+      expect(screen.getByText('backend1')).toBeInTheDocument();
+      expect(screen.getByText('frontend1')).toBeInTheDocument();
+      expect(screen.getByText('ssl1')).toBeInTheDocument();
+    });
+  });
+
+  it('shows Apply All button when there are pending changes', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: mockPendingChanges });
+    
+    render(<ApplyManagement />);
+    
+    await waitFor(() => {
+      expect(screen.getByText('Apply All Changes')).toBeInTheDocument();
+      expect(screen.getByText('Reject All Changes')).toBeInTheDocument();
+    });
+  });
+
+  it('handles apply all changes', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: mockPendingChanges });
+    mockAxios.post.mockResolvedValueOnce({ data: { message: 'Changes applied successfully' } });
+    
+    render(<ApplyManagement />);
+    
+    await waitFor(() => {
+      const applyButton = screen.getByText('Apply All Changes');
+      fireEvent.click(applyButton);
+    });
+
+    await waitFor(() => {
+      expect(mockAxios.post).toHaveBeenCalledWith('/api/clusters/1/apply-changes');
+      expect(message.success).toHaveBeenCalledWith('Changes applied successfully');
+    });
+  });
+
+  it('handles reject all changes', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: mockPendingChanges });
+    mockAxios.delete.mockResolvedValueOnce({ data: { message: 'Changes rejected successfully' } });
+    
+    render(<ApplyManagement />);
+    
+    await waitFor(() => {
+      const rejectButton = screen.getByText('Reject All Changes');
+      fireEvent.click(rejectButton);
+    });
+
+    await waitFor(() => {
+      expect(mockAxios.delete).toHaveBeenCalledWith('/api/clusters/1/pending-changes');
+      expect(message.success).toHaveBeenCalledWith('Changes rejected successfully');
+    });
+  });
+
+  it('switches to Applied tab and shows applied versions', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: mockPendingChanges });
+    mockAxios.get.mockResolvedValueOnce({ data: { versions: mockAppliedVersions } });
+    
+    render(<ApplyManagement />);
+    
+    const appliedTab = screen.getByText('Applied');
+    fireEvent.click(appliedTab);
+
+    await waitFor(() => {
+      expect(screen.getByText('apply-consolidated-456')).toBeInTheDocument();
+    });
+  });
+
+  it('switches to Rejected tab and shows rejected versions', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: mockPendingChanges });
+    mockAxios.get.mockResolvedValueOnce({ data: { versions: mockRejectedVersions } });
+    
+    render(<ApplyManagement />);
+    
+    const rejectedTab = screen.getByText('Rejected');
+    fireEvent.click(rejectedTab);
+
+    await waitFor(() => {
+      expect(screen.getByText('backend-2-update-789')).toBeInTheDocument();
+    });
+  });
+
+  it('handles undo rejected change', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: mockPendingChanges });
+    mockAxios.get.mockResolvedValueOnce({ data: { versions: mockRejectedVersions } });
+    mockAxios.patch.mockResolvedValueOnce({ data: { message: 'Change restored to pending' } });
+    
+    render(<ApplyManagement />);
+    
+    // Switch to rejected tab
+    const rejectedTab = screen.getByText('Rejected');
+    fireEvent.click(rejectedTab);
+
+    await waitFor(() => {
+      const undoButton = screen.getByText('Undo');
+      fireEvent.click(undoButton);
+    });
+
+    await waitFor(() => {
+      expect(mockAxios.patch).toHaveBeenCalledWith('/api/clusters/1/config-versions/6/undo-reject');
+      expect(message.success).toHaveBeenCalledWith('Change restored to pending');
+    });
+  });
+
+  it('shows empty state when no pending changes', async () => {
+    const emptyChanges = {
+      backend_changes: [],
+      frontend_changes: [],
+      ssl_certificates: [],
+      other_versions: []
+    };
+    
+    mockAxios.get.mockResolvedValueOnce({ data: emptyChanges });
+    
+    render(<ApplyManagement />);
+    
+    await waitFor(() => {
+      expect(screen.getByText('No pending changes')).toBeInTheDocument();
+    });
+  });
+
+  it('handles API errors gracefully', async () => {
+    mockAxios.get.mockRejectedValueOnce(new Error('API Error'));
+    
+    render(<ApplyManagement />);
+    
+    await waitFor(() => {
+      expect(message.error).toHaveBeenCalledWith('Failed to fetch pending changes');
+    });
+  });
+
+  it('shows config version diff modal', async () => {
+    mockAxios.get.mockResolvedValueOnce({ data: mockPendingChanges });
+    mockAxios.get.mockResolvedValueOnce({ 
+      data: { 
+        diff: '+ new line\n- old line',
+        version_name: 'test-version'
+      } 
+    });
+    
+    render(<ApplyManagement />);
+    
+    await waitFor(() => {
+      const viewChangesButton = screen.getAllByText('View Changes')[0];
+      fireEvent.click(viewChangesButton);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Configuration Changes')).toBeInTheDocument();
+      expect(screen.getByText('+ new line')).toBeInTheDocument();
+    });
+  });
+
+  it('filters SSL changes correctly', async () => {
+    const sslChanges = {
+      ...mockPendingChanges,
+      other_versions: [
+        { id: 4, version_name: 'ssl-1-create-123', status: 'PENDING' },
+        { id: 5, version_name: 'waf-1-create-456', status: 'PENDING' }
+      ]
+    };
+    
+    mockAxios.get.mockResolvedValueOnce({ data: sslChanges });
+    
+    render(<ApplyManagement />);
+    
+    await waitFor(() => {
+      // SSL version should be in SSL section, not Other section
+      expect(screen.getByText('SSL Certificate Changes (1)')).toBeInTheDocument();
+      expect(screen.getByText('Other Pending Versions (1)')).toBeInTheDocument();
+    });
+  });
+});

@@ -1,0 +1,82 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: haproxy-openmanager
+      component: nginx
+  template:
+    metadata:
+      labels:
+        app: haproxy-openmanager
+        component: nginx
+    spec:
+      serviceAccountName: haproxy-openmanager-nginx
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 8080
+          name: http
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+          readOnly: true
+        - name: nginx-cache
+          mountPath: /var/cache/nginx
+        - name: nginx-run
+          mountPath: /var/run
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "400m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: nginx-config
+      - name: nginx-cache
+        emptyDir: {}
+      - name: nginx-run
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: nginx
+spec:
+  selector:
+    app: haproxy-openmanager
+    component: nginx
+  ports:
+  - port: 80
+    targetPort: 8080
+    name: http
+  type: ClusterIP

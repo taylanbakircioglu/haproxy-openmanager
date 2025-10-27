@@ -1,0 +1,230 @@
+"""
+Tests for entity sync calculations and agent sync status
+"""
+import pytest
+from unittest.mock import AsyncMock, patch
+from fastapi import HTTPException
+
+class TestEntitySyncCalculations:
+    """Test entity-specific agent sync calculations"""
+    
+    @pytest.mark.asyncio
+    async def test_entity_sync_active_entity(self, mock_db_connection, mock_get_current_user):
+        """Test entity sync for active entity"""
+        
+        # Mock active entity
+        mock_db_connection.fetchrow.side_effect = [
+            {"id": 1, "last_config_status": "APPLIED", "is_active": True}  # Active entity
+        ]
+        
+        # Mock agents
+        mock_db_connection.fetch.return_value = [
+            {"id": 1, "name": "agent1", "status": "online", "applied_config_version": "backend-1-create-123"},
+            {"id": 2, "name": "agent2", "status": "online", "applied_config_version": "backend-1-create-123"}
+        ]
+        
+        # Mock entity-specific version
+        mock_db_connection.fetchval.side_effect = [
+            "backend-1-create-123",  # Entity-specific version
+            None  # No newer version check
+        ]
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user):
+            
+            from routers.cluster import get_entity_agent_sync_status
+            result = await get_entity_agent_sync_status(1, "backends", 1, "Bearer token")
+            
+            assert result["entity_id"] == 1
+            assert result["entity_type"] == "backends"
+            assert result["last_config_status"] == "APPLIED"
+            assert result["sync_status"]["total_agents"] == 2
+            assert result["sync_status"]["synced_agents"] == 2
+            assert result["sync_status"]["unsynced_agents"] == 0
+    
+    @pytest.mark.asyncio
+    async def test_entity_sync_inactive_entity_fallback(self, mock_db_connection, mock_get_current_user):
+        """Test entity sync fallback to inactive entity"""
+        
+        # Mock entity lookup - no active, then inactive
+        mock_db_connection.fetchrow.side_effect = [
+            None,  # No active entity
+            {"id": 1, "last_config_status": "APPLIED", "is_active": False}  # Inactive entity
+        ]
+        
+        mock_db_connection.fetch.return_value = [
+            {"id": 1, "name": "agent1", "status": "online", "applied_config_version": "v1"}
+        ]
+        mock_db_connection.fetchval.return_value = "v1"
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user):
+            
+            from routers.cluster import get_entity_agent_sync_status
+            result = await get_entity_agent_sync_status(1, "backends", 1, "Bearer token")
+            
+            assert result["entity_id"] == 1
+            assert result["last_config_status"] == "APPLIED"
+            # Should find the inactive entity
+            assert result["sync_status"]["total_agents"] == 1
+    
+    @pytest.mark.asyncio
+    async def test_entity_sync_not_found(self, mock_db_connection, mock_get_current_user):
+        """Test entity sync when entity doesn't exist"""
+        
+        # Mock no entity found
+        mock_db_connection.fetchrow.side_effect = [None, None]  # Neither active nor inactive
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user):
+            
+            from routers.cluster import get_entity_agent_sync_status
+            
+            with pytest.raises(HTTPException) as exc_info:
+                await get_entity_agent_sync_status(1, "backends", 999, "Bearer token")
+            
+            assert exc_info.value.status_code == 404
+            assert "not found" in str(exc_info.value.detail)
+    
+    @pytest.mark.asyncio
+    async def test_entity_sync_version_matching(self, mock_db_connection, mock_get_current_user):
+        """Test entity sync with version matching logic"""
+        
+        mock_db_connection.fetchrow.return_value = {
+            "id": 1, "last_config_status": "APPLIED", "is_active": True
+        }
+        
+        # Mock agents with different applied versions
+        mock_db_connection.fetch.return_value = [
+            {"id": 1, "name": "agent1", "status": "online", "applied_config_version": "backend-1-create-123"},
+            {"id": 2, "name": "agent2", "status": "online", "applied_config_version": "apply-consolidated-456"},
+            {"id": 3, "name": "agent3", "status": "offline", "applied_config_version": "old-version-789"}
+        ]
+        
+        # Mock entity-specific version
+        mock_db_connection.fetchval.side_effect = [
+            "backend-1-create-123",  # Entity-specific version
+            1,  # Agent 2 has newer version
+            0   # Agent 3 doesn't have newer version
+        ]
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user):
+            
+            from routers.cluster import get_entity_agent_sync_status
+            result = await get_entity_agent_sync_status(1, "backends", 1, "Bearer token")
+            
+            # Should have 2 synced agents (agent1 exact match, agent2 newer version)
+            assert result["sync_status"]["total_agents"] == 3
+            assert result["sync_status"]["synced_agents"] == 2
+            assert result["sync_status"]["unsynced_agents"] == 1
+    
+    @pytest.mark.asyncio
+    async def test_entity_sync_consolidated_version_fallback(self, mock_db_connection, mock_get_current_user):
+        """Test entity sync fallback to consolidated version"""
+        
+        mock_db_connection.fetchrow.return_value = {
+            "id": 1, "last_config_status": "APPLIED", "is_active": True
+        }
+        
+        mock_db_connection.fetch.return_value = [
+            {"id": 1, "name": "agent1", "status": "online", "applied_config_version": "apply-consolidated-456"}
+        ]
+        
+        # Mock version lookups - no entity-specific, use consolidated
+        mock_db_connection.fetchval.side_effect = [
+            None,  # No entity-specific version
+            "apply-consolidated-456",  # Consolidated version
+            None   # No newer version check needed
+        ]
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user):
+            
+            from routers.cluster import get_entity_agent_sync_status
+            result = await get_entity_agent_sync_status(1, "backends", 1, "Bearer token")
+            
+            assert result["sync_status"]["synced_agents"] == 1
+            assert result["latest_applied_version"] == "apply-consolidated-456"
+
+class TestSSLEntitySync:
+    """Test SSL-specific entity sync"""
+    
+    @pytest.mark.asyncio
+    async def test_ssl_entity_sync_file_deployment(self, mock_db_connection, mock_get_current_user):
+        """Test SSL entity sync considers file deployment"""
+        
+        # Mock SSL certificate
+        mock_db_connection.fetchrow.side_effect = [
+            {"id": 1, "name": "test-ssl", "primary_domain": "example.com"},  # SSL cert
+            {"version_name": "ssl-1-create-123"}  # Latest SSL version
+        ]
+        
+        # Mock agents
+        mock_db_connection.fetch.return_value = [
+            {"id": 1, "name": "agent1", "status": "online", "applied_config_version": "ssl-1-create-123", "last_seen": "2025-01-01"},
+            {"id": 2, "name": "agent2", "status": "offline", "applied_config_version": None, "last_seen": "2025-01-01"}
+        ]
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user):
+            
+            from routers.cluster import get_ssl_certificate_agent_sync_status
+            result = await get_ssl_certificate_agent_sync_status(1, 1, "Bearer token")
+            
+            assert result["sync_status"]["total_agents"] == 2
+            assert result["sync_status"]["synced_agents"] == 1  # Only online agent with correct version
+            assert result["sync_status"]["unsynced_agents"] == 1
+            
+            # Check agent details
+            agents = result["agents"]
+            assert len(agents) == 2
+            assert agents[0]["ssl_file_deployed"] == True  # Online + correct version
+            assert agents[1]["ssl_file_deployed"] == False  # Offline
+
+class TestEntitySyncValidation:
+    """Test entity sync input validation"""
+    
+    @pytest.mark.asyncio
+    async def test_invalid_entity_type(self, mock_db_connection, mock_get_current_user):
+        """Test entity sync with invalid entity type"""
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user):
+            
+            from routers.cluster import get_entity_agent_sync_status
+            
+            with pytest.raises(HTTPException) as exc_info:
+                await get_entity_agent_sync_status(1, "invalid_type", 1, "Bearer token")
+            
+            assert exc_info.value.status_code == 400
+            assert "Invalid entity type" in str(exc_info.value.detail)
+    
+    @pytest.mark.asyncio
+    async def test_valid_entity_types(self, mock_db_connection, mock_get_current_user):
+        """Test that all valid entity types are accepted"""
+        
+        valid_types = ['waf_rules', 'frontends', 'backends', 'backend_servers']
+        
+        mock_db_connection.fetchrow.return_value = {
+            "id": 1, "last_config_status": "APPLIED", "is_active": True
+        }
+        mock_db_connection.fetch.return_value = []
+        mock_db_connection.fetchval.return_value = None
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user):
+            
+            from routers.cluster import get_entity_agent_sync_status
+            
+            for entity_type in valid_types:
+                result = await get_entity_agent_sync_status(1, entity_type, 1, "Bearer token")
+                assert result["entity_type"] == entity_type

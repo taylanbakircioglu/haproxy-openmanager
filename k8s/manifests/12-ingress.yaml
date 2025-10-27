@@ -1,0 +1,146 @@
+---
+kind: Ingress
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: haproxy-openmanager-ingress
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: ingress
+  annotations:
+    # OpenShift specific annotations
+    route.openshift.io/termination: "edge"
+    haproxy.router.openshift.io/timeout: 600s
+    # Additional OpenShift ingress annotations
+    haproxy.router.openshift.io/balance: roundrobin
+    haproxy.router.openshift.io/disable_cookies: "false"
+    # CORS headers for API access
+    haproxy.router.openshift.io/set-header: |
+      Access-Control-Allow-Origin: *
+      Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS
+      Access-Control-Allow-Headers: Content-Type,Authorization
+spec:
+  tls:
+    - hosts:
+        - haproxy-openmanager.example.com
+      secretName: haproxy-openmanager-tls
+  rules:
+    - host: haproxy-openmanager.example.com
+      http:
+        paths:
+          # Frontend React App (served through nginx)
+          - path: /
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: nginx
+                port:
+                  number: 80
+          # Backend API routes (proxied through nginx)
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: nginx
+                port:
+                  number: 80
+          # Health check endpoint
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: nginx
+                port:
+                  number: 80
+---
+# Alternative: Direct Backend Access (if needed)
+kind: Ingress
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: haproxy-openmanager-backend-direct
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: backend-ingress
+  annotations:
+    route.openshift.io/termination: "edge"
+    haproxy.router.openshift.io/timeout: 600s
+    # Backend specific settings
+    haproxy.router.openshift.io/balance: leastconn
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  tls:
+    - hosts:
+        - api.haproxy-openmanager.example.com
+      secretName: haproxy-openmanager-tls
+  rules:
+    - host: api.haproxy-openmanager.example.com
+      http:
+        paths:
+          # Direct backend API access  
+          - path: /
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+          # API documentation
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+          # API health check
+          - path: /api/health
+            pathType: Exact
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+---
+# Development/Testing: Frontend Only Access (if needed)
+kind: Ingress
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: haproxy-openmanager-frontend-direct
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: frontend-ingress
+  annotations:
+    route.openshift.io/termination: "edge"
+    haproxy.router.openshift.io/timeout: 300s
+    # Frontend specific settings
+    haproxy.router.openshift.io/balance: roundrobin
+    # Static file caching
+    nginx.ingress.kubernetes.io/expires: "1d"
+    nginx.ingress.kubernetes.io/add-base-url: "true"
+spec:
+  tls:
+    - hosts:
+        - frontend.haproxy-openmanager.example.com
+      secretName: haproxy-openmanager-tls
+  rules:
+    - host: frontend.haproxy-openmanager.example.com
+      http:
+        paths:
+          # Frontend React App direct access
+          - path: /
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 3000
+          # Static assets
+          - path: /static
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 3000 

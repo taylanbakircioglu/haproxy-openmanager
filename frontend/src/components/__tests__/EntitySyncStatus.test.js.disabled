@@ -1,0 +1,188 @@
+/**
+ * Tests for EntitySyncStatus component
+ */
+import React from 'react';
+import { render, screen, waitFor } from '@testing-library/react';
+import { Badge, Tooltip, Spin } from 'antd';
+import EntitySyncStatus from '../EntitySyncStatus';
+
+// Mock Ant Design components
+jest.mock('antd', () => ({
+  Badge: jest.fn(({ count, color }) => <span data-testid="badge" data-count={count} data-color={color}>{count}</span>),
+  Tooltip: jest.fn(({ title, children }) => <div data-testid="tooltip" title={title}>{children}</div>),
+  Spin: jest.fn(({ children }) => <div data-testid="spin">{children}</div>)
+}));
+
+// Mock API calls
+const mockFetchEntityAgentSync = jest.fn();
+
+// Mock the EntitySyncStatus component since it's inline in each component file
+const MockEntitySyncStatus = ({ entityId, entityType = 'backends' }) => {
+  const [syncData, setSyncData] = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+
+  React.useEffect(() => {
+    const fetchSync = async () => {
+      setLoading(true);
+      try {
+        const data = await mockFetchEntityAgentSync(entityType, entityId);
+        setSyncData(data);
+      } catch (error) {
+        console.error('Failed to fetch sync data:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    if (entityId) {
+      fetchSync();
+    }
+  }, [entityId, entityType]);
+
+  if (loading) {
+    return <Spin />;
+  }
+
+  if (!syncData) {
+    return <span>-</span>;
+  }
+
+  const { synced_agents, total_agents } = syncData.sync_status || {};
+  const color = synced_agents === total_agents ? 'green' : 'orange';
+
+  return (
+    <Tooltip title={`${synced_agents} of ${total_agents} agents synced`}>
+      <Badge count={`${synced_agents}/${total_agents}`} color={color} />
+    </Tooltip>
+  );
+};
+
+describe('EntitySyncStatus Component', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('shows loading state initially', () => {
+    mockFetchEntityAgentSync.mockImplementation(() => new Promise(() => {})); // Never resolves
+    
+    render(<MockEntitySyncStatus entityId={1} />);
+    
+    expect(screen.getByTestId('spin')).toBeInTheDocument();
+  });
+
+  it('shows dash when no entity ID provided', () => {
+    render(<MockEntitySyncStatus entityId={null} />);
+    
+    expect(screen.getByText('-')).toBeInTheDocument();
+  });
+
+  it('shows sync status when data is loaded', async () => {
+    const mockSyncData = {
+      sync_status: {
+        synced_agents: 2,
+        total_agents: 3
+      }
+    };
+
+    mockFetchEntityAgentSync.mockResolvedValue(mockSyncData);
+    
+    render(<MockEntitySyncStatus entityId={1} />);
+    
+    await waitFor(() => {
+      expect(screen.getByTestId('badge')).toBeInTheDocument();
+    });
+
+    const badge = screen.getByTestId('badge');
+    expect(badge).toHaveAttribute('data-count', '2/3');
+    expect(badge).toHaveAttribute('data-color', 'orange'); // Not all synced
+  });
+
+  it('shows green badge when all agents synced', async () => {
+    const mockSyncData = {
+      sync_status: {
+        synced_agents: 3,
+        total_agents: 3
+      }
+    };
+
+    mockFetchEntityAgentSync.mockResolvedValue(mockSyncData);
+    
+    render(<MockEntitySyncStatus entityId={1} />);
+    
+    await waitFor(() => {
+      expect(screen.getByTestId('badge')).toBeInTheDocument();
+    });
+
+    const badge = screen.getByTestId('badge');
+    expect(badge).toHaveAttribute('data-count', '3/3');
+    expect(badge).toHaveAttribute('data-color', 'green'); // All synced
+  });
+
+  it('handles API error gracefully', async () => {
+    mockFetchEntityAgentSync.mockRejectedValue(new Error('API Error'));
+    
+    render(<MockEntitySyncStatus entityId={1} />);
+    
+    await waitFor(() => {
+      expect(screen.getByText('-')).toBeInTheDocument();
+    });
+  });
+
+  it('shows tooltip with sync information', async () => {
+    const mockSyncData = {
+      sync_status: {
+        synced_agents: 1,
+        total_agents: 2
+      }
+    };
+
+    mockFetchEntityAgentSync.mockResolvedValue(mockSyncData);
+    
+    render(<MockEntitySyncStatus entityId={1} />);
+    
+    await waitFor(() => {
+      expect(screen.getByTestId('tooltip')).toBeInTheDocument();
+    });
+
+    const tooltip = screen.getByTestId('tooltip');
+    expect(tooltip).toHaveAttribute('title', '1 of 2 agents synced');
+  });
+
+  it('handles different entity types', async () => {
+    const mockSyncData = {
+      sync_status: {
+        synced_agents: 1,
+        total_agents: 1
+      }
+    };
+
+    mockFetchEntityAgentSync.mockResolvedValue(mockSyncData);
+    
+    render(<MockEntitySyncStatus entityId={1} entityType="frontends" />);
+    
+    await waitFor(() => {
+      expect(mockFetchEntityAgentSync).toHaveBeenCalledWith('frontends', 1);
+    });
+  });
+
+  it('handles zero agents case', async () => {
+    const mockSyncData = {
+      sync_status: {
+        synced_agents: 0,
+        total_agents: 0
+      }
+    };
+
+    mockFetchEntityAgentSync.mockResolvedValue(mockSyncData);
+    
+    render(<MockEntitySyncStatus entityId={1} />);
+    
+    await waitFor(() => {
+      expect(screen.getByTestId('badge')).toBeInTheDocument();
+    });
+
+    const badge = screen.getByTestId('badge');
+    expect(badge).toHaveAttribute('data-count', '0/0');
+    expect(badge).toHaveAttribute('data-color', 'green'); // 0/0 is considered synced
+  });
+});

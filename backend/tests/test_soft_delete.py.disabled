@@ -1,0 +1,224 @@
+"""
+Tests for soft delete functionality and unique constraints
+"""
+import pytest
+from unittest.mock import AsyncMock, patch
+from fastapi import HTTPException
+
+# Import routers to test
+from routers.backend import create_backend, add_server_to_backend
+from routers.frontend import create_frontend
+from routers.ssl import create_ssl_certificate
+from models.backend import BackendConfig, ServerConfig
+from models import FrontendConfig
+from models.ssl import SSLCertificateCreate
+
+class TestSoftDeleteUniqueConstraints:
+    """Test soft delete behavior with unique constraints"""
+    
+    @pytest.mark.asyncio
+    async def test_backend_soft_delete_allows_name_reuse(self, mock_db_connection, mock_get_current_user):
+        """Test that soft deleted backends allow name reuse"""
+        
+        # Mock database responses
+        mock_db_connection.fetchrow.side_effect = [
+            None,  # First check: backend name doesn't exist
+            {"id": 1, "name": "test-backend", "cluster_id": 1},  # After creation
+            None,  # Second check: no active backend with same name (soft deleted)
+            {"id": 2, "name": "test-backend", "cluster_id": 1}   # Second creation
+        ]
+        mock_db_connection.fetchval.side_effect = [1, 1, 2, 1]  # Backend IDs and user ID
+        
+        backend_config = BackendConfig(
+            name="test-backend",
+            balance_method="roundrobin",
+            mode="http",
+            cluster_id=1
+        )
+        
+        with patch('routers.backend.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.backend.close_database_connection'), \
+             patch('routers.backend.get_current_user_from_token', return_value=mock_get_current_user), \
+             patch('routers.backend.validate_user_cluster_access'), \
+             patch('routers.backend.generate_haproxy_config_for_cluster', return_value="# config"), \
+             patch('routers.backend.log_user_activity'):
+            
+            # First creation should succeed
+            result1 = await create_backend(backend_config, "Bearer token")
+            assert result1["message"] == "Backend 'test-backend' created successfully"
+            
+            # Second creation should also succeed (first one was soft deleted)
+            result2 = await create_backend(backend_config, "Bearer token")
+            assert result2["message"] == "Backend 'test-backend' created successfully"
+            
+            # Verify unique constraint query includes is_active = TRUE
+            calls = mock_db_connection.fetchrow.call_args_list
+            unique_check_calls = [call for call in calls if "is_active = TRUE" in str(call)]
+            assert len(unique_check_calls) >= 2, "Should check is_active = TRUE for unique constraints"
+    
+    @pytest.mark.asyncio
+    async def test_server_soft_delete_allows_name_reuse(self, mock_db_connection):
+        """Test that soft deleted servers allow name reuse within same backend"""
+        
+        # Mock database responses
+        mock_db_connection.fetchrow.side_effect = [
+            {"name": "test-backend", "cluster_id": 1},  # Backend exists
+            None,  # First check: server name doesn't exist
+            {"name": "test-backend", "cluster_id": 1},  # Backend exists again
+            None   # Second check: no active server with same name (soft deleted)
+        ]
+        mock_db_connection.fetchval.side_effect = [1, 1, 2, 1]  # Server IDs and admin user
+        
+        server_config = ServerConfig(
+            server_name="test-server",
+            server_address="192.168.1.10",
+            server_port=80,
+            weight=100
+        )
+        
+        with patch('routers.backend.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.backend.close_database_connection'), \
+             patch('routers.backend.generate_haproxy_config_for_cluster', return_value="# config"):
+            
+            # First server creation
+            result1 = await add_server_to_backend(1, server_config)
+            assert "test-server" in result1["message"]
+            
+            # Second server creation should succeed (first was soft deleted)
+            result2 = await add_server_to_backend(1, server_config)
+            assert "test-server" in result2["message"]
+            
+            # Verify unique constraint includes is_active = TRUE
+            calls = mock_db_connection.fetchrow.call_args_list
+            unique_check_calls = [call for call in calls if "is_active = TRUE" in str(call)]
+            assert len(unique_check_calls) >= 2, "Should check is_active = TRUE for server unique constraints"
+    
+    @pytest.mark.asyncio
+    async def test_frontend_soft_delete_allows_name_reuse(self, mock_db_connection, mock_get_current_user):
+        """Test that soft deleted frontends allow name reuse"""
+        
+        # Mock database responses
+        mock_db_connection.fetchrow.side_effect = [
+            None,  # First check: frontend name doesn't exist
+            None   # Second check: no active frontend with same name
+        ]
+        mock_db_connection.fetchval.side_effect = [1, 1, 2, 1]  # Frontend IDs and user ID
+        
+        frontend_config = FrontendConfig(
+            name="test-frontend",
+            bind_address="0.0.0.0",
+            bind_port=80,
+            mode="http",
+            cluster_id=1
+        )
+        
+        with patch('routers.frontend.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.frontend.close_database_connection'), \
+             patch('routers.frontend.get_current_user_from_token', return_value=mock_get_current_user), \
+             patch('routers.frontend.validate_user_cluster_access'), \
+             patch('routers.frontend.generate_haproxy_config_for_cluster', return_value="# config"), \
+             patch('routers.frontend.log_user_activity'):
+            
+            # First creation
+            result1 = await create_frontend(frontend_config, None, "Bearer token")
+            assert result1["message"] == "Frontend 'test-frontend' created successfully"
+            
+            # Second creation should succeed
+            result2 = await create_frontend(frontend_config, None, "Bearer token")
+            assert result2["message"] == "Frontend 'test-frontend' created successfully"
+    
+    @pytest.mark.asyncio
+    async def test_ssl_soft_delete_allows_name_reuse(self, mock_db_connection, mock_get_current_user):
+        """Test that soft deleted SSL certificates allow name reuse"""
+        
+        # Mock SSL certificate data
+        ssl_config = SSLCertificateCreate(
+            name="test-ssl",
+            certificate_content="-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+            private_key_content="-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+            is_global=False,
+            cluster_ids=[1]
+        )
+        
+        # Mock database responses
+        mock_db_connection.fetchrow.side_effect = [
+            None,  # First check: SSL name doesn't exist
+            None   # Second check: no active SSL with same name
+        ]
+        mock_db_connection.fetchval.side_effect = [1, 1, 2, 1]  # SSL IDs and user ID
+        mock_db_connection.fetch.return_value = [{"id": 1}]  # Cluster exists
+        
+        with patch('routers.ssl.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.ssl.close_database_connection'), \
+             patch('routers.ssl.get_current_user_from_token', return_value=mock_get_current_user), \
+             patch('routers.ssl.validate_user_cluster_access'), \
+             patch('routers.ssl.parse_ssl_certificate') as mock_parse, \
+             patch('routers.ssl.log_user_activity'):
+            
+            # Mock SSL parsing
+            mock_parse.return_value = {
+                "primary_domain": "example.com",
+                "all_domains": ["example.com"],
+                "expiry_date": "2025-12-31 23:59:59"
+            }
+            
+            # First creation
+            result1 = await create_ssl_certificate(ssl_config, None, "Bearer token")
+            assert result1["message"] == "SSL certificate 'test-ssl' created successfully"
+            
+            # Second creation should succeed
+            result2 = await create_ssl_certificate(ssl_config, None, "Bearer token")
+            assert result2["message"] == "SSL certificate 'test-ssl' created successfully"
+
+class TestSoftDeleteBehavior:
+    """Test general soft delete behavior"""
+    
+    @pytest.mark.asyncio
+    async def test_soft_deleted_entities_not_in_listings(self, mock_db_connection):
+        """Test that soft deleted entities don't appear in listings"""
+        
+        # Mock active backends only (is_active = TRUE filter)
+        mock_db_connection.fetch.return_value = [
+            {"id": 1, "name": "active-backend", "is_active": True},
+            # Soft deleted backend should not appear
+        ]
+        
+        with patch('routers.backend.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.backend.close_database_connection'):
+            
+            from routers.backend import get_backends
+            result = await get_backends(cluster_id=1)
+            
+            # Should only return active backends
+            assert len(result["backends"]) == 1
+            assert result["backends"][0]["name"] == "active-backend"
+            
+            # Verify query includes is_active = TRUE filter
+            calls = mock_db_connection.fetch.call_args_list
+            assert any("is_active = TRUE" in str(call) for call in calls), "Should filter by is_active = TRUE"
+    
+    @pytest.mark.asyncio
+    async def test_entity_sync_handles_soft_deleted_entities(self, mock_db_connection, mock_get_current_user):
+        """Test that entity sync can handle soft deleted entities"""
+        
+        # Mock entity lookup - first active, then inactive
+        mock_db_connection.fetchrow.side_effect = [
+            None,  # No active entity
+            {"id": 1, "last_config_status": "APPLIED", "is_active": False}  # Inactive entity found
+        ]
+        mock_db_connection.fetch.return_value = [
+            {"id": 1, "name": "agent1", "status": "online", "applied_config_version": "v1"}
+        ]
+        mock_db_connection.fetchval.return_value = "v1"  # Latest version
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user):
+            
+            from routers.cluster import get_entity_agent_sync_status
+            result = await get_entity_agent_sync_status(1, "backends", 1, "Bearer token")
+            
+            # Should find the soft deleted entity and return sync status
+            assert result["entity_id"] == 1
+            assert result["last_config_status"] == "APPLIED"
+            assert result["sync_status"]["total_agents"] == 1

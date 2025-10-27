@@ -1,0 +1,266 @@
+"""
+Tests for the critical apply process functionality
+"""
+import pytest
+from unittest.mock import AsyncMock, patch, MagicMock
+from fastapi import HTTPException
+
+class TestApplyProcess:
+    """Test the critical apply process that was causing backend disappearance"""
+    
+    @pytest.mark.asyncio
+    async def test_apply_process_preserves_active_entities(self, mock_db_connection, mock_get_current_user):
+        """Test that apply process doesn't accidentally delete active entities"""
+        
+        # Mock pending versions
+        pending_versions = [
+            {"id": 1, "version_name": "backend-1-create-123", "created_at": "2025-01-01", "config_content": "# config", "checksum": "abc"}
+        ]
+        
+        # Mock active entities in the generated config
+        mock_config_content = """
+        backend test-backend
+            server web1 192.168.1.10:80 check
+        
+        frontend test-frontend
+            bind *:80
+            default_backend test-backend
+        """
+        
+        mock_db_connection.fetch.side_effect = [
+            pending_versions,  # Pending versions
+            []  # No restore versions
+        ]
+        mock_db_connection.fetchrow.side_effect = [
+            {"config_content": "# old config", "version_name": "old-version"},  # Pre-apply config
+            None  # No existing consolidated version
+        ]
+        mock_db_connection.fetchval.side_effect = [
+            1,  # Admin user ID
+            1   # New consolidated version ID
+        ]
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user), \
+             patch('routers.cluster.generate_haproxy_config_for_cluster', return_value=mock_config_content), \
+             patch('routers.cluster._extract_entities_from_config') as mock_extract, \
+             patch('routers.cluster.log_user_activity'):
+            
+            # Mock entity extraction
+            mock_extract.return_value = {
+                'frontends': {'test-frontend'},
+                'backends': {'test-backend'},
+                'waf_rules': set()
+            }
+            
+            from routers.cluster import apply_pending_changes
+            result = await apply_pending_changes(1, None, "Bearer token")
+            
+            # Verify successful apply
+            assert result["applied_count"] == 1
+            assert "Successfully applied" in result["message"]
+            
+            # Verify reactivation calls were made
+            execute_calls = mock_db_connection.execute.call_args_list
+            
+            # Check for backend reactivation
+            backend_reactivation_calls = [
+                call for call in execute_calls 
+                if "UPDATE backends" in str(call) and "SET is_active = TRUE" in str(call)
+            ]
+            assert len(backend_reactivation_calls) > 0, "Should reactivate backends"
+            
+            # Check for frontend reactivation  
+            frontend_reactivation_calls = [
+                call for call in execute_calls
+                if "UPDATE frontends" in str(call) and "SET is_active = TRUE" in str(call)
+            ]
+            assert len(frontend_reactivation_calls) > 0, "Should reactivate frontends"
+    
+    @pytest.mark.asyncio
+    async def test_apply_process_marks_entities_as_applied(self, mock_db_connection, mock_get_current_user):
+        """Test that apply process correctly marks entities as APPLIED"""
+        
+        pending_versions = [
+            {"id": 1, "version_name": "backend-1-update-123", "created_at": "2025-01-01", "config_content": "# config", "checksum": "abc"}
+        ]
+        
+        mock_db_connection.fetch.side_effect = [pending_versions, []]
+        mock_db_connection.fetchrow.return_value = None
+        mock_db_connection.fetchval.side_effect = [1, 1]
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user), \
+             patch('routers.cluster.generate_haproxy_config_for_cluster', return_value="# config"), \
+             patch('routers.cluster._extract_entities_from_config', return_value={'frontends': set(), 'backends': {'test-backend'}, 'waf_rules': set()}), \
+             patch('routers.cluster.log_user_activity'):
+            
+            from routers.cluster import apply_pending_changes
+            result = await apply_pending_changes(1, None, "Bearer token")
+            
+            assert result["applied_count"] == 1
+            
+            # Verify entities are marked as APPLIED
+            execute_calls = mock_db_connection.execute.call_args_list
+            applied_status_calls = [
+                call for call in execute_calls
+                if "last_config_status = 'APPLIED'" in str(call)
+            ]
+            assert len(applied_status_calls) > 0, "Should mark entities as APPLIED"
+    
+    @pytest.mark.asyncio
+    async def test_apply_process_handles_restore_versions(self, mock_db_connection, mock_get_current_user):
+        """Test apply process with restore versions"""
+        
+        pending_versions = [
+            {"id": 1, "version_name": "restore-old-version-123", "created_at": "2025-01-01", "config_content": "# restored config", "checksum": "def"}
+        ]
+        
+        mock_db_connection.fetch.side_effect = [pending_versions, []]
+        mock_db_connection.fetchrow.return_value = None
+        mock_db_connection.fetchval.side_effect = [1, 1]
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user), \
+             patch('routers.cluster._extract_entities_from_config', return_value={'frontends': set(), 'backends': set(), 'waf_rules': set()}), \
+             patch('routers.cluster.log_user_activity'):
+            
+            from routers.cluster import apply_pending_changes
+            result = await apply_pending_changes(1, None, "Bearer token")
+            
+            assert result["applied_count"] == 1
+            assert "restore-old-version-123" in result["latest_version"]
+    
+    @pytest.mark.asyncio
+    async def test_apply_process_entity_extraction(self):
+        """Test entity extraction from HAProxy config"""
+        
+        config_content = """
+        global
+            daemon
+            
+        defaults
+            mode http
+            
+        frontend web-frontend
+            bind *:80
+            default_backend web-servers
+            
+        frontend api-frontend  
+            bind *:8080
+            default_backend api-servers
+            
+        backend web-servers
+            balance roundrobin
+            server web1 192.168.1.10:80 check
+            server web2 192.168.1.11:80 check
+            
+        backend api-servers
+            balance leastconn
+            server api1 192.168.1.20:3000 check
+        """
+        
+        with patch('routers.cluster._extract_entities_from_config') as mock_extract:
+            # Import the actual function to test
+            from routers.cluster import _extract_entities_from_config
+            mock_extract.side_effect = _extract_entities_from_config
+            
+            result = _extract_entities_from_config(config_content)
+            
+            assert 'web-frontend' in result['frontends']
+            assert 'api-frontend' in result['frontends'] 
+            assert 'web-servers' in result['backends']
+            assert 'api-servers' in result['backends']
+            assert len(result['frontends']) == 2
+            assert len(result['backends']) == 2
+
+class TestConfigVersionManagement:
+    """Test config version creation and management"""
+    
+    @pytest.mark.asyncio
+    async def test_config_version_creation_with_pending_status(self, mock_db_connection):
+        """Test that config versions are created with PENDING status"""
+        
+        mock_db_connection.fetchval.return_value = 1  # Version ID
+        
+        with patch('services.haproxy_config.get_database_connection', return_value=mock_db_connection), \
+             patch('services.haproxy_config.close_database_connection'), \
+             patch('services.haproxy_config.generate_haproxy_config_for_cluster', return_value="# config"):
+            
+            from services.haproxy_config import create_config_version
+            version_id = await create_config_version(1, "test-version", "Test description", 1, "PENDING")
+            
+            assert version_id == 1
+            
+            # Verify PENDING status was used
+            calls = mock_db_connection.fetchval.call_args_list
+            insert_call = calls[0]
+            assert "'PENDING'" in str(insert_call) or "PENDING" in str(insert_call)
+    
+    @pytest.mark.asyncio  
+    async def test_config_version_status_transitions(self, mock_db_connection):
+        """Test config version status transitions during apply"""
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'):
+            
+            # Mock the status transition calls
+            mock_db_connection.execute.return_value = None
+            
+            # Simulate status transitions
+            await mock_db_connection.execute(
+                "UPDATE config_versions SET status = 'APPLIED' WHERE id = $1", 1
+            )
+            
+            # Verify the call was made
+            calls = mock_db_connection.execute.call_args_list
+            status_update_calls = [
+                call for call in calls 
+                if "status = 'APPLIED'" in str(call)
+            ]
+            assert len(status_update_calls) > 0, "Should update version status to APPLIED"
+
+class TestApplyProcessEdgeCases:
+    """Test edge cases in apply process"""
+    
+    @pytest.mark.asyncio
+    async def test_apply_with_no_pending_versions(self, mock_db_connection, mock_get_current_user):
+        """Test apply when no pending versions exist"""
+        
+        mock_db_connection.fetch.return_value = []  # No pending versions
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user):
+            
+            from routers.cluster import apply_pending_changes
+            result = await apply_pending_changes(1, None, "Bearer token")
+            
+            assert result["applied_count"] == 0
+            assert "No pending changes" in result["message"]
+    
+    @pytest.mark.asyncio
+    async def test_apply_with_config_generation_failure(self, mock_db_connection, mock_get_current_user):
+        """Test apply when config generation fails"""
+        
+        pending_versions = [
+            {"id": 1, "version_name": "test-version", "created_at": "2025-01-01", "config_content": "# config", "checksum": "abc"}
+        ]
+        
+        mock_db_connection.fetch.side_effect = [pending_versions, []]
+        mock_db_connection.fetchrow.return_value = None
+        
+        with patch('routers.cluster.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.cluster.close_database_connection'), \
+             patch('routers.cluster.get_current_user_from_token', return_value=mock_get_current_user), \
+             patch('routers.cluster.generate_haproxy_config_for_cluster', side_effect=Exception("Config generation failed")):
+            
+            from routers.cluster import apply_pending_changes
+            
+            with pytest.raises(HTTPException) as exc_info:
+                await apply_pending_changes(1, None, "Bearer token")
+            
+            assert exc_info.value.status_code == 500

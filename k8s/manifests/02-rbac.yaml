@@ -1,0 +1,41 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: haproxy-openmanager-role
+  labels:
+    app: haproxy-openmanager
+rules:
+# Allow reading nodes and services for backend discovery
+- apiGroups: [""]
+  resources: ["nodes", "services", "endpoints"]
+  verbs: ["get", "list"]
+# Allow reading pods for health checking  
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+# Allow reading network policies
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["get", "list"]
+# Allow reading ingress resources
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: haproxy-openmanager-binding
+  labels:
+    app: haproxy-openmanager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: haproxy-openmanager-role
+subjects:
+# Backend service account needs cluster access for remote HAProxy management
+- kind: ServiceAccount
+  name: haproxy-openmanager-backend
+  namespace: haproxy-openmanager 

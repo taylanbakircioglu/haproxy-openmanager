@@ -1,0 +1,17 @@
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+asyncpg>=0.29.0
+python-jose[cryptography]>=3.3.0
+PyJWT>=2.8.0
+cryptography>=41.0.0
+passlib[bcrypt]>=1.7.4
+python-multipart>=0.0.6
+python-dotenv>=1.0.0
+aiohttp>=3.9.0
+paramiko>=3.4.0
+redis>=5.0.0
+pydantic>=2.5.0
+bcrypt>=4.0.1
+slowapi>=0.1.9
+psutil>=5.9.8
+pytz>=2023.3

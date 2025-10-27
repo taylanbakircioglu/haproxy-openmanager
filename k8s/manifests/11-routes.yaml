@@ -1,0 +1,28 @@
+---
+# Main Route - All External Access through Nginx Reverse Proxy
+kind: Route
+apiVersion: route.openshift.io/v1
+metadata:
+  name: haproxy-openmanager
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: nginx
+  annotations:
+    haproxy.router.openshift.io/timeout: 600s
+    haproxy.router.openshift.io/balance: roundrobin
+    haproxy.router.openshift.io/disable_cookies: "false"
+spec:
+  to:
+    kind: Service
+    name: nginx
+    weight: 100
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+    destinationCACertificate: ''
+  host: haproxy-openmanager.example.com
+  path: /
+  port:
+    targetPort: http
+  alternateBackends: [] 

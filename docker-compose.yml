@@ -1,0 +1,130 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: haproxy-openmanager-db
+    environment:
+      POSTGRES_DB: haproxy_openmanager
+      POSTGRES_USER: haproxy_user
+      POSTGRES_PASSWORD: haproxy_pass
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - haproxy-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U haproxy_user -d haproxy_openmanager"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: haproxy-openmanager-redis
+    command: redis-server --maxmemory 2gb --maxmemory-policy volatile-lru --save ""
+    ports:
+      - "6379:6379"
+    networks:
+      - haproxy-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: haproxy-openmanager-backend
+    environment:
+      - DATABASE_URL=postgresql://haproxy_user:haproxy_pass@postgres:5432/haproxy_openmanager
+      - REDIS_URL=redis://redis:6379
+      - SECRET_KEY=your-secret-key-change-this-in-production
+      - DEBUG=False
+      - LOG_LEVEL=INFO
+      - PUBLIC_URL=http://localhost:8080
+      - MANAGEMENT_BASE_URL=http://localhost:8080
+    volumes:
+      - ./backend:/app
+      - haproxy_configs:/etc/haproxy
+    expose:
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - haproxy-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Frontend React App
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: haproxy-openmanager-frontend
+    environment:
+      - REACT_APP_API_URL=
+      - NODE_ENV=production
+    expose:
+      - "3000"
+    depends_on:
+      - backend
+    networks:
+      - haproxy-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: haproxy-openmanager-nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - haproxy-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # HAProxy Test Instance (for development/testing)
+  haproxy-test:
+    image: haproxy:2.8-alpine
+    container_name: haproxy-test-instance
+    volumes:
+      - ./haproxy/haproxy-simple.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "8081:80"
+      - "8404:8404"
+    networks:
+      - haproxy-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  haproxy_configs:
+
+networks:
+  haproxy-network:
+    driver: bridge

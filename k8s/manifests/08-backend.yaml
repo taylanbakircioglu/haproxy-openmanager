@@ -1,0 +1,92 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: haproxy-openmanager
+      component: backend
+  template:
+    metadata:
+      labels:
+        app: haproxy-openmanager
+        component: backend
+    spec:
+      serviceAccountName: haproxy-openmanager-backend
+      initContainers:
+      - name: wait-for-postgres
+        image: postgres:15-alpine
+        command: ['sh', '-c']
+        args:
+        - |
+          until pg_isready -h postgres -p 5432 -U haproxy_user; do
+            echo "Waiting for PostgreSQL...";
+            sleep 2;
+          done;
+          echo "PostgreSQL is ready!";
+        envFrom:
+        - secretRef:
+            name: postgres-secret
+      containers:
+      - name: backend
+        image: haproxy-openmanager-backend:latest  # Build and push your image to a registry
+        ports:
+        - containerPort: 8000
+          name: http
+        envFrom:
+        - configMapRef:
+            name: backend-config
+        - secretRef:
+            name: backend-secret
+        - secretRef:
+            name: postgres-secret
+        volumeMounts:
+        - name: haproxy-configs
+          mountPath: /etc/haproxy
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1024Mi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: haproxy-configs
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: haproxy-openmanager
+  labels:
+    app: haproxy-openmanager
+    component: backend
+spec:
+  selector:
+    app: haproxy-openmanager
+    component: backend
+  ports:
+  - port: 8000
+    targetPort: 8000
+    name: http
+  type: ClusterIP 

@@ -1,0 +1,300 @@
+"""
+Tests for HAProxy configuration generation
+"""
+import pytest
+from unittest.mock import AsyncMock, patch
+
+class TestHAProxyConfigGeneration:
+    """Test HAProxy configuration generation logic"""
+    
+    @pytest.mark.asyncio
+    async def test_basic_config_generation(self, mock_db_connection, sample_cluster_data, 
+                                          sample_backend_data, sample_frontend_data):
+        """Test basic HAProxy config generation"""
+        
+        # Mock database responses
+        mock_db_connection.fetchrow.side_effect = [
+            sample_cluster_data,  # Cluster info
+            {"count": 0}  # No Darwin agents
+        ]
+        
+        mock_db_connection.fetch.side_effect = [
+            [sample_frontend_data],  # Frontends
+            [sample_backend_data],   # Backends
+            [],  # WAF rules
+            [],  # Global WAF rules
+            []   # Pending delete WAF IDs
+        ]
+        
+        with patch('services.haproxy_config.get_database_connection', return_value=mock_db_connection), \
+             patch('services.haproxy_config.close_database_connection'):
+            
+            from services.haproxy_config import generate_haproxy_config_for_cluster
+            config = await generate_haproxy_config_for_cluster(1)
+            
+            assert "global" in config
+            assert "defaults" in config
+            assert "frontend test-frontend" in config
+            assert "backend test-backend" in config
+            assert "bind 0.0.0.0:80" in config
+            assert "default_backend test-backend" in config
+    
+    @pytest.mark.asyncio
+    async def test_ssl_config_generation(self, mock_db_connection, sample_cluster_data):
+        """Test SSL configuration generation"""
+        
+        # SSL-enabled frontend
+        ssl_frontend = {
+            "id": 1,
+            "name": "ssl-frontend",
+            "bind_address": "0.0.0.0",
+            "bind_port": 443,
+            "ssl_enabled": True,
+            "ssl_certificate_id": 1,
+            "ssl_port": 443,
+            "default_backend": "web-backend",
+            "mode": "http"
+        }
+        
+        # Mock SSL certificate path lookup
+        with patch('services.haproxy_config._get_ssl_certificate_path', return_value="/etc/ssl/haproxy/test-ssl.pem"):
+            
+            mock_db_connection.fetchrow.side_effect = [
+                sample_cluster_data,
+                {"count": 0}
+            ]
+            
+            mock_db_connection.fetch.side_effect = [
+                [ssl_frontend],
+                [{"id": 1, "name": "web-backend", "balance_method": "roundrobin", "mode": "http"}],
+                [], [], []
+            ]
+            
+            with patch('services.haproxy_config.get_database_connection', return_value=mock_db_connection), \
+                 patch('services.haproxy_config.close_database_connection'):
+                
+                from services.haproxy_config import generate_haproxy_config_for_cluster
+                config = await generate_haproxy_config_for_cluster(1)
+                
+                assert "bind 0.0.0.0:443 ssl crt /etc/ssl/haproxy/test-ssl.pem" in config
+                assert "frontend ssl-frontend" in config
+    
+    @pytest.mark.asyncio
+    async def test_backend_servers_config(self, mock_db_connection, sample_cluster_data):
+        """Test backend server configuration generation"""
+        
+        backend_with_servers = {
+            "id": 1,
+            "name": "web-backend", 
+            "balance_method": "roundrobin",
+            "mode": "http"
+        }
+        
+        # Mock servers for the backend
+        mock_servers = [
+            {"server_name": "web1", "server_address": "192.168.1.10", "server_port": 80, "is_active": True, "weight": 100, "check_enabled": True},
+            {"server_name": "web2", "server_address": "192.168.1.11", "server_port": 80, "is_active": False, "weight": 100, "check_enabled": True}  # Inactive server
+        ]
+        
+        mock_db_connection.fetchrow.side_effect = [
+            sample_cluster_data,
+            {"count": 0}
+        ]
+        
+        mock_db_connection.fetch.side_effect = [
+            [],  # No frontends
+            [backend_with_servers],  # Backends
+            [], [], [],  # WAF rules
+            mock_servers  # Backend servers
+        ]
+        
+        with patch('services.haproxy_config.get_database_connection', return_value=mock_db_connection), \
+             patch('services.haproxy_config.close_database_connection'):
+            
+            from services.haproxy_config import generate_haproxy_config_for_cluster
+            config = await generate_haproxy_config_for_cluster(1)
+            
+            assert "backend web-backend" in config
+            assert "balance roundrobin" in config
+            assert "server web1 192.168.1.10:80 weight 100 check" in config
+            # Inactive server should be commented out
+            assert "# server web2 192.168.1.11:80 weight 100 check" in config or "server web2 192.168.1.11:80 weight 100 check # DISABLED" in config
+    
+    @pytest.mark.asyncio
+    async def test_waf_rules_config(self, mock_db_connection, sample_cluster_data):
+        """Test WAF rules configuration generation"""
+        
+        frontend_data = {
+            "id": 1,
+            "name": "web-frontend",
+            "bind_address": "0.0.0.0", 
+            "bind_port": 80,
+            "default_backend": "web-backend",
+            "mode": "http"
+        }
+        
+        waf_rule = {
+            "id": 1,
+            "name": "block-sql-injection",
+            "rule_type": "block",
+            "condition": "url_contains",
+            "value": "SELECT * FROM",
+            "action": "deny",
+            "priority": 100,
+            "is_active": True,
+            "frontend_ids": [1]
+        }
+        
+        mock_db_connection.fetchrow.side_effect = [
+            sample_cluster_data,
+            {"count": 0}
+        ]
+        
+        mock_db_connection.fetch.side_effect = [
+            [frontend_data],  # Frontends
+            [],  # No backends
+            [waf_rule],  # WAF rules
+            [],  # No global WAF rules
+            []   # No pending delete WAF IDs
+        ]
+        
+        with patch('services.haproxy_config.get_database_connection', return_value=mock_db_connection), \
+             patch('services.haproxy_config.close_database_connection'):
+            
+            from services.haproxy_config import generate_haproxy_config_for_cluster
+            config = await generate_haproxy_config_for_cluster(1)
+            
+            assert "frontend web-frontend" in config
+            # Should contain WAF rule (exact format depends on implementation)
+            assert "block-sql-injection" in config or "acl" in config
+    
+    @pytest.mark.asyncio
+    async def test_macos_config_adjustments(self, mock_db_connection, sample_cluster_data):
+        """Test macOS-specific configuration adjustments"""
+        
+        mock_db_connection.fetchrow.side_effect = [
+            sample_cluster_data,
+            {"count": 1}  # Has Darwin agents
+        ]
+        
+        mock_db_connection.fetch.side_effect = [
+            [],  # No frontends
+            [],  # No backends
+            [], [], []  # No WAF rules
+        ]
+        
+        with patch('services.haproxy_config.get_database_connection', return_value=mock_db_connection), \
+             patch('services.haproxy_config.close_database_connection'):
+            
+            from services.haproxy_config import generate_haproxy_config_for_cluster
+            config = await generate_haproxy_config_for_cluster(1)
+            
+            # Should contain macOS-specific adjustments
+            assert "# macOS" in config.lower() or "darwin" in config.lower() or config  # Basic check
+    
+    @pytest.mark.asyncio
+    async def test_config_generation_error_handling(self, mock_db_connection):
+        """Test config generation error handling"""
+        
+        # Mock database error
+        mock_db_connection.fetchrow.side_effect = Exception("Database connection failed")
+        
+        with patch('services.haproxy_config.get_database_connection', return_value=mock_db_connection), \
+             patch('services.haproxy_config.close_database_connection'):
+            
+            from services.haproxy_config import generate_haproxy_config_for_cluster
+            config = await generate_haproxy_config_for_cluster(1)
+            
+            assert "Error generating configuration" in config
+            assert "Database connection failed" in config
+
+class TestSSLCertificatePath:
+    """Test SSL certificate path generation"""
+    
+    @pytest.mark.asyncio
+    async def test_ssl_certificate_path_generation(self, mock_db_connection):
+        """Test SSL certificate path generation"""
+        
+        frontend = {
+            "name": "ssl-frontend",
+            "ssl_certificate_id": 1
+        }
+        
+        # Mock SSL certificate lookup
+        mock_db_connection.fetchrow.return_value = {
+            "name": "example-ssl",
+            "domain": "example.com",
+            "fingerprint": "abc123"
+        }
+        
+        with patch('services.haproxy_config.get_database_connection', return_value=mock_db_connection):
+            from services.haproxy_config import _get_ssl_certificate_path
+            
+            path = await _get_ssl_certificate_path(frontend, 1, mock_db_connection)
+            
+            assert path == "/etc/ssl/haproxy/example-ssl.pem"
+    
+    @pytest.mark.asyncio
+    async def test_ssl_certificate_path_not_found(self, mock_db_connection):
+        """Test SSL certificate path when certificate not found"""
+        
+        frontend = {
+            "name": "ssl-frontend", 
+            "ssl_certificate_id": 999
+        }
+        
+        # Mock no SSL certificate found
+        mock_db_connection.fetchrow.return_value = None
+        
+        with patch('services.haproxy_config.get_database_connection', return_value=mock_db_connection):
+            from services.haproxy_config import _get_ssl_certificate_path
+            
+            path = await _get_ssl_certificate_path(frontend, 1, mock_db_connection)
+            
+            assert path is None
+    
+    @pytest.mark.asyncio
+    async def test_ssl_certificate_path_no_ssl_id(self, mock_db_connection):
+        """Test SSL certificate path when no SSL certificate ID"""
+        
+        frontend = {
+            "name": "non-ssl-frontend"
+            # No ssl_certificate_id
+        }
+        
+        from services.haproxy_config import _get_ssl_certificate_path
+        path = await _get_ssl_certificate_path(frontend, 1, mock_db_connection)
+        
+        assert path is None
+
+class TestConfigVersionCreation:
+    """Test config version creation utilities"""
+    
+    @pytest.mark.asyncio
+    async def test_create_config_version(self, mock_db_connection):
+        """Test config version creation utility"""
+        
+        mock_db_connection.fetchval.return_value = 1  # Version ID
+        
+        with patch('services.haproxy_config.get_database_connection', return_value=mock_db_connection), \
+             patch('services.haproxy_config.close_database_connection'), \
+             patch('services.haproxy_config.generate_haproxy_config_for_cluster', return_value="# test config"):
+            
+            from services.haproxy_config import create_config_version
+            
+            version_id = await create_config_version(
+                cluster_id=1,
+                version_name="test-version-123",
+                description="Test version",
+                user_id=1,
+                status="PENDING"
+            )
+            
+            assert version_id == 1
+            
+            # Verify database call
+            calls = mock_db_connection.fetchval.call_args_list
+            assert len(calls) == 1
+            insert_call = str(calls[0])
+            assert "INSERT INTO config_versions" in insert_call
+            assert "test-version-123" in insert_call

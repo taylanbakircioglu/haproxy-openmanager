@@ -1,0 +1,34 @@
+# Test-only Dockerfile for frontend
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Set environment for testing
+ENV npm_config_cache=/tmp/npmcache \
+    npm_config_fund=false \
+    npm_config_audit=false \
+    npm_config_progress=false \
+    CI=true
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN mkdir -p "$npm_config_cache" \
+    && npm config set maxsockets 5 \
+    && npm install --no-audit --no-fund --progress=false --legacy-peer-deps \
+    && npm cache clean --force \
+    && rm -rf "$npm_config_cache" ~/.npm
+
+# Copy source code
+COPY . .
+
+# Create non-root user
+RUN addgroup -g 1001 nodejs && \
+    adduser -D -u 1001 -G nodejs -h /home/reactjs reactjs && \
+    chown -R reactjs:nodejs /app
+
+USER reactjs
+
+# Default command for tests
+CMD ["npm", "run", "test:coverage"]

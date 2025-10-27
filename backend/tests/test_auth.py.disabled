@@ -1,0 +1,317 @@
+"""
+Tests for authentication and authorization
+"""
+import pytest
+from unittest.mock import AsyncMock, patch
+from fastapi import HTTPException
+import bcrypt
+
+class TestAuthentication:
+    """Test authentication functionality"""
+    
+    @pytest.mark.asyncio
+    async def test_successful_login(self, mock_db_connection):
+        """Test successful user login"""
+        
+        # Mock user data
+        password = "testpassword"
+        salt = bcrypt.gensalt()
+        hashed_password = bcrypt.hashpw(password.encode('utf-8'), salt)
+        
+        user_data = {
+            "id": 1,
+            "username": "testuser",
+            "email": "test@example.com",
+            "password_hash": hashed_password.decode('utf-8'),
+            "is_active": True,
+            "role": "admin"
+        }
+        
+        mock_db_connection.fetchrow.return_value = user_data
+        mock_db_connection.execute.return_value = None  # last_login update
+        
+        with patch('routers.auth.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.auth.close_database_connection'), \
+             patch('routers.auth.log_user_activity'):
+            
+            from routers.auth import login
+            from models.auth import LoginRequest
+            
+            login_request = LoginRequest(username="testuser", password=password)
+            result = await login(login_request, None)
+            
+            assert "access_token" in result
+            assert result["token_type"] == "bearer"
+            assert result["user"]["username"] == "testuser"
+            assert result["user"]["email"] == "test@example.com"
+    
+    @pytest.mark.asyncio
+    async def test_login_user_not_found(self, mock_db_connection):
+        """Test login with non-existent user"""
+        
+        mock_db_connection.fetchrow.return_value = None  # User not found
+        
+        with patch('routers.auth.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.auth.close_database_connection'):
+            
+            from routers.auth import login
+            from models.auth import LoginRequest
+            
+            login_request = LoginRequest(username="nonexistent", password="password")
+            
+            with pytest.raises(HTTPException) as exc_info:
+                await login(login_request, None)
+            
+            assert exc_info.value.status_code == 401
+            assert "Invalid username or password" in str(exc_info.value.detail)
+    
+    @pytest.mark.asyncio
+    async def test_login_inactive_user(self, mock_db_connection):
+        """Test login with inactive user"""
+        
+        user_data = {
+            "id": 1,
+            "username": "testuser",
+            "is_active": False,
+            "password_hash": "dummy_hash"
+        }
+        
+        mock_db_connection.fetchrow.return_value = user_data
+        
+        with patch('routers.auth.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.auth.close_database_connection'):
+            
+            from routers.auth import login
+            from models.auth import LoginRequest
+            
+            login_request = LoginRequest(username="testuser", password="password")
+            
+            with pytest.raises(HTTPException) as exc_info:
+                await login(login_request, None)
+            
+            assert exc_info.value.status_code == 401
+            assert "Account is deactivated" in str(exc_info.value.detail)
+    
+    @pytest.mark.asyncio
+    async def test_login_wrong_password(self, mock_db_connection):
+        """Test login with wrong password"""
+        
+        # Create a hash for a different password
+        correct_password = "correctpassword"
+        salt = bcrypt.gensalt()
+        hashed_password = bcrypt.hashpw(correct_password.encode('utf-8'), salt)
+        
+        user_data = {
+            "id": 1,
+            "username": "testuser",
+            "password_hash": hashed_password.decode('utf-8'),
+            "is_active": True
+        }
+        
+        mock_db_connection.fetchrow.return_value = user_data
+        
+        with patch('routers.auth.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.auth.close_database_connection'):
+            
+            from routers.auth import login
+            from models.auth import LoginRequest
+            
+            login_request = LoginRequest(username="testuser", password="wrongpassword")
+            
+            with pytest.raises(HTTPException) as exc_info:
+                await login(login_request, None)
+            
+            assert exc_info.value.status_code == 401
+            assert "Invalid username or password" in str(exc_info.value.detail)
+
+class TestAuthorization:
+    """Test authorization and access control"""
+    
+    @pytest.mark.asyncio
+    async def test_admin_user_cluster_access(self, mock_db_connection):
+        """Test admin user gets access to all clusters"""
+        
+        # Mock admin user
+        mock_db_connection.fetchval.side_effect = [
+            1,  # Cluster exists
+            True  # User is admin
+        ]
+        
+        with patch('routers.backend.get_database_connection', return_value=mock_db_connection):
+            from routers.backend import validate_user_cluster_access
+            
+            # Should not raise exception for admin
+            result = await validate_user_cluster_access(1, 1, mock_db_connection)
+            assert result == True
+    
+    @pytest.mark.asyncio
+    async def test_cluster_not_found(self, mock_db_connection):
+        """Test access validation when cluster doesn't exist"""
+        
+        mock_db_connection.fetchval.return_value = None  # Cluster not found
+        
+        with patch('routers.backend.get_database_connection', return_value=mock_db_connection):
+            from routers.backend import validate_user_cluster_access
+            
+            with pytest.raises(HTTPException) as exc_info:
+                await validate_user_cluster_access(1, 999, mock_db_connection)
+            
+            assert exc_info.value.status_code == 404
+            assert "Cluster not found" in str(exc_info.value.detail)
+    
+    @pytest.mark.asyncio
+    async def test_regular_user_with_pool_access(self, mock_db_connection):
+        """Test regular user with proper pool access"""
+        
+        mock_db_connection.fetchval.side_effect = [
+            1,    # Cluster exists
+            False,  # User is not admin
+            True   # user_pool_access table exists
+        ]
+        
+        # Mock user has access to the pool
+        mock_db_connection.fetchrow.return_value = {
+            "access_level": "full",
+            "id": 1,
+            "name": "test-cluster"
+        }
+        
+        with patch('routers.backend.get_database_connection', return_value=mock_db_connection):
+            from routers.backend import validate_user_cluster_access
+            
+            result = await validate_user_cluster_access(1, 1, mock_db_connection)
+            assert result == True
+    
+    @pytest.mark.asyncio
+    async def test_regular_user_no_pool_access(self, mock_db_connection):
+        """Test regular user without pool access"""
+        
+        mock_db_connection.fetchval.side_effect = [
+            1,     # Cluster exists
+            False,  # User is not admin
+            True    # user_pool_access table exists
+        ]
+        
+        # Mock user has no access to the pool
+        mock_db_connection.fetchrow.return_value = None
+        
+        with patch('routers.backend.get_database_connection', return_value=mock_db_connection):
+            from routers.backend import validate_user_cluster_access
+            
+            with pytest.raises(HTTPException) as exc_info:
+                await validate_user_cluster_access(1, 1, mock_db_connection)
+            
+            assert exc_info.value.status_code == 403
+            assert "You don't have access to this cluster" in str(exc_info.value.detail)
+    
+    @pytest.mark.asyncio
+    async def test_backward_compatibility_no_user_pool_table(self, mock_db_connection):
+        """Test backward compatibility when user_pool_access table doesn't exist"""
+        
+        mock_db_connection.fetchval.side_effect = [
+            1,     # Cluster exists
+            False,  # User is not admin
+            False   # user_pool_access table doesn't exist
+        ]
+        
+        with patch('routers.backend.get_database_connection', return_value=mock_db_connection):
+            from routers.backend import validate_user_cluster_access
+            
+            # Should allow access for backward compatibility
+            result = await validate_user_cluster_access(1, 1, mock_db_connection)
+            assert result == True
+
+class TestTokenValidation:
+    """Test JWT token validation"""
+    
+    def test_get_current_user_from_valid_token(self):
+        """Test extracting user from valid JWT token"""
+        
+        # Mock JWT payload
+        mock_payload = {
+            "user_id": 1,
+            "username": "testuser",
+            "email": "test@example.com",
+            "role": "admin"
+        }
+        
+        with patch('auth_middleware.jwt.decode', return_value=mock_payload):
+            from auth_middleware import get_current_user_from_token
+            
+            # This would normally be async, but we're mocking the JWT decode
+            # In actual test, you'd need to handle the async nature properly
+            pass  # Placeholder for actual token validation test
+    
+    def test_get_current_user_from_invalid_token(self):
+        """Test handling of invalid JWT token"""
+        
+        from jose import JWTError
+        
+        with patch('auth_middleware.jwt.decode', side_effect=JWTError("Invalid token")):
+            # Test would verify that invalid tokens are rejected
+            pass  # Placeholder for actual invalid token test
+    
+    def test_get_current_user_from_expired_token(self):
+        """Test handling of expired JWT token"""
+        
+        from jose import ExpiredSignatureError
+        
+        with patch('auth_middleware.jwt.decode', side_effect=ExpiredSignatureError("Token expired")):
+            # Test would verify that expired tokens are rejected
+            pass  # Placeholder for actual expired token test
+
+class TestUserCreation:
+    """Test user creation functionality"""
+    
+    @pytest.mark.asyncio
+    async def test_create_user_success(self, mock_db_connection, mock_get_current_user):
+        """Test successful user creation"""
+        
+        mock_db_connection.fetchrow.side_effect = [None, None]  # Username and email don't exist
+        mock_db_connection.fetchval.return_value = 2  # New user ID
+        
+        with patch('routers.user.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.user.close_database_connection'), \
+             patch('routers.user.get_current_user_from_token', return_value=mock_get_current_user), \
+             patch('routers.user.log_user_activity'):
+            
+            from routers.user import create_user
+            from models.user import UserCreate
+            
+            user_data = UserCreate(
+                username="newuser",
+                email="new@example.com",
+                password="password123",
+                full_name="New User",
+                role="user"
+            )
+            
+            result = await create_user(user_data, "Bearer token")
+            
+            assert "User created successfully" in result["message"]
+            assert result["user"]["username"] == "newuser"
+    
+    @pytest.mark.asyncio
+    async def test_create_user_duplicate_username(self, mock_db_connection, mock_get_current_user):
+        """Test user creation with duplicate username"""
+        
+        mock_db_connection.fetchrow.return_value = {"id": 1}  # Username exists
+        
+        with patch('routers.user.get_database_connection', return_value=mock_db_connection), \
+             patch('routers.user.close_database_connection'), \
+             patch('routers.user.get_current_user_from_token', return_value=mock_get_current_user):
+            
+            from routers.user import create_user
+            from models.user import UserCreate
+            
+            user_data = UserCreate(
+                username="existinguser",
+                email="new@example.com", 
+                password="password123"
+            )
+            
+            with pytest.raises(HTTPException) as exc_info:
+                await create_user(user_data, "Bearer token")
+            
+            assert exc_info.value.status_code == 400
+            assert "Username already exists" in str(exc_info.value.detail)

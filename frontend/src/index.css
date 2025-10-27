@@ -1,0 +1,114 @@
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.ant-layout {
+  min-height: 100vh;
+}
+
+/* Fix Input Text Alignment for search fields */
+.ant-input {
+  line-height: 1.5715;
+}
+
+.ant-input::placeholder {
+  line-height: 1.5715;
+}
+
+/* Complete reset approach for search inputs */
+.search-input *,
+.search-input *:before,
+.search-input *:after {
+  box-sizing: border-box !important;
+}
+
+.search-input,
+.search-input .ant-input,
+.search-input.ant-input,
+.search-input .ant-input-affix-wrapper,
+.search-input.ant-input-affix-wrapper,
+.search-input .ant-input-search,
+.search-input .ant-input-search .ant-input {
+  border: 1px solid #d9d9d9 !important;
+  border-radius: 6px !important;
+  box-shadow: none !important;
+  outline: none !important;
+  background: #fff !important;
+  transition: border-color 0.3s ease !important;
+}
+
+/* Completely remove all possible outlines and shadows */
+.search-input:focus,
+.search-input .ant-input:focus,
+.search-input.ant-input:focus,
+.search-input .ant-input-affix-wrapper:focus,
+.search-input.ant-input-affix-wrapper:focus,
+.search-input .ant-input-search:focus,
+.search-input .ant-input-search .ant-input:focus,
+.search-input .ant-input-focused,
+.search-input.ant-input-focused,
+.search-input .ant-input-affix-wrapper-focused,
+.search-input.ant-input-affix-wrapper-focused {
+  border: 1px solid #1890ff !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+.search-input:focus-visible,
+.search-input .ant-input:focus-visible,
+.search-input.ant-input:focus-visible,
+.search-input .ant-input-affix-wrapper:focus-visible,
+.search-input.ant-input-affix-wrapper:focus-visible {
+  border: 1px solid #1890ff !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+/* Hover states - simple and clean */
+.search-input:hover,
+.search-input .ant-input:hover,
+.search-input.ant-input:hover,
+.search-input .ant-input-affix-wrapper:hover,
+.search-input.ant-input-affix-wrapper:hover {
+  border-color: #40a9ff !important;
+}
+
+/* Remove all browser default styles completely */
+.search-input input,
+.search-input .ant-input {
+  -webkit-appearance: none !important;
+  -moz-appearance: none !important;
+  appearance: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  .search-input .ant-input,
+  .search-input.ant-input {
+    font-size: 16px !important;
+    min-height: 40px !important;
+  }
+}
+
+@media (max-width: 480px) {
+  .search-input {
+    width: 100% !important;
+    max-width: 200px;
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "scripts": {
+    "test": "react-scripts test",
+    "test:coverage": "react-scripts test --coverage --watchAll=false",
+    "test:ci": "CI=true react-scripts test --coverage --watchAll=false"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^13.4.0",
+    "@testing-library/jest-dom": "^5.16.4",
+    "@testing-library/user-event": "^14.4.3"
+  },
+  "jest": {
+    "collectCoverageFrom": [
+      "src/components/**/*.{js,jsx}",
+      "!src/components/**/*.test.{js,jsx}",
+      "!src/index.js"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "branches": 70,
+        "functions": 70,
+        "lines": 70,
+        "statements": 70
+      }
+    }
+  }
+}

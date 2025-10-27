@@ -1,0 +1,113 @@
+.demo-logo-vertical {
+  height: 64px;
+  margin: 16px;
+  margin-bottom: 24px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  overflow: hidden;
+}
+
+.ant-layout-sider-collapsed .demo-logo-vertical {
+  margin: 16px 8px;
+}
+
+/* Menu collapse animations */
+.ant-layout-sider {
+  transition: all 0.2s;
+}
+
+.ant-layout-sider-zero-width-trigger {
+  background: #1890ff;
+  border-radius: 0 6px 6px 0;
+}
+
+.ant-layout-sider-zero-width-trigger:hover {
+  background: #40a9ff;
+}
+
+/* Header improvements */
+.ant-layout-header {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.site-layout .site-layout-background {
+  background: #fff;
+}
+
+.ant-layout-content {
+  overflow: auto;
+}
+
+.ant-card {
+  margin-bottom: 16px;
+}
+
+.ant-statistic-content {
+  color: #1890ff;
+}
+
+.ant-menu-dark .ant-menu-item-selected {
+  background-color: #1890ff !important;
+}
+
+.status-indicator {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 8px;
+}
+
+.status-healthy {
+  background-color: #52c41a;
+}
+
+.status-unhealthy {
+  background-color: #f5222d;
+}
+
+.status-warning {
+  background-color: #faad14;
+}
+
+/* Apply Changes button pulse animation */
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 122, 0, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(255, 122, 0, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 122, 0, 0);
+  }
+}
+
+/* Fix Input placeholder alignment */
+.ant-input:not(textarea),
+.ant-input-affix-wrapper,
+.ant-input-number,
+.ant-select-selector {
+  display: flex;
+  align-items: center;
+}
+
+.ant-input:not(textarea)::placeholder,
+.ant-input-affix-wrapper input::placeholder {
+  line-height: normal;
+  vertical-align: middle;
+}
+
+/* Fix Form.Item label alignment */
+.ant-form-item-label {
+  padding-bottom: 4px;
+}
+
+.ant-form-item-label > label {
+  height: auto;
+  line-height: 1.5715;
+} 
