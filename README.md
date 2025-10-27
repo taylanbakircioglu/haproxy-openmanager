@@ -209,7 +209,7 @@ graph TB
 | **Database** | PostgreSQL 15 | Configuration storage, user management, agent tasks | 5432 |
 | **Cache** | Redis 7 | Session storage, performance metrics caching | 6379 |
 | **Reverse Proxy** | Nginx | Frontend/backend routing, SSL termination | 8080 |
-| **HAProxy Agent** | Python Service | Polls backend, applies configs, manages HAProxy | N/A |
+| **HAProxy Agent** | Bash Service | Polls backend, applies configs, manages HAProxy | N/A |
 | **HAProxy Instances** | HAProxy 2.8+ | Load balancer instances being managed by agents | 8404+ |
 
 ### Agent Pull Communication Flow - Detailed Entity Management
