@@ -274,6 +274,11 @@ const Configuration = () => {
       message.warning(`Agent '${agent.name}' is not online. Cannot retrieve configuration.`);
         return;
       }
+    
+    if (!selectedCluster) {
+      message.error('No cluster selected. Please select a cluster first.');
+      return;
+    }
       
     setSelectedAgent(agent);
     setConfigLoading(true);
@@ -283,10 +288,11 @@ const Configuration = () => {
     pollCountRef.current = 0;
     
     try {
-      // Create config request
+      // Create config request with cluster_id
       const response = await axios.post('/api/configuration/request', null, {
         params: {
           agent_name: agent.name,
+          cluster_id: selectedCluster.id,
           request_type: 'view'
         }
       });
@@ -326,16 +332,22 @@ const Configuration = () => {
       return;
     }
 
+    if (!selectedCluster) {
+      message.error('No cluster selected. Please select a cluster first.');
+      return;
+    }
+
     setSelectedAgent(agent);
     setConfigLoading(true);
     setProgressPercent(0);
     pollCountRef.current = 0;
     
     try {
-      // Create config request
+      // Create config request with cluster_id
       const response = await axios.post('/api/configuration/request', null, {
         params: {
           agent_name: agent.name,
+          cluster_id: selectedCluster.id,
           request_type: 'download'
         }
       });

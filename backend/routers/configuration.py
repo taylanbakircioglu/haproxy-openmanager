@@ -23,6 +23,7 @@ class ConfigResponse(BaseModel):
 @router.post("/request")
 async def create_config_request(
     agent_name: str = Query(..., description="Agent name"),
+    cluster_id: int = Query(..., description="Cluster ID"),
     request_type: str = Query(..., description="Request type: 'view' or 'download'"),
     authorization: str = Header(None)
 ):
@@ -35,17 +36,34 @@ async def create_config_request(
         
         conn = await get_database_connection()
         
-        # Get agent info
+        # Get agent info and verify it belongs to the cluster
         agent_info = await conn.fetchrow("""
-            SELECT a.id, a.name, a.status, hc.id as cluster_id
+            SELECT a.id, a.name, a.status, a.pool_id
             FROM agents a
-            LEFT JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
             WHERE a.name = $1
         """, agent_name)
         
         if not agent_info:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
+        
+        # Verify cluster belongs to agent's pool
+        cluster_info = await conn.fetchrow("""
+            SELECT id, name, pool_id
+            FROM haproxy_clusters
+            WHERE id = $1
+        """, cluster_id)
+        
+        if not cluster_info:
+            await close_database_connection(conn)
+            raise HTTPException(status_code=404, detail=f"Cluster ID {cluster_id} not found")
+        
+        if cluster_info['pool_id'] != agent_info['pool_id']:
+            await close_database_connection(conn)
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Agent '{agent_name}' does not belong to cluster '{cluster_info['name']}'"
+            )
         
         if agent_info['status'] != 'online':
             await close_database_connection(conn)
@@ -73,10 +91,10 @@ async def create_config_request(
         # Create new request
         request_id = await conn.fetchval("""
             INSERT INTO agent_config_requests (
-                agent_id, agent_name, request_type, status, requested_by
-            ) VALUES ($1, $2, $3, 'pending', $4)
+                agent_id, agent_name, cluster_id, request_type, status, requested_by
+            ) VALUES ($1, $2, $3, $4, 'pending', $5)
             RETURNING id
-        """, agent_info['id'], agent_name, request_type, current_user['id'])
+        """, agent_info['id'], agent_name, cluster_id, request_type, current_user['id'])
         
         await close_database_connection(conn)
         
@@ -88,12 +106,14 @@ async def create_config_request(
             resource_id=str(agent_info['id']),
             details={
                 'agent_name': agent_name,
+                'cluster_id': cluster_id,
+                'cluster_name': cluster_info['name'],
                 'request_type': request_type,
                 'request_id': request_id
             }
         )
         
-        logger.info(f"📄 CONFIG REQUEST: Created request #{request_id} for agent '{agent_name}' (type: {request_type})")
+        logger.info(f"📄 CONFIG REQUEST: Created request #{request_id} for agent '{agent_name}' in cluster '{cluster_info['name']}' (type: {request_type})")
         
         return {
             "request_id": request_id,

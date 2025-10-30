@@ -1518,6 +1518,7 @@ async def run_all_migrations():
     await ensure_agent_script_templates_table()
     await ensure_agent_activity_logs_table()
     await ensure_agent_config_management_tables()
+    await add_cluster_id_to_agent_config_requests()
     await fix_users_unique_constraints_for_soft_delete()
     
     logger.info("Database migrations completed successfully.")
@@ -2532,6 +2533,50 @@ async def ensure_agent_config_management_tables():
             await close_database_connection(conn)
         logger.error(f"Error creating agent configuration management tables: {e}")
         # Don't raise - this is not critical for system operation
+
+async def add_cluster_id_to_agent_config_requests():
+    """Add cluster_id column to agent_config_requests table
+    
+    This fixes the issue where config requests don't know which cluster they belong to,
+    causing wrong cluster to be selected when multiple clusters share the same pool.
+    """
+    conn = None
+    try:
+        conn = await get_database_connection()
+        
+        # Check if cluster_id column already exists
+        column_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'agent_config_requests' 
+                AND column_name = 'cluster_id'
+            )
+        """)
+        
+        if not column_exists:
+            # Add cluster_id column
+            await conn.execute("""
+                ALTER TABLE agent_config_requests 
+                ADD COLUMN cluster_id INTEGER REFERENCES haproxy_clusters(id) ON DELETE CASCADE
+            """)
+            
+            # Create index for performance
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agent_config_requests_cluster_id 
+                ON agent_config_requests(cluster_id)
+            """)
+            
+            logger.info("✅ Added cluster_id column to agent_config_requests table")
+        else:
+            logger.info("ℹ️  cluster_id column already exists in agent_config_requests table")
+        
+        await close_database_connection(conn)
+        
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"Error adding cluster_id to agent_config_requests: {e}")
+        # Don't raise - not critical for system operation
 
 async def fix_users_unique_constraints_for_soft_delete():
     """Fix users table unique constraints to support soft delete
