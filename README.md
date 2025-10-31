@@ -35,7 +35,6 @@ Modern, web-based management interface for HAProxy load balancers with multi-clu
    - [Backend Servers](#backend-servers---server-pool-management)
    - [SSL Certificates](#ssl-certificates---centralized-tlsssl-certificate-management)
    - [WAF Management](#waf-management---web-application-firewall)
-   - [Statistics](#statistics---advanced-analytics--reporting)
    - [Configuration](#configuration---haproxy-config-file-management)
    - [User Management](#user-management---access-control--authentication)
    - [Settings](#settings---system-configuration)
@@ -678,16 +677,6 @@ User Updates SSL in UI → All Agents Poll Backend (30s)
 - **Attack Monitoring**: Real-time attack detection and logging
 - **Rule Templates**: Pre-configured security rule templates
 - **Statistics Dashboard**: WAF activity analytics and blocked request metrics
-
-### 📊 **Statistics** - *Advanced Analytics & Reporting*
-- **Time-series Charts**: Response time, traffic volume, and error rate trends
-- **Performance Metrics**: Detailed frontend/backend performance analysis
-- **Traffic Analysis**: Request distribution and peak usage patterns
-- **Error Analytics**: HTTP status code distribution and error tracking
-- **Session Monitoring**: Active sessions and connection statistics
-- **Historical Data**: 1 hour to 30-day historical performance data
-- **Custom Filtering**: Frontend/backend specific statistics filtering
-- **Export Functionality**: CSV/JSON data export for external analysis
 
 ### ⚙️ **Configuration** - *HAProxy Config File Management*
 - **Syntax Editor**: Monaco editor with HAProxy syntax highlighting
