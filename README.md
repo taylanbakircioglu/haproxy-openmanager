@@ -2,6 +2,57 @@
 
 Modern, web-based management interface for HAProxy load balancers with multi-cluster support, agent-based pull architecture, and automated deployment capabilities.
 
+## 📋 Table of Contents
+
+1. [🎯 Project Overview](#project-overview)
+   - [Agent Pull Architecture](#agent-pull-architecture)
+   - [Features at a Glance](#features-at-a-glance)
+2. [📸 Screenshots](#screenshots)
+   - [Dashboard - Real-time Monitoring](#dashboard---real-time-monitoring)
+   - [Multi-Cluster Management](#multi-cluster-management)
+   - [Frontend Management](#frontend-management)
+   - [Configuration Management](#configuration-management)
+   - [Bulk Configuration Import](#bulk-configuration-import)
+   - [Apply Management & Version Control](#apply-management--version-control)
+   - [Agent & Security Management](#agent--security-management)
+3. [Key Capabilities](#key-capabilities)
+   - [Configuration & Entity Management](#configuration--entity-management)
+   - [Agent & Cluster Management](#agent--cluster-management)
+   - [Version Control & Change Management](#version-control--change-management)
+   - [Monitoring & Security](#monitoring--security)
+   - [Integration & API](#integration--api)
+4. [🏗️ Architecture](#architecture)
+   - [System Architecture with Agent Pull Model](#system-architecture-with-agent-pull-model)
+   - [Component Details](#component-details)
+   - [Agent Pull Communication Flow](#agent-pull-communication-flow---detailed-entity-management)
+5. [✨ Features & User Interface](#features--user-interface)
+   - [Pool Management](#pool-management---agent-pool-organization)
+   - [Agent Management](#agent-management---haproxy-agent-deployment--monitoring)
+   - [Cluster Management](#cluster-management---multi-cluster-haproxy-administration)
+   - [Apply Management](#apply-management---change-tracking--deployment)
+   - [Dashboard](#dashboard---main-overview--real-time-monitoring)
+   - [Frontend Management](#frontend-management---virtual-host--routing-configuration)
+   - [Backend Servers](#backend-servers---server-pool-management)
+   - [SSL Certificates](#ssl-certificates---centralized-tlsssl-certificate-management)
+   - [WAF Management](#waf-management---web-application-firewall)
+   - [Statistics](#statistics---advanced-analytics--reporting)
+   - [Configuration](#configuration---haproxy-config-file-management)
+   - [User Management](#user-management---access-control--authentication)
+   - [Settings](#settings---system-configuration)
+6. [🚀 Getting Started - First-Time Usage](#getting-started---first-time-usage)
+7. [📦 Installation](#installation)
+   - [Docker Installation](#docker-installation)
+   - [Kubernetes/OpenShift Installation](#kubernetesopenshift-installation)
+   - [Local Development](#local-development)
+8. [📋 Configuration](#configuration-1)
+9. [🔌 API Reference](#api-reference)
+10. [🐛 Troubleshooting](#troubleshooting)
+11. [🛠️ Development](#development)
+12. [📝 Contributing](#contributing)
+13. [📄 License](#license)
+14. [👨‍💻 Author](#author)
+15. [🤝 Support](#support)
+
 ## 🎯 Project Overview
 
 HAProxy OpenManager is a comprehensive management platform designed to simplify HAProxy administration across multiple environments. It provides a unified interface for managing remote HAProxy instances through an agent-based pull architecture, supporting multi-cluster configurations with centralized control.
@@ -33,171 +84,179 @@ Pool (Logical Grouping)
 
 This architecture provides better security (no inbound connections to HAProxy servers), resilience (agents can retry on failure), and scalability (backend doesn't track agent state).
 
-### Key Capabilities
+### Features at a Glance
 
-- **Agent-Based Management**: Lightweight agent service for secure, pull-based HAProxy management
-- **Pool Management**: Organize agents into logical pools for better cluster organization
-- **Multi-Cluster Support**: Manage multiple HAProxy clusters from a single interface with cluster selector
-- **Agent Installation Scripts**: Auto-generated platform-specific installation scripts (Linux/macOS)
-- **Configuration Synchronization**: Backends, frontends, SSL certificates, and WAF rules auto-sync to agents
-- **Apply Management**: Centralized change tracking and deployment status monitoring
-- **Real-time Monitoring**: Live statistics, health checks, and performance metrics
-- **Configuration Management**: Visual configuration editor with syntax highlighting and version history
-- **SSL Management**: Centralized certificate management with expiration tracking
-- **WAF Rules**: Web Application Firewall rule management and deployment
-- **User Management**: Role-based access control with admin and user roles
-- **REST API**: Complete API for programmatic access and integration
+✅ **Agent-Based Pull Architecture** - Secure, scalable management without inbound connections  
+✅ **Multi-Cluster & Pool Management** - Organize and manage multiple HAProxy clusters from one interface  
+✅ **Frontend/Backend/Server CRUD** - Complete entity management with visual UI  
+✅ **Bulk Config Import** - Import existing `haproxy.cfg` files instantly  
+✅ **Version Control & Rollback** - Every change versioned with one-click restore capability  
+✅ **Real-Time Monitoring** - Live stats, health checks, and performance dashboards  
+✅ **SSL Certificate Management** - Centralized SSL with expiration tracking  
+✅ **WAF Rules** - Web Application Firewall management and deployment  
+✅ **Agent Script Versioning** - Update agents via UI (Monaco editor) with auto-upgrade  
+✅ **Token-Based Agent Auth** - Secure token management with revoke/renew  
+✅ **Role-Based User Management** - Admin and user roles with granular permissions and access control  
+✅ **User Activity Audit Logs** - Complete audit trail of all system events  
+✅ **REST API** - Full programmatic access for automation and CI/CD integration
 
 ## 📸 Screenshots
 
 ### Dashboard - Real-time Monitoring
-![Dashboard Overview](docs/screenshots/dashboard-overview.png)
-*Overview tab showing system metrics, active servers, SSL certificates, and cluster agent health*
 
-![Performance Trends](docs/screenshots/performance-trends.png)
-*Performance Trends with request rate and response time heatmap (24h view)*
+**Dashboard** - Overview tab showing system metrics, active servers, SSL certificates, and cluster agent health
+![Dashboard - Overview](docs/screenshots/dashboard-overview.png)
 
-![Health Matrix](docs/screenshots/health-matrix.png)
-*Health Matrix showing backend servers with detailed health check status and response times*
+**Dashboard** - Performance Trends with request rate and response time heatmap (24h view)
+![Dashboard - Performance Trends](docs/screenshots/performance-trends.png)
 
-![Backends & Servers](docs/screenshots/backends-servers.png)
-*Backends & Servers tab with 165 servers across 56 backends, health status overview*
+**Dashboard** - Health Matrix showing backend servers with detailed health check status and response times
+![Dashboard - Health Matrix](docs/screenshots/health-matrix.png)
+
+**Backend Management** - Backends & Servers tab with 165 servers across 56 backends, health status overview
+![Backend Management - Backends & Servers](docs/screenshots/backends-servers.png)
+
+### Multi-Cluster Management
+
+**Multi-Cluster Management** - Cluster selector dropdown showing multiple clusters with agent pools and online agent counts - switch between different clusters
+![Multi-Cluster Management - Cluster Selector](docs/screenshots/cluster-selector.png)
+
+### Frontend Management
+
+**Frontend Management** - List view with SSL/TLS bindings, sync status, and config status
+![Frontend Management - List View](docs/screenshots/frontend-management.png)
+
+**Frontend Management** - Edit modal for configuring bind address, protocol mode, default backend, SSL/TLS, ACLs, and advanced options
+![Frontend Management - Edit Modal](docs/screenshots/frontend-edit.png)
 
 ### Configuration Management
 
-![Cluster Selector](docs/screenshots/cluster-selector.png)
-*Cluster selector showing multiple clusters with agent pools and online agent counts*
+**Configuration Management** - Backend server and pool configuration page
+![Configuration Management - Backend View](docs/screenshots/backend-configuration.png)
 
-![Frontend Management](docs/screenshots/frontend-management.png)
-*Frontend Management with SSL/TLS bindings, sync status, and config status*
+**Configuration Management** - Real-time configuration viewer to pull haproxy.cfg from live agents
+![Configuration Management - View Config](docs/screenshots/config-view.png)
 
-![Backend Configuration](docs/screenshots/backend-configuration.png)
-*Backend configuration with TCP mode, health checks, and server management*
+### Bulk Configuration Import
 
-![Configuration View](docs/screenshots/config-view.png)
-*Real-time configuration viewer - pull haproxy.cfg from live agents*
+**Bulk Config Import** - Paste existing haproxy.cfg and parse configuration
+![Bulk Config Import - Input](docs/screenshots/bulk-import.png)
+
+**Bulk Config Import** - Parsed entities showing 56 frontends, 55 backends, 165 servers with SSL and configuration recommendations
+![Bulk Config Import - Results](docs/screenshots/bulk-import-parsed.png)
 
 ### Apply Management & Version Control
 
+**Apply Management** - Pending changes and deployment history with version tracking
 ![Apply Management](docs/screenshots/apply-management.png)
-*Apply Management showing pending changes and deployment history with version tracking*
 
-![Version Diff](docs/screenshots/version-diff.png)
-*Configuration diff viewer showing added/removed lines with summary*
+**Version History** - Configuration diff viewer showing added/removed lines with summary
+![Version History - Diff Viewer](docs/screenshots/version-diff.png)
 
-![Version History](docs/screenshots/version-history.png)
-*Complete version history with restore capabilities and deployment status*
+**Version History** - Complete version history with restore capabilities and deployment status
+![Version History - Timeline](docs/screenshots/version-history.png)
 
 ### Agent & Security Management
 
-![Agent Setup](docs/screenshots/agent-setup.png)
-*Agent setup wizard - platform selection (Linux/macOS) and architecture (x86_64/ARM64)*
+**Agent Management** - Agent setup wizard with platform selection (Linux/macOS) and architecture (x86_64/ARM64)
+![Agent Management - Setup Wizard](docs/screenshots/agent-setup.png)
 
-![Agent Script](docs/screenshots/agent-script.png)
-*Generated installation script ready for deployment to target servers*
+**Agent Management** - Generated installation script ready for deployment to target servers
+![Agent Management - Script Generation](docs/screenshots/agent-script.png)
 
+**Security Management** - Agent API token management with active tokens, expiration tracking, and revoke capabilities
+![Security Management - API Tokens](docs/screenshots/security-token-management.png)
+
+**WAF Management** - WAF rule configuration with request filtering, rate limiting, and advanced options
 ![WAF Management](docs/screenshots/waf-management.png)
-*WAF rule configuration with request filtering, rate limiting, and advanced options*
 
 > 📝 **Note**: Screenshots show the actual production interface. Replace GitHub asset URLs with your own after uploading images to your repository's releases or issues.
+
+### Key Capabilities
+
+#### Configuration & Entity Management
+- **Frontend Management**: Create, edit, update, and delete frontend configurations with SSL bindings, ACL rules, and routing
+- **Backend Management**: Full CRUD operations for backend pools with load balancing algorithms and health checks
+- **Server Management**: Add, update, remove, and configure backend servers with weights, maintenance mode, and connection limits
+- **Bulk Configuration Import**: Import existing `haproxy.cfg` files to instantly manage all frontends, backends, and servers without manual recreation
+- **Configuration Synchronization**: All entities (backends, frontends, servers, SSL certificates, WAF rules) auto-sync to agents
+- **Configuration Viewer**: View live HAProxy configuration pulled from agents via Configuration Management page
+
+#### Agent & Cluster Management
+- **Agent-Based Management**: Lightweight agent service for secure, pull-based HAProxy management
+- **Pool Management**: Organize agents into logical pools for better cluster organization
+- **Multi-Cluster Support**: Manage multiple HAProxy clusters from a single interface with cluster selector
+- **Agent Token Management**: Secure token-based agent installation with token revoke and renew capabilities
+- **Agent Script Editor**: Monaco code editor for updating agent scripts via UI (not binary) - create new versions, rollback, and auto-upgrade all agents
+- **Platform-Specific Scripts**: Auto-generated installation scripts for Linux and macOS (x86_64/ARM64)
+
+#### Version Control & Change Management
+- **Apply Management**: Centralized change tracking and deployment status monitoring across all agents
+- **Version Control**: Every configuration change creates a versioned snapshot with complete history
+- **Configuration Restore**: Restore any previous configuration version with one-click rollback capability
+- **Diff Visualization**: See exactly what changed between versions with line-by-line comparison
+- **Change Tracking**: Track who made changes, when, and what entities were affected
+
+#### Monitoring & Security
+- **Real-time Monitoring**: Live statistics, health checks, and performance metrics from HAProxy stats socket
+- **SSL Management**: Centralized certificate management with expiration tracking and zero-downtime updates
+- **WAF Rules**: Web Application Firewall rule management and deployment for security protection
+- **User Management**: Role-based access control with admin and user roles
+- **User Activity Logs**: Complete audit trail of all user actions, configuration changes, and system events
+
+#### Integration & API
+- **REST API**: Complete API for programmatic access and integration with CI/CD pipelines
+- **Agent Pull Architecture**: Secure polling model - no inbound connections required to HAProxy servers
+- **Redis Cache**: High-performance metrics caching for dashboard with configurable retention
 
 ## 🏗️ Architecture
 
 ### System Architecture with Agent Pull Model
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'fontSize':'16px'}}}%%
 graph TB
-    subgraph USERS[" "]
-        USER["👤 HAProxy Manager<br/>(Admin/User)"]
+    subgraph UI_LAYER["🌐 User Interface Layer"]
+        USER["👤 Admin/User"] --> WEB["React UI<br/>Nginx Proxy<br/>:8080"]
     end
     
-    subgraph MGMT["🖥️ Management Layer"]
-        UI["React Frontend<br/>Port: 3000"]
-        NGINX["Nginx Proxy<br/>Port: 8080"]
+    subgraph BACKEND_LAYER["⚙️ Backend Layer"]
+        WEB <--> API["FastAPI<br/>Backend<br/>:8000"]
+        API <--> DB[("PostgreSQL<br/>Configs & History")]
+        API <--> CACHE[("Redis<br/>Metrics Cache")]
     end
     
-    subgraph BACKEND["⚙️ Backend Services"]
-        API["FastAPI Backend<br/>Port: 8000<br/>📋 Configuration Store<br/>🔐 SSL Management<br/>🛡️ WAF Rules"]
-        REDIS[("💾 Redis Cache<br/>Port: 6379<br/>📊 Metrics Storage")]
-        DB[("💿 PostgreSQL<br/>Port: 5432<br/>🗂️ Clusters, Agents<br/>📝 Version History")]
-    end
-    
-    subgraph POOL["📦 Agent Pool: Production"]
-        CLUSTER["🎯 Cluster: Production<br/>(Logical Grouping)"]
+    subgraph AGENT_LAYER["📦 Agent Pool: Production Cluster"]
+        direction LR
         
-        subgraph HAP1_BOX["🖥️ HAProxy Server 1 (10.0.1.101)"]
-            AGENT1["🤖 Agent<br/>Poll Every 30s"]
-            CFG1["📄 haproxy.cfg"]
-            SOCK1["🔌 Stats Socket"]
-            SRV1["⚡ HAProxy Service"]
-            
-            AGENT1 -->|Manages| CFG1
-            AGENT1 -->|Reads Stats| SOCK1
-            AGENT1 -->|Reload| SRV1
-            CFG1 -->|Used by| SRV1
-            SRV1 -->|Provides| SOCK1
-        end
+        AGENT1["🤖 Agent 1<br/>10.0.1.101<br/>(Poll Every 30s)"]
+        AGENT2["🤖 Agent 2<br/>10.0.1.102<br/>(Poll Every 30s)"]
+        AGENT3["🤖 Agent 3<br/>10.0.1.103<br/>(Poll Every 30s)"]
         
-        subgraph HAP2_BOX["🖥️ HAProxy Server 2 (10.0.1.102)"]
-            AGENT2["🤖 Agent<br/>Poll Every 30s"]
-            CFG2["📄 haproxy.cfg"]
-            SOCK2["🔌 Stats Socket"]
-            SRV2["⚡ HAProxy Service"]
-            
-            AGENT2 -->|Manages| CFG2
-            AGENT2 -->|Reads Stats| SOCK2
-            AGENT2 -->|Reload| SRV2
-            CFG2 -->|Used by| SRV2
-            SRV2 -->|Provides| SOCK2
-        end
+        HAP1["⚡ HAProxy<br/>+ Stats Socket<br/>+ haproxy.cfg"]
+        HAP2["⚡ HAProxy<br/>+ Stats Socket<br/>+ haproxy.cfg"]
+        HAP3["⚡ HAProxy<br/>+ Stats Socket<br/>+ haproxy.cfg"]
         
-        subgraph HAP3_BOX["🖥️ HAProxy Server 3 (10.0.1.103)"]
-            AGENT3["🤖 Agent<br/>Poll Every 30s"]
-            CFG3["📄 haproxy.cfg"]
-            SOCK3["🔌 Stats Socket"]
-            SRV3["⚡ HAProxy Service"]
-            
-            AGENT3 -->|Manages| CFG3
-            AGENT3 -->|Reads Stats| SOCK3
-            AGENT3 -->|Reload| SRV3
-            CFG3 -->|Used by| SRV3
-            SRV3 -->|Provides| SOCK3
-        end
+        AGENT1 --> HAP1
+        AGENT2 --> HAP2
+        AGENT3 --> HAP3
     end
     
-    USER -->|Access UI| UI
-    UI <-->|HTTP| NGINX
-    NGINX <-->|Proxy| API
-    NGINX <-->|Serve| UI
+    API <-.->|"🔄 Pull Config<br/>📤 Push Stats<br/>⬇️ SSL/WAF"| AGENT1
+    API <-.->|"🔄 Pull Config<br/>📤 Push Stats<br/>⬇️ SSL/WAF"| AGENT2
+    API <-.->|"🔄 Pull Config<br/>📤 Push Stats<br/>⬇️ SSL/WAF"| AGENT3
     
-    API -->|Store Config| DB
-    API -->|Cache Metrics| REDIS
-    API <-.->|Version Control| DB
+    classDef uiStyle fill:#3a5a8a,stroke:#6a9eff,stroke-width:3px,color:#fff
+    classDef backendStyle fill:#5a3a8a,stroke:#b39ddb,stroke-width:2px,color:#fff
+    classDef dbStyle fill:#3a6a3a,stroke:#66bb6a,stroke-width:2px,color:#fff
+    classDef agentStyle fill:#8a6a30,stroke:#ffb347,stroke-width:2px,color:#fff
+    classDef haproxyStyle fill:#2a6a5a,stroke:#4db6ac,stroke-width:3px,color:#fff
     
-    CLUSTER -.->|Contains| AGENT1
-    CLUSTER -.->|Contains| AGENT2
-    CLUSTER -.->|Contains| AGENT3
-    
-    AGENT1 <-.->|"🔄 Pull Tasks<br/>📤 Upload Stats<br/>⬇️ Download SSL"| API
-    AGENT2 <-.->|"🔄 Pull Tasks<br/>📤 Upload Stats<br/>⬇️ Download SSL"| API
-    AGENT3 <-.->|"🔄 Pull Tasks<br/>📤 Upload Stats<br/>⬇️ Download SSL"| API
-    
-    classDef userStyle fill:#bbdefb,stroke:#1565c0,stroke-width:3px,color:#000
-    classDef frontendStyle fill:#ce93d8,stroke:#6a1b9a,stroke-width:2px,color:#000
-    classDef backendStyle fill:#ffcc80,stroke:#e65100,stroke-width:2px,color:#000
-    classDef dbStyle fill:#a5d6a7,stroke:#2e7d32,stroke-width:2px,color:#000
-    classDef poolStyle fill:#f8bbd0,stroke:#ad1457,stroke-width:3px,color:#000
-    classDef clusterStyle fill:#fff59d,stroke:#f57f17,stroke-width:2px,color:#000
-    classDef haproxyStyle fill:#80cbc4,stroke:#00695c,stroke-width:2px,color:#000
-    classDef agentStyle fill:#b39ddb,stroke:#4527a0,stroke-width:2px,color:#000
-    
-    class USER userStyle
-    class UI,NGINX frontendStyle
+    class USER,WEB uiStyle
     class API backendStyle
-    class DB,REDIS dbStyle
-    class CLUSTER clusterStyle
-    class HAP1_BOX,HAP2_BOX,HAP3_BOX haproxyStyle
+    class DB,CACHE dbStyle
     class AGENT1,AGENT2,AGENT3 agentStyle
+    class HAP1,HAP2,HAP3 haproxyStyle
 ```
 
 ### Component Details
@@ -378,10 +437,29 @@ Agent scripts are **not hardcoded** in the project. They are stored in the datab
 - **Upgrade Process**: Agents check backend version → Download new script → Self-upgrade → Restart
 
 **Agent Version Update Flow:**
-```
-UI: Edit Script → Create Version 1.0.5 → Mark as Latest 
-  → Agents Poll → Detect New Version → Self-Download 
-  → Self-Upgrade → Restart Service
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'fontSize':'14px'}}}%%
+graph LR
+    subgraph USER["👤 User Actions"]
+        A["Edit Script<br/>+ Create v1.0.5"] --> B["Mark as<br/>Latest"]
+    end
+    
+    subgraph AUTO["🤖 Automatic Process"]
+        C["Agents Poll"] --> D["Detect New<br/>Version"] --> E["Download"] --> F["Self-Upgrade"] --> G["✅ Running<br/>v1.0.5"]
+    end
+    
+    B -.->|Trigger| C
+    
+    style USER fill:#2a4a6a,stroke:#4a9eff,stroke-width:2px,color:#fff
+    style AUTO fill:#3a5a3a,stroke:#66bb6a,stroke-width:2px,color:#fff
+    style A fill:#3a5a8a,stroke:#6a9eff,stroke-width:2px,color:#fff
+    style B fill:#3a5a8a,stroke:#6a9eff,stroke-width:2px,color:#fff
+    style C fill:#4a6a4a,stroke:#66bb6a,stroke-width:2px,color:#fff
+    style D fill:#4a6a4a,stroke:#66bb6a,stroke-width:2px,color:#fff
+    style E fill:#4a6a4a,stroke:#66bb6a,stroke-width:2px,color:#fff
+    style F fill:#4a6a4a,stroke:#66bb6a,stroke-width:2px,color:#fff
+    style G fill:#2a5a2a,stroke:#66bb6a,stroke-width:3px,color:#fff
 ```
 
 #### Agent Operations
@@ -645,137 +723,283 @@ User Updates SSL in UI → All Agents Poll Backend (30s)
 - **Language Settings**: Multi-language support configuration
 - **Performance Tuning**: System performance and optimization settings
 
-## 🚀 Quick Start - Agent-Based Setup
+## 🚀 Getting Started - First-Time Usage
 
-### Complete Setup Process
+### Quick Start for New Users
 
-#### Example Scenario: 3-Node HAProxy Cluster
+This guide walks you through using HAProxy OpenManager for the first time, including importing your existing HAProxy configuration.
 
-Let's set up a production HAProxy cluster with 3 servers (10.0.1.101, 10.0.1.102, 10.0.1.103):
+#### Setup Flow Diagram
 
-#### Step 1: Create an Agent Pool
-1. Navigate to **Pool Management**
-2. Click **Create Pool**
-3. Fill in details:
-   - Name: "Production Pool"
-   - Description: "Production environment HAProxy instances"
-4. Save the pool
-
-#### Step 2: Create a Cluster
-1. Go to **Cluster Management**
-2. Click **Create Cluster**
-3. Provide cluster details:
-   - Name: "Production Cluster"
-   - Description: "3-node production HAProxy cluster"
-   - **Select Pool**: "Production Pool" (created in Step 1)
-4. Save the cluster
-5. **Important**: This associates the cluster with the pool
-
-#### Step 3: Create Agents (Repeat for each HAProxy server)
-
-**For HAProxy Server 1 (10.0.1.101):**
-1. Navigate to **Agent Management**
-2. Click **Create Agent**
-3. Fill in agent details:
-   - Agent Name: "prod-haproxy-01"
-   - Platform: Linux
-   - Architecture: x86_64
-   - **Select Pool**: "Production Pool" (same pool as cluster!)
-4. Click **Generate Install Script**
-5. Download the script
-
-**Repeat for Server 2 (10.0.1.102):**
-   - Agent Name: "prod-haproxy-02"
-   - Same Pool: "Production Pool"
-
-**Repeat for Server 3 (10.0.1.103):**
-   - Agent Name: "prod-haproxy-03"
-   - Same Pool: "Production Pool"
-
-**Result**: You now have 3 agents in "Production Pool", all managing "Production Cluster"
-
-#### Step 4: Install Agents on HAProxy Servers
-
-**On each HAProxy server (10.0.1.101, 102, 103):**
-```bash
-# Copy the downloaded script to the server
-scp install-agent-prod-haproxy-01.sh root@10.0.1.101:/tmp/
-
-# SSH to the server
-ssh root@10.0.1.101
-
-# Make executable and run
-chmod +x /tmp/install-agent-prod-haproxy-01.sh
-sudo /tmp/install-agent-prod-haproxy-01.sh
+```mermaid
+graph TD
+    Start([🚀 Start Setup]) --> Step1[1️⃣ Create Agent Pool<br/>HAProxy Agent Pool Management]
+    Step1 --> Step2[2️⃣ Create Cluster<br/>HAProxy Cluster Management]
+    Step2 --> Step3[3️⃣ Generate Agent Script<br/>Agent Management]
+    Step3 --> Step4[4️⃣ Run Script on HAProxy Server<br/>SSH to server and execute]
+    Step4 --> Step5[5️⃣ Copy Backup Config<br/>haproxy.cfg.initial-backup]
+    Step5 --> Step6[6️⃣ Import Configuration<br/>Bulk HAProxy Config Import]
+    Step6 --> Step7[7️⃣ Apply Changes<br/>Apply Management]
+    Step7 --> Complete([✅ Setup Complete!])
+    
+    style Start fill:#2d5016,stroke:#4caf50,stroke-width:3px,color:#fff
+    style Step1 fill:#7b4d1e,stroke:#ff9800,stroke-width:2px,color:#fff
+    style Step2 fill:#7b4d1e,stroke:#ff9800,stroke-width:2px,color:#fff
+    style Step3 fill:#1a4971,stroke:#2196f3,stroke-width:2px,color:#fff
+    style Step4 fill:#4a1a4a,stroke:#9c27b0,stroke-width:2px,color:#fff
+    style Step5 fill:#6b1e3f,stroke:#e91e63,stroke-width:2px,color:#fff
+    style Step6 fill:#1a4d43,stroke:#009688,stroke-width:2px,color:#fff
+    style Step7 fill:#6b5d1a,stroke:#fbc02d,stroke-width:2px,color:#fff
+    style Complete fill:#2d5016,stroke:#4caf50,stroke-width:3px,color:#fff
 ```
 
-The agent will:
-- Install required dependencies (Python, socat)
-- Create `haproxy-agent` systemd service
-- Start polling the backend every 30 seconds
-- Register itself with the backend
-- Begin managing `/etc/haproxy/haproxy.cfg`
+#### Detailed Step-by-Step Instructions
 
-#### Step 5: Verify All Agents are Connected
-1. Return to **Agent Management** in the UI
-2. You should see all 3 agents:
-   - ✅ prod-haproxy-01 - Connected - Last seen: 5 seconds ago
-   - ✅ prod-haproxy-02 - Connected - Last seen: 3 seconds ago
-   - ✅ prod-haproxy-03 - Connected - Last seen: 8 seconds ago
-3. All agents are now ready to receive configurations
+##### Step 1: Create Agent Pool 📦
 
-#### Step 6: Configure HAProxy for the Cluster
-1. Select **"Production Cluster"** from the cluster selector at the top
-2. Create **Backends**:
+Navigate to **HAProxy Agent Pool Management** page.
+
+1. Click **"Create Pool"** button
+2. Fill in pool details:
+   - **Pool Name**: `Production Pool` (or your preferred name)
+   - **Description**: `Production environment HAProxy servers`
+3. Click **Save**
+
+**Purpose**: Pools logically group your HAProxy agents for better organization.
+
+---
+
+##### Step 2: Create Cluster 🎯
+
+Navigate to **HAProxy Cluster Management** page.
+
+1. Click **"Create Cluster"** button
+2. Fill in cluster details:
+   - **Cluster Name**: `Production Cluster`
+   - **Description**: `Main production HAProxy cluster`
+   - **Select Pool**: Choose the pool created in Step 1 (`Production Pool`)
+3. Click **Save**
+
+**Purpose**: A cluster represents a logical grouping of HAProxy configurations that will be deployed to agents.
+
+---
+
+##### Step 3: Generate Agent Installation Script 🤖
+
+Navigate to **Agent Management** page.
+
+1. Click **"Create Agent"** or **"Generate Script"** button
+2. Configure agent details:
+   - **Agent Name**: `haproxy-prod-01` (unique identifier)
+   - **Select Pool**: Choose the same pool from Step 1 (`Production Pool`)
+   - **Platform**: Select `Linux` or `macOS`
+   - **Architecture**: Select `x86_64` or `ARM64`
+3. Click **"Generate Install Script"**
+4. Click **"Download Script"** to save the installation script
+
+**Purpose**: This generates a customized installation script that will connect your HAProxy server to the management backend.
+
+---
+
+##### Step 4: Install Agent on HAProxy Server 🖥️
+
+SSH into your HAProxy server and run the installation script.
+
+```bash
+# Copy the script to your HAProxy server
+scp install-agent-haproxy-prod-01.sh root@your-haproxy-server:/tmp/
+
+# SSH to the HAProxy server
+ssh root@your-haproxy-server
+
+# Make the script executable
+chmod +x /tmp/install-agent-haproxy-prod-01.sh
+
+# Run the installation script
+sudo /tmp/install-agent-haproxy-prod-01.sh
+```
+
+**What the script does:**
+- Installs required dependencies (Python, socat)
+- Creates `haproxy-agent` systemd service
+- Starts the agent (polls backend every 30 seconds)
+- **Creates initial backup**: `/etc/haproxy/haproxy.cfg.initial-backup`
+- Registers the agent with the backend
+
+**Verify installation:**
+```bash
+# Check agent service status
+sudo systemctl status haproxy-agent
+
+# Check agent logs
+sudo tail -f /var/log/haproxy-agent/agent.log
+```
+
+Return to the UI and verify the agent appears in **Agent Management** with status "Connected ✅".
+
+---
+
+##### Step 5: Copy Existing HAProxy Configuration 📄
+
+You have **three options** to get your existing HAProxy configuration:
+
+**Option A: Using the Initial Backup (Recommended)**
+
+On your HAProxy server, the agent created a backup of your original configuration.
+
+```bash
+# Display the backup configuration
+cat /etc/haproxy/haproxy.cfg.initial-backup
+```
+
+**Copy the entire contents** of this file to your clipboard.
+
+---
+
+**Option B: View Configuration via UI (Easiest)**
+
+Navigate to **Configuration Management** page in the UI.
+
+1. Select your agent from the **Agent Selector** dropdown
+2. Click **"View Configuration"** button
+3. The system will fetch the live configuration from the agent
+4. **Copy the entire configuration** displayed in the viewer
+5. You now have the configuration ready for import!
+
+**Benefits**: No need to SSH to the server, get configuration directly from the UI.
+
+---
+
+**Option C: Current Configuration File**
+
+If the backup doesn't exist, SSH to your server and copy the current configuration:
+
+```bash
+# Display current HAProxy configuration
+cat /etc/haproxy/haproxy.cfg
+```
+
+**Copy the entire contents** to your clipboard.
+
+---
+
+##### Step 6: Import Configuration via Bulk Import 📥
+
+Navigate to **Bulk HAProxy Config Import** page.
+
+1. Select your cluster from the **Cluster Selector** dropdown (top of page)
+2. **Paste** the configuration copied from Step 5 into the text area
+3. Click **"Parse Configuration"** button
+4. Review the parsed entities:
+   - Frontends detected
+   - Backends detected
+   - Servers detected
+   - SSL certificates (if any)
+5. Click **"Import Configuration"**
+
+**What happens:**
+- The system parses your HAProxy config file
+- Extracts frontends, backends, servers, and SSL bindings
+- Creates database entities for each component
+- Prepares configuration for deployment
+
+**Result**: Your existing HAProxy configuration is now managed by HAProxy OpenManager! 🎉
+
+---
+
+##### Step 7: Apply Changes to Agent 🚀
+
+Navigate to **Apply Management** page.
+
+1. You'll see pending changes listed:
+   - Frontends to be created
+   - Backends to be created
+   - Servers to be added
+2. Review the changes
+3. Click **"Apply Changes"** button
+4. Monitor deployment status:
    ```
-   Backend: web-backend
-   Servers: 
-     - web01: 192.168.1.10:80
-     - web02: 192.168.1.11:80
-     - web03: 192.168.1.12:80
-   Load Balancing: roundrobin
+   Agent: haproxy-prod-01
+   Status: ✅ Configuration applied successfully
+   Version: v1.0.1
    ```
-3. Create **Frontends**:
-   ```
-   Frontend: web-frontend
-   Bind: 0.0.0.0:80
-   Default Backend: web-backend
-   ```
-4. Upload **SSL Certificates** (if needed)
-5. Add **WAF Rules** (if needed)
 
-#### Step 7: Apply Changes to All Agents
-1. Navigate to **Apply Management**
-2. You'll see pending changes for "Production Cluster"
-3. Click **Apply Changes**
-4. Watch the deployment status:
-   ```
-   ✅ prod-haproxy-01: Configuration applied successfully
-   ✅ prod-haproxy-02: Configuration applied successfully
-   ✅ prod-haproxy-03: Configuration applied successfully
-   ```
-5. All 3 HAProxy servers now have identical configurations!
+**What happens:**
+- Backend marks configuration tasks as ready for deployment
+- Agent polls and detects pending tasks (within 30 seconds)
+- Agent downloads the new configuration
+- Agent validates HAProxy configuration syntax
+- Agent reloads HAProxy service (zero downtime)
+- Agent reports success back to backend
 
-#### Result
-- **1 Pool** ("Production Pool")
-- **1 Cluster** ("Production Cluster")
-- **3 Agents** (prod-haproxy-01, 02, 03)
-- **3 HAProxy Servers** with synchronized configurations
+**Verify deployment:**
+- Check that agent status shows "Applied Successfully"
+- Check HAProxy is running: `systemctl status haproxy`
+- Check HAProxy stats: `http://your-server:8404/stats`
 
-### 🎯 Traditional Quick Start (for local development/testing)
+---
 
-For local development without agents:
+#### ✅ Setup Complete!
 
-## 🚀 Traditional Quick Start
+Your HAProxy server is now fully managed by HAProxy OpenManager. You can now:
 
-### Prerequisites
+- ✨ **Manage Frontends**: Add, edit, delete frontends via UI
+- 🖥️ **Manage Backends**: Configure backend servers and health checks
+- 🔒 **Upload SSL Certificates**: Centralized SSL management
+- 🛡️ **Configure WAF Rules**: Add security rules
+- 📊 **Monitor Performance**: View real-time statistics on dashboard
+- 🔄 **Version Control**: Track all configuration changes with rollback capability
+
+**Next Steps:**
+- Add more agents to the same pool for multi-node clusters
+- Configure SSL certificates in **SSL Management**
+- Add WAF rules in **WAF Management**
+- Monitor your cluster in **Dashboard**
+
+---
+
+## 📦 Installation
+
+Choose your preferred installation method:
+
+<table>
+<tr>
+<td width="50%" align="center">
+
+### 🐳 Docker Installation
+**Recommended for:**
+- Quick setup and testing
+- Single-server deployment
+- Docker Compose environments
+
+[Jump to Docker Installation ↓](#docker-installation)
+
+</td>
+<td width="50%" align="center">
+
+### ☸️ Kubernetes/OpenShift Installation
+**Recommended for:**
+- Production environments
+- High availability setup
+- Enterprise deployments
+
+[Jump to Kubernetes Installation ↓](#kubernetesopenshift-installation)
+
+</td>
+</tr>
+</table>
+
+---
+
+### Docker Installation
+
+#### Prerequisites
 
 - **Docker & Docker Compose** (v20.10+)
 - **Git**
 - **2GB+ RAM** for all services
-- **SSH access** to remote HAProxy servers (for remote management)
 
-### Installation
+#### Installation Steps
 
 1. **Clone the Repository**
    ```bash
@@ -1023,9 +1247,7 @@ Content-Type: text/plain
 POST /api/haproxy/config/validate
 ```
 
-## 🐳 Docker Deployment
-
-### Services Overview
+#### Services Overview
 
 The application consists of 8 Docker containers:
 
@@ -1077,9 +1299,9 @@ docker exec haproxy-openmanager-db pg_dump -U haproxy_user haproxy_openmanager >
 docker exec -i haproxy-openmanager-db psql -U haproxy_user haproxy_openmanager < backup.sql
 ```
 
-## ☸️ Kubernetes/OpenShift Deployment
+### Kubernetes/OpenShift Installation
 
-### Kubernetes Deployment
+#### Kubernetes Deployment
 
 For Kubernetes environments, use the provided manifests:
 
@@ -1096,9 +1318,9 @@ kubectl port-forward svc/nginx-service 8080:80 -n haproxy-openmanager
 
 See [k8s/manifests/README.md](k8s/manifests/README.md) for detailed Kubernetes setup instructions.
 
-## 🛠️ Development
+### Local Development
 
-### Local Development Setup
+#### Local Development Setup
 
 1. **Backend Development**
    ```bash
@@ -1128,26 +1350,162 @@ See [k8s/manifests/README.md](k8s/manifests/README.md) for detailed Kubernetes s
    python backend/migration.py
    ```
 
+## 🛠️ Development
+
 ### Project Structure
 
 ```
 haproxy-openmanager/
-├── backend/                 # FastAPI backend
-│   ├── main.py             # Main application entry
-│   ├── haproxy_client.py   # HAProxy management client
-│   ├── haproxy_installer.py # Automated installation
-│   ├── init.sql            # Database initialization
-│   └── requirements.txt    # Python dependencies
-├── frontend/               # React.js frontend
+├── backend/                          # FastAPI backend application
+│   ├── main.py                      # Main application entry point
+│   ├── config.py                    # Application configuration
+│   ├── auth_middleware.py           # Authentication middleware
+│   ├── agent_notifications.py       # Agent notification system
+│   ├── database/                    # Database layer
+│   │   ├── connection.py           # Database connection management
+│   │   └── migrations.py           # Database migration scripts
+│   ├── models/                      # SQLAlchemy ORM models
+│   │   ├── user.py                 # User model
+│   │   ├── cluster.py              # Cluster model
+│   │   ├── agent.py                # Agent model
+│   │   ├── frontend.py             # Frontend configuration model
+│   │   ├── backend.py              # Backend configuration model
+│   │   ├── ssl.py                  # SSL certificate model
+│   │   └── waf.py                  # WAF rules model
+│   ├── routers/                     # API route handlers
+│   │   ├── auth.py                 # Authentication endpoints
+│   │   ├── user.py                 # User management
+│   │   ├── cluster.py              # Cluster management
+│   │   ├── agent.py                # Agent management
+│   │   ├── frontend.py             # Frontend configuration
+│   │   ├── backend.py              # Backend configuration
+│   │   ├── ssl.py                  # SSL certificate management
+│   │   ├── waf.py                  # WAF rules management
+│   │   ├── dashboard.py            # Dashboard statistics
+│   │   ├── configuration.py        # Configuration viewer
+│   │   └── security.py             # Security & token management
+│   ├── services/                    # Business logic services
+│   │   ├── haproxy_config.py       # HAProxy config generation
+│   │   └── dashboard_stats_service.py # Stats aggregation
+│   ├── middleware/                  # Custom middleware
+│   │   ├── activity_logger.py      # Activity logging
+│   │   ├── error_handler.py        # Error handling
+│   │   └── rate_limiter.py         # API rate limiting
+│   ├── utils/                       # Utility functions
+│   │   ├── auth.py                 # Authentication utilities
+│   │   ├── haproxy_config_parser.py # Config parser
+│   │   ├── haproxy_stats_parser.py  # Stats parser
+│   │   ├── haproxy_validator.py     # Config validator
+│   │   ├── ssl_parser.py            # SSL certificate parser
+│   │   ├── activity_log.py          # Activity log utilities
+│   │   ├── logging_config.py        # Logging configuration
+│   │   └── agent_scripts/           # Agent installation scripts
+│   │       ├── linux_install.sh     # Linux agent installer
+│   │       └── macos_install.sh     # macOS agent installer
+│   ├── tests/                       # Backend tests
+│   │   ├── conftest.py             # Pytest configuration
+│   │   └── test_*.py               # Test files
+│   ├── requirements.txt             # Python dependencies
+│   └── Dockerfile                   # Backend Docker image
+│
+├── frontend/                         # React.js frontend application
 │   ├── src/
-│   │   ├── components/     # React components
-│   │   ├── contexts/       # React contexts
-│   │   └── App.js         # Main app component
-│   └── package.json       # Node dependencies
-├── haproxy/               # HAProxy configurations
-├── k8s/                   # Kubernetes manifests
-├── nginx/                 # Nginx configuration
-└── docker-compose.yml     # Docker services
+│   │   ├── components/              # React components
+│   │   │   ├── Login.js            # Login page
+│   │   │   ├── DashboardV2.js      # Main dashboard
+│   │   │   ├── AgentManagement.js  # Agent management
+│   │   │   ├── ClusterManagement.js # Cluster management
+│   │   │   ├── PoolManagement.js   # Pool management
+│   │   │   ├── FrontendManagement.js # Frontend config
+│   │   │   ├── BackendServers.js   # Backend config
+│   │   │   ├── SSLManagement.js    # SSL certificates
+│   │   │   ├── WAFManagement.js    # WAF rules
+│   │   │   ├── ApplyManagement.js  # Apply changes
+│   │   │   ├── Configuration.js    # Config viewer
+│   │   │   ├── BulkConfigImport.js # Bulk import
+│   │   │   ├── VersionHistory.js   # Version history
+│   │   │   ├── UserManagement.js   # User management
+│   │   │   ├── Security.js         # Security & tokens
+│   │   │   ├── Settings.js         # Settings page
+│   │   │   ├── EntitySyncStatus.js # Sync status
+│   │   │   └── dashboard/          # Dashboard components
+│   │   │       └── *.js            # Dashboard tabs & charts
+│   │   ├── contexts/                # React contexts
+│   │   │   ├── AuthContext.js      # Authentication context
+│   │   │   ├── ClusterContext.js   # Cluster selection context
+│   │   │   ├── ThemeContext.js     # Theme (dark/light mode)
+│   │   │   └── ProgressContext.js  # Global progress indicator
+│   │   ├── utils/                   # Utility functions
+│   │   │   ├── api.js              # API client
+│   │   │   ├── agentSync.js        # Agent sync utilities
+│   │   │   ├── colors.js           # Color utilities
+│   │   │   └── dashboardCache.js   # Dashboard caching
+│   │   ├── App.js                   # Main app component
+│   │   ├── App.css                  # Global styles
+│   │   └── index.js                 # React entry point
+│   ├── public/
+│   │   └── index.html               # HTML template
+│   ├── package.json                 # Node dependencies
+│   └── Dockerfile                   # Frontend Docker image
+│
+├── docs/                             # Documentation
+│   └── screenshots/                 # UI screenshots
+│       ├── dashboard-overview.png
+│       ├── frontend-management.png
+│       ├── backend-configuration.png
+│       ├── bulk-import.png
+│       └── *.png                    # Other screenshots
+│
+├── k8s/                              # Kubernetes/OpenShift manifests
+│   └── manifests/
+│       ├── 00-namespace.yaml        # Namespace
+│       ├── 01-service-accounts.yaml # Service accounts
+│       ├── 02-rbac.yaml             # RBAC roles
+│       ├── 03-secrets.yaml          # Secrets
+│       ├── 04-storage.yaml          # Persistent volumes
+│       ├── 05-postgres.yaml         # PostgreSQL deployment
+│       ├── 06-redis.yaml            # Redis deployment
+│       ├── 07-configmaps.yaml       # ConfigMaps
+│       ├── 08-backend.yaml          # Backend deployment
+│       ├── 09-frontend.yaml         # Frontend deployment
+│       ├── 10-nginx.yaml            # Nginx deployment
+│       ├── 11-routes.yaml           # OpenShift routes
+│       ├── 12-ingress.yaml          # Kubernetes ingress
+│       ├── 13-hpa.yaml              # Horizontal Pod Autoscaler
+│       ├── deploy.sh                # Deployment script
+│       └── cleanup.sh               # Cleanup script
+│
+├── nginx/                            # Nginx reverse proxy
+│   └── nginx.conf                   # Nginx configuration
+│
+├── haproxy/                          # Sample HAProxy configs
+│   ├── haproxy.cfg                  # Sample configuration
+│   ├── haproxy-simple.cfg           # Simple example
+│   ├── haproxy-remote1.cfg          # Remote example 1
+│   └── haproxy-remote2.cfg          # Remote example 2
+│
+├── scripts/                          # Utility scripts
+│   ├── check-agent-logs.sh          # Check agent logs
+│   ├── check-agent-stats.sh         # Check agent stats
+│   ├── check-haproxy-stats-socket.sh # Check stats socket
+│   ├── cleanup-cluster-entities.sh  # Cleanup entities
+│   ├── cleanup-soft-deleted.sh      # Cleanup soft deletes
+│   ├── update-agent-version.sh      # Update agent version
+│   └── test-stats-parser.py         # Test stats parser
+│
+├── utils/                            # Uninstall utilities
+│   ├── uninstall-agent-linux.sh     # Linux uninstaller
+│   └── uninstall-agent-macos.sh     # macOS uninstaller
+│
+├── docker-compose.yml                # Docker Compose configuration
+├── docker-compose.test.yml           # Test environment
+├── build-images.sh                   # Build Docker images
+├── pytest.ini                        # Pytest configuration
+├── README.md                         # This file
+├── CONFIG.md                         # Configuration documentation
+├── TESTING.md                        # Testing documentation
+├── UPGRADE_GUIDE.md                  # Upgrade guide
+└── LICENSE                           # MIT License
 ```
 
 ### Adding New Features
@@ -1259,27 +1617,6 @@ journalctl -u keepalived
 - Update documentation for API changes
 - Ensure Docker builds work correctly
 
-## 🎨 Screenshots
-
-> 📸 **Note**: Screenshots will be added soon. In the meantime, check the feature descriptions above for detailed functionality overview.
-
-### Main Dashboard
-Coming soon - Real-time metrics, charts, and cluster overview
-
-### Agent Management
-Coming soon - Agent deployment, monitoring, and script generation
-
-### Configuration Management
-Coming soon - HAProxy configuration editor with syntax highlighting
-
-## 📊 Project Statistics
-
-- **Languages**: Python (Backend), JavaScript/React (Frontend)
-- **Architecture**: Microservices with Agent Pull Model
-- **Database**: PostgreSQL with async operations
-- **Cache**: Redis for high-performance metrics
-- **Deployment**: Docker Compose & Kubernetes/OpenShift ready
-
 ## 🎯 Use Cases
 
 1. **Enterprise HAProxy Management**: Manage multiple HAProxy clusters across different environments
@@ -1295,7 +1632,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 👨‍💻 Author
 
 **Taylan Bakırcıoğlu**  
-Burgan Bank - DevOps / Product Line Manager  
+Burgan Bank - DevOps / Product Group Manager  
 LinkedIn: [linkedin.com/in/taylanbakircioglu](https://www.linkedin.com/in/taylanbakircioglu/)
 
 Developed with ❤️ for the HAProxy community
