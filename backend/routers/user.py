@@ -157,6 +157,13 @@ async def create_user(user_data: UserCreate, authorization: str = Header(None)):
         # Verify authentication
         current_user = await get_current_user_from_token(authorization)
         
+        # SECURITY: Only admin users can create users
+        if not current_user.get("is_admin", False):
+            raise HTTPException(
+                status_code=403, 
+                detail="Only admin users can create new users"
+            )
+        
         conn = await get_database_connection()
         
         # Check if username already exists (only active users)
@@ -241,6 +248,13 @@ async def update_user(user_id: int, user_data: dict, authorization: str = Header
     """Update a user"""
     try:
         current_user = await get_current_user_from_token(authorization)
+        
+        # SECURITY: Only admin users can update other users
+        if not current_user.get("is_admin", False):
+            raise HTTPException(
+                status_code=403, 
+                detail="Only admin users can update user information"
+            )
         
         conn = await get_database_connection()
         
@@ -642,6 +656,13 @@ async def delete_user(user_id: int, authorization: str = Header(None)):
     try:
         current_user = await get_current_user_from_token(authorization)
         
+        # SECURITY: Only admin users can delete users
+        if not current_user.get("is_admin", False):
+            raise HTTPException(
+                status_code=403, 
+                detail="Only admin users can delete users"
+            )
+        
         conn = await get_database_connection()
         
         # Check if user exists and get details
@@ -940,6 +961,13 @@ async def create_role(role_data: dict, authorization: str = Header(None)):
         # Verify authentication
         current_user = await get_current_user_from_token(authorization)
         
+        # SECURITY: Only admin users can create roles
+        if not current_user.get("is_admin", False):
+            raise HTTPException(
+                status_code=403, 
+                detail="Only admin users can create roles"
+            )
+        
         conn = await get_database_connection()
         
         # Check if role name already exists
@@ -995,6 +1023,13 @@ async def update_role(role_id: int, role_data: dict, authorization: str = Header
     try:
         # Verify authentication
         current_user = await get_current_user_from_token(authorization)
+        
+        # SECURITY: Only admin users can update roles
+        if not current_user.get("is_admin", False):
+            raise HTTPException(
+                status_code=403, 
+                detail="Only admin users can update roles"
+            )
         
         conn = await get_database_connection()
         
@@ -1061,6 +1096,13 @@ async def delete_role(role_id: int, authorization: str = Header(None)):
         # Verify authentication
         current_user = await get_current_user_from_token(authorization)
         
+        # SECURITY: Only admin users can delete roles
+        if not current_user.get("is_admin", False):
+            raise HTTPException(
+                status_code=403, 
+                detail="Only admin users can delete roles"
+            )
+        
         conn = await get_database_connection()
         
         # Check if role exists and is not system role
@@ -1111,6 +1153,13 @@ async def assign_user_roles(user_id: int, role_data: dict, authorization: str = 
     try:
         # Verify authentication
         current_user = await get_current_user_from_token(authorization)
+        
+        # SECURITY: Only admin users can assign roles to users
+        if not current_user.get("is_admin", False):
+            raise HTTPException(
+                status_code=403, 
+                detail="Only admin users can assign roles to users"
+            )
         
         conn = await get_database_connection()
         

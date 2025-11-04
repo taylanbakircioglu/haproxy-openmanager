@@ -53,7 +53,7 @@ async def get_current_user_from_token(authorization: Optional[str] = None) -> Op
         # Get user from database
         conn = await get_database_connection()
         user = await conn.fetchrow("""
-            SELECT id, username, email, full_name, role, is_active
+            SELECT id, username, email, full_name, role, is_active, is_admin
             FROM users 
             WHERE id = $1 AND is_active = TRUE
         """, int(user_id))
@@ -70,7 +70,8 @@ async def get_current_user_from_token(authorization: Optional[str] = None) -> Op
             "username": user["username"],
             "email": user["email"],
             "full_name": user["full_name"],
-            "role": user["role"]
+            "role": user["role"],
+            "is_admin": user.get("is_admin", False)
         }
         
     except jwt.ExpiredSignatureError:
@@ -123,7 +124,7 @@ async def get_current_user_from_token_no_exception(authorization: Optional[str] 
         # Get user from database
         conn = await get_database_connection()
         user = await conn.fetchrow("""
-            SELECT id, username, email, full_name, is_active
+            SELECT id, username, email, full_name, is_active, is_admin
             FROM users 
             WHERE id = $1 AND is_active = TRUE
         """, int(user_id))
@@ -136,7 +137,8 @@ async def get_current_user_from_token_no_exception(authorization: Optional[str] 
             "id": user["id"],
             "username": user["username"],
             "email": user["email"],
-            "full_name": user["full_name"]
+            "full_name": user["full_name"],
+            "is_admin": user.get("is_admin", False)
         }
         
     except Exception as e:

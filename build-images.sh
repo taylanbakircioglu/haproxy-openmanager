@@ -32,7 +32,9 @@ print_error() {
 }
 
 # Configuration
-REGISTRY="${REGISTRY:-intprod-harbor.burgan.com.tr/devops}"
+# Set REGISTRY environment variable or use default
+# Example: export REGISTRY="your-registry.example.com/project"
+REGISTRY="${REGISTRY:-your-registry.example.com/haproxy-openmanager}"
 BACKEND_IMAGE="${REGISTRY}/haproxy-openmanager-backend"
 FRONTEND_IMAGE="${REGISTRY}/haproxy-openmanager-frontend"
 VERSION="${VERSION:-latest}"
@@ -99,10 +101,10 @@ fi
 print_status "Updating Kubernetes manifests with new image versions..."
 
 # Update backend deployment
-sed -i.bak "s|image: intprod-harbor.burgan.com.tr/devops/haproxy-openmanager:<image-version>|image: $BACKEND_IMAGE:$VERSION|g" k8s/manifests/08-backend.yaml
+sed -i.bak "s|image: your-registry.example.com/haproxy-openmanager/haproxy-openmanager-backend:<image-version>|image: $BACKEND_IMAGE:$VERSION|g" k8s/manifests/08-backend.yaml
 
 # Update frontend deployment  
-sed -i.bak "s|image: intprod-harbor.burgan.com.tr/devops/haproxy-openmanager:<image-version>|image: $FRONTEND_IMAGE:$VERSION|g" k8s/manifests/09-frontend.yaml
+sed -i.bak "s|image: your-registry.example.com/haproxy-openmanager/haproxy-openmanager-frontend:<image-version>|image: $FRONTEND_IMAGE:$VERSION|g" k8s/manifests/09-frontend.yaml
 
 print_success "Kubernetes manifests updated"
 

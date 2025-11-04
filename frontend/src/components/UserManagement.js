@@ -34,6 +34,7 @@ import {
   DownloadOutlined
 } from '@ant-design/icons';
 import axios from 'axios';
+import { useAuth } from '../contexts/AuthContext';
 
 const { TabPane } = Tabs;
 const { Option } = Select;
@@ -222,6 +223,7 @@ const PERMISSION_TREE = [
 ];
 
 const UserManagement = () => {
+  const { isAdmin } = useAuth(); // Get admin status from auth context
   const [activeTab, setActiveTab] = useState('users');
   
   // Users state
@@ -718,41 +720,48 @@ const UserManagement = () => {
       key: 'actions',
       render: (_, record) => (
         <Space>
-          <Tooltip title="Edit User">
-            <Button 
-              icon={<EditOutlined />} 
-              size="small" 
-              onClick={() => handleEditUser(record)}
-            />
-          </Tooltip>
-          <Tooltip title="Assign Roles">
-            <Button 
-              icon={<TeamOutlined />} 
-              size="small" 
-              onClick={() => handleAssignRoles(record)}
-            />
-          </Tooltip>
-          <Tooltip title="Change Password">
-            <Button 
-              icon={<KeyOutlined />} 
-              size="small" 
-              onClick={() => handleChangePassword(record)}
-            />
-          </Tooltip>
-          <Popconfirm
-            title="Are you sure you want to delete this user?"
-            onConfirm={() => handleDeleteUser(record)}
-            okText="Yes"
-            cancelText="No"
-          >
-            <Tooltip title="Delete User">
-              <Button 
-                icon={<DeleteOutlined />} 
-                danger 
-                size="small"
-              />
-            </Tooltip>
-          </Popconfirm>
+          {isAdmin() && (
+            <>
+              <Tooltip title="Edit User">
+                <Button 
+                  icon={<EditOutlined />} 
+                  size="small" 
+                  onClick={() => handleEditUser(record)}
+                />
+              </Tooltip>
+              <Tooltip title="Assign Roles">
+                <Button 
+                  icon={<TeamOutlined />} 
+                  size="small" 
+                  onClick={() => handleAssignRoles(record)}
+                />
+              </Tooltip>
+              <Tooltip title="Change Password">
+                <Button 
+                  icon={<KeyOutlined />} 
+                  size="small" 
+                  onClick={() => handleChangePassword(record)}
+                />
+              </Tooltip>
+              <Popconfirm
+                title="Are you sure you want to delete this user?"
+                onConfirm={() => handleDeleteUser(record)}
+                okText="Yes"
+                cancelText="No"
+              >
+                <Tooltip title="Delete User">
+                  <Button 
+                    icon={<DeleteOutlined />} 
+                    danger 
+                    size="small"
+                  />
+                </Tooltip>
+              </Popconfirm>
+            </>
+          )}
+          {!isAdmin() && (
+            <Text type="secondary">View Only</Text>
+          )}
         </Space>
       )
     }
@@ -821,29 +830,36 @@ const UserManagement = () => {
       key: 'actions',
       render: (_, record) => (
         <Space>
-          <Tooltip title="Edit Role">
-            <Button 
-              icon={<EditOutlined />} 
-              size="small" 
-              onClick={() => handleEditRole(record)}
-              disabled={record.is_system}
-            />
-          </Tooltip>
-          <Popconfirm
-            title="Are you sure you want to delete this role?"
-            onConfirm={() => handleDeleteRole(record)}
-            okText="Yes"
-            cancelText="No"
-          >
-            <Tooltip title="Delete Role">
-              <Button 
-                icon={<DeleteOutlined />} 
+          {isAdmin() && (
+            <>
+              <Tooltip title="Edit Role">
+                <Button 
+                  icon={<EditOutlined />} 
+                  size="small" 
+                  onClick={() => handleEditRole(record)}
+                  disabled={record.is_system}
+                />
+              </Tooltip>
+              <Popconfirm
+                title="Are you sure you want to delete this role?"
+                onConfirm={() => handleDeleteRole(record)}
+                okText="Yes"
+                cancelText="No"
+              >
+                <Tooltip title="Delete Role">
+                  <Button 
+                    icon={<DeleteOutlined />} 
                 danger 
                 size="small"
                 disabled={record.is_system || record.user_count > 0}
               />
             </Tooltip>
           </Popconfirm>
+            </>
+          )}
+          {!isAdmin() && (
+            <Text type="secondary">View Only</Text>
+          )}
         </Space>
       )
     }
@@ -1033,13 +1049,15 @@ const UserManagement = () => {
                      }}
                    />
                  </div>
-                <Button 
-                  type="primary" 
-                  icon={<UserAddOutlined />}
-                  onClick={handleCreateUser}
-                >
-                  Add User
-                </Button>
+                {isAdmin() && (
+                  <Button 
+                    type="primary" 
+                    icon={<UserAddOutlined />}
+                    onClick={handleCreateUser}
+                  >
+                    Add User
+                  </Button>
+                )}
               </Space>
             }
           >
@@ -1110,13 +1128,15 @@ const UserManagement = () => {
                      }}
                    />
                  </div>
-                <Button 
-                  type="primary" 
-                  icon={<PlusOutlined />}
-                  onClick={handleCreateRole}
-                >
-                  Add Role
-                </Button>
+                {isAdmin() && (
+                  <Button 
+                    type="primary" 
+                    icon={<PlusOutlined />}
+                    onClick={handleCreateRole}
+                  >
+                    Add Role
+                  </Button>
+                )}
               </Space>
             }
           >

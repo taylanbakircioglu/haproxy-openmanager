@@ -433,8 +433,16 @@ async def generate_install_script(req_data: AgentScriptRequest, request: Request
         # Support both user authentication and agent API key
         current_user = None
         if authorization:
-            from auth_middleware import get_current_user_from_token
+            from auth_middleware import get_current_user_from_token, check_user_permission
             current_user = await get_current_user_from_token(authorization)
+            
+            # SECURITY: Check permission for agent script generation
+            has_permission = await check_user_permission(current_user["id"], "agents", "create")
+            if not has_permission:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Insufficient permissions: agents.create required"
+                )
         elif x_api_key:
             # Agent API key authentication for upgrade process
             agent_auth = await validate_agent_api_key(x_api_key)
