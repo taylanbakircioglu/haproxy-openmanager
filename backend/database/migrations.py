@@ -118,7 +118,7 @@ async def ensure_agents_table():
             'compression': "ALTER TABLE frontends ADD COLUMN compression BOOLEAN DEFAULT FALSE;",
             'log_separate': "ALTER TABLE frontends ADD COLUMN log_separate BOOLEAN DEFAULT FALSE;",
             'monitor_uri': "ALTER TABLE frontends ADD COLUMN monitor_uri VARCHAR(255);",
-            'use_backend_rules': "ALTER TABLE frontends ADD COLUMN use_backend_rules TEXT;",
+            'use_backend_rules': "ALTER TABLE frontends ADD COLUMN use_backend_rules JSONB DEFAULT '[]'::jsonb;",
             'request_headers': "ALTER TABLE frontends ADD COLUMN request_headers TEXT;",
             'response_headers': "ALTER TABLE frontends ADD COLUMN response_headers TEXT;",
             'maxconn': "ALTER TABLE frontends ADD COLUMN maxconn INTEGER;"
@@ -2035,7 +2035,7 @@ async def create_essential_tables(conn):
                 ssl_verify VARCHAR(20) DEFAULT 'optional',
                 acl_rules JSONB DEFAULT '[]'::jsonb,
                 redirect_rules JSONB DEFAULT '[]'::jsonb,
-                use_backend_rules TEXT,
+                use_backend_rules JSONB DEFAULT '[]'::jsonb,
                 request_headers TEXT,
                 response_headers TEXT,
                 tcp_request_rules TEXT,
@@ -2289,7 +2289,7 @@ async def ensure_frontends_ssl_columns():
             logger.info("    - upgrade_target_version: Version being upgraded to")
             logger.info("    - upgraded_at: Timestamp of last upgrade status change")
         
-        # Update acl_rules and redirect_rules to JSONB if they're still TEXT[]
+        # Update acl_rules, redirect_rules, and use_backend_rules to JSONB if they're still TEXT[] or TEXT
         acl_rules_type = await conn.fetchval("""
             SELECT data_type FROM information_schema.columns 
             WHERE table_name = 'frontends' AND column_name = 'acl_rules'
@@ -2313,6 +2313,25 @@ async def ensure_frontends_ssl_columns():
                 ALTER TABLE frontends 
                 ALTER COLUMN redirect_rules TYPE JSONB USING array_to_json(redirect_rules)::JSONB
             """)
+        
+        # CRITICAL FIX: Convert use_backend_rules to JSONB for consistency with acl_rules and redirect_rules
+        use_backend_rules_type = await conn.fetchval("""
+            SELECT data_type FROM information_schema.columns 
+            WHERE table_name = 'frontends' AND column_name = 'use_backend_rules'
+        """)
+        
+        if use_backend_rules_type in ('text', 'character varying'):
+            logger.info("Converting use_backend_rules from TEXT to JSONB...")
+            await conn.execute("""
+                ALTER TABLE frontends 
+                ALTER COLUMN use_backend_rules TYPE JSONB USING 
+                    CASE 
+                        WHEN use_backend_rules IS NULL THEN '[]'::jsonb
+                        WHEN use_backend_rules = '' THEN '[]'::jsonb
+                        ELSE use_backend_rules::jsonb
+                    END
+            """)
+            logger.info("use_backend_rules converted to JSONB successfully")
             
         await close_database_connection(conn)
         logger.info("✅ Frontends SSL columns migration completed")
