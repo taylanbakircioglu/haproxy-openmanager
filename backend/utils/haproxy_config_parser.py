@@ -676,17 +676,31 @@ class HAProxyConfigParser:
         
         # Parse SSL verification
         verify_match = re.search(r'verify\s+(none|required)', options, re.IGNORECASE)
-        if verify_match:
-            server.ssl_verify = verify_match.group(1).lower()
-        
-        # Check for SSL ca-file path and warn user to remove it
         ca_file_match = re.search(r'ca-file\s+(\S+)', options, re.IGNORECASE)
-        if ca_file_match:
+        
+        # CRITICAL FIX: HAProxy validation requires ca-file when verify=required
+        # If ca-file exists, we remove it but must also change verify to 'none'
+        # Otherwise HAProxy validation fails: "verify required but no CA file"
+        if verify_match and ca_file_match:
+            # Both verify and ca-file exist
             ca_file_path = ca_file_match.group(1)
+            # Change verify to 'none' since we're removing ca-file
+            server.ssl_verify = 'none'
             self.warnings.append(
-                f"🔒 SSL: Server '{name}' has ca-file path '{ca_file_path}' which has been REMOVED from import. "
-                f"SSL certificates should be managed through SSL Management page. "
-                f"After import, edit this server and select SSL certificate from the dropdown."
+                f"SSL: Server '{name}' has 'verify required' with ca-file '{ca_file_path}'. "
+                f"CA file has been REMOVED and verify changed to 'none' to pass HAProxy validation. "
+                f"After import, edit this server, select SSL certificate from dropdown, then set verify to 'required'."
+            )
+        elif verify_match:
+            # Only verify exists (no ca-file)
+            server.ssl_verify = verify_match.group(1).lower()
+        elif ca_file_match:
+            # Only ca-file exists (no verify) - this is rare but handle it
+            ca_file_path = ca_file_match.group(1)
+            server.ssl_verify = 'none'  # Default to none when ca-file removed
+            self.warnings.append(
+                f"SSL: Server '{name}' has ca-file '{ca_file_path}' which has been REMOVED. "
+                f"SSL verify set to 'none'. After import, select SSL certificate and configure verify."
             )
         
         # Parse cookie value
