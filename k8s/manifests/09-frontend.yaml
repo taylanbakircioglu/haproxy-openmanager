@@ -22,7 +22,7 @@ spec:
       serviceAccountName: haproxy-openmanager-frontend
       containers:
       - name: frontend
-        image: haproxy-openmanager-frontend:latest # Build and push your image to a registry
+        image: burganbank/haproxy-openmanager-frontend:latest  # Public Docker Hub image
         ports:
         - containerPort: 3000
           name: http
