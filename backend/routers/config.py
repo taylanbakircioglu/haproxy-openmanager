@@ -1025,9 +1025,9 @@ async def bulk_create_entities(
                         name, bind_address, bind_port, default_backend, mode,
                         ssl_enabled, ssl_port, timeout_client, maxconn,
                         request_headers, response_headers, tcp_request_rules,
-                        cluster_id, acl_rules, redirect_rules, updated_at
+                        cluster_id, acl_rules, use_backend_rules, redirect_rules, updated_at
                     ) 
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, CURRENT_TIMESTAMP) 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP) 
                     RETURNING id
                 """, 
                     frontend_data["name"],
@@ -1044,6 +1044,7 @@ async def bulk_create_entities(
                     frontend_data.get("tcp_request_rules"),
                     request.cluster_id,
                     json.dumps(frontend_data.get("acl_rules", [])),  # acl_rules
+                    json.dumps(frontend_data.get("use_backend_rules", [])),  # use_backend_rules - CRITICAL FIX
                     json.dumps([])   # redirect_rules
                 )
                 
