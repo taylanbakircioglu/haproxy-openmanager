@@ -739,33 +739,115 @@ async def parse_bulk_config(
         if parse_result.errors:
             logger.warning(f"Config parsing completed with errors: {parse_result.errors}")
         
+        # SMART SSL MATCHING: Check if SSL certificates exist in SSL Management
+        # Get all SYNCED SSL certificates for this cluster (Global + Cluster-specific)
+        ssl_certificates = await conn.fetch("""
+            SELECT DISTINCT s.id, s.name, s.primary_domain as domain, s.status
+            FROM ssl_certificates s
+            LEFT JOIN ssl_certificate_clusters scc ON s.id = scc.ssl_certificate_id
+            WHERE s.is_active = TRUE 
+            AND s.last_config_status = 'APPLIED'
+            AND (
+                NOT EXISTS (SELECT 1 FROM ssl_certificate_clusters WHERE ssl_certificate_id = s.id)
+                OR scc.cluster_id = $1
+            )
+        """, request.cluster_id)
+        
+        # Create SSL name to ID mapping
+        ssl_name_map = {cert['name'].lower(): cert['id'] for cert in ssl_certificates}
+        
+        logger.info(f"BULK IMPORT SSL MATCHING: Found {len(ssl_certificates)} SYNCED SSL certificates for cluster {request.cluster_id}")
+        logger.info(f"SSL name map: {list(ssl_name_map.keys())}")
+        
         # Convert parsed entities to dict format
         frontends_data = []
+        ssl_auto_assigned_frontends = []
+        
         for frontend in parse_result.frontends:
-            # IMPORTANT: Disable SSL in bulk import since certificates must be managed separately
-            # SSL detected in config will generate warnings, but frontends are created without SSL
-            # Users must configure SSL via SSL Management page and then enable it on frontends
+            # SMART SSL MATCHING: Check if SSL cert path matches existing SYNCED SSL
+            ssl_enabled = False
+            ssl_certificate_ids = []
+            ssl_port = None
+            
+            if frontend.ssl_cert_path:
+                # Extract SSL certificate name from path
+                # Example: /etc/ssl/haproxy/demo-global.pem → demo-global
+                import os
+                import re
+                ssl_filename = os.path.basename(frontend.ssl_cert_path)
+                ssl_name = re.sub(r'\.(pem|crt|key)$', '', ssl_filename, flags=re.IGNORECASE)
+                
+                # Check if this SSL exists in SSL Management and is SYNCED
+                if ssl_name.lower() in ssl_name_map:
+                    ssl_cert_id = ssl_name_map[ssl_name.lower()]
+                    ssl_enabled = True
+                    ssl_certificate_ids = [ssl_cert_id]
+                    ssl_port = frontend.ssl_port
+                    ssl_auto_assigned_frontends.append({
+                        'frontend': frontend.name,
+                        'ssl_name': ssl_name,
+                        'ssl_id': ssl_cert_id
+                    })
+                    logger.info(f"BULK IMPORT SSL AUTO-ASSIGN: Frontend '{frontend.name}' matched SSL '{ssl_name}' (ID: {ssl_cert_id})")
+            
             frontends_data.append({
                 "name": frontend.name,
                 "bind_address": frontend.bind_address,
                 "bind_port": frontend.bind_port,
                 "default_backend": frontend.default_backend,
                 "mode": frontend.mode,
-                "ssl_enabled": False,  # Always False for bulk import - SSL must be configured separately
-                "ssl_port": None,  # No SSL port for bulk import
+                "ssl_enabled": ssl_enabled,  # Smart: True if matched SSL found
+                "ssl_certificate_ids": ssl_certificate_ids,  # Smart: Auto-assigned if matched
+                "ssl_port": ssl_port,  # Smart: Preserved if SSL matched
                 "timeout_client": frontend.timeout_client,
                 "maxconn": frontend.maxconn,
                 "request_headers": frontend.request_headers,
                 "response_headers": frontend.response_headers,
                 "tcp_request_rules": frontend.tcp_request_rules,
                 "acl_rules": frontend.acl_rules,
-                "use_backend_rules": frontend.use_backend_rules  # CRITICAL FIX: Include routing rules
+                "use_backend_rules": frontend.use_backend_rules
             })
         
         backends_data = []
+        ssl_auto_assigned_servers = []
+        
         for backend in parse_result.backends:
             servers_data = []
             for server in backend.servers:
+                # SMART SSL MATCHING: Check if server had ca-file that matches SYNCED SSL
+                # Parser stores SSL info in warnings, we need to check original config
+                ssl_certificate_id = None
+                
+                # If server has ssl_enabled and ssl_verify, check if we can match SSL
+                # Parser already changed verify to 'none' if ca-file was removed
+                # We need to restore it to 'required' if we find matching SSL
+                ssl_verify = server.ssl_verify
+                
+                # Check if this server originally had ca-file by looking for matching SSL name
+                # We'll parse it from the original config line if needed
+                # For now, we'll use a different approach: check parser warnings for this server
+                for warning in parse_result.warnings:
+                    if f"Server '{server.server_name}'" in warning and "ca-file" in warning:
+                        # Extract SSL path from warning
+                        import re
+                        ca_file_match = re.search(r"ca-file '([^']+)'", warning)
+                        if ca_file_match:
+                            ca_file_path = ca_file_match.group(1)
+                            ssl_filename = os.path.basename(ca_file_path)
+                            ssl_name = re.sub(r'\.(pem|crt|key)$', '', ssl_filename, flags=re.IGNORECASE)
+                            
+                            # Check if this SSL exists and is SYNCED
+                            if ssl_name.lower() in ssl_name_map:
+                                ssl_certificate_id = ssl_name_map[ssl_name.lower()]
+                                ssl_verify = 'required'  # Restore original verify
+                                ssl_auto_assigned_servers.append({
+                                    'server': f"{backend.name}/{server.server_name}",
+                                    'ssl_name': ssl_name,
+                                    'ssl_id': ssl_certificate_id
+                                })
+                                logger.info(f"BULK IMPORT SSL AUTO-ASSIGN: Server '{backend.name}/{server.server_name}' matched SSL '{ssl_name}' (ID: {ssl_certificate_id})")
+                                break
+                
                 servers_data.append({
                     "server_name": server.server_name,
                     "server_address": server.server_address,
@@ -776,7 +858,8 @@ async def parse_bulk_config(
                     "check_port": server.check_port,
                     "backup_server": server.backup_server,
                     "ssl_enabled": server.ssl_enabled,
-                    "ssl_verify": server.ssl_verify,
+                    "ssl_verify": ssl_verify,  # Smart: 'required' if SSL matched, else parser value
+                    "ssl_certificate_id": ssl_certificate_id,  # Smart: Auto-assigned if matched
                     "cookie_value": server.cookie_value,
                     "inter": server.inter,
                     "fall": server.fall,
@@ -804,6 +887,33 @@ async def parse_bulk_config(
                 "servers": servers_data
             })
         
+        # Add SSL auto-assignment info to warnings
+        ssl_auto_assign_info = []
+        if ssl_auto_assigned_frontends:
+            ssl_auto_assign_info.append(
+                f"SSL AUTO-ASSIGNED: {len(ssl_auto_assigned_frontends)} frontend(s) automatically matched with existing SSL certificates. "
+                f"These frontends will be created with SSL enabled. "
+                f"Matched: {', '.join([f['frontend'] + ' (' + f['ssl_name'] + ')' for f in ssl_auto_assigned_frontends])}"
+            )
+        if ssl_auto_assigned_servers:
+            ssl_auto_assign_info.append(
+                f"SSL AUTO-ASSIGNED: {len(ssl_auto_assigned_servers)} server(s) automatically matched with existing SSL certificates. "
+                f"These servers will have SSL verification enabled with ca-file. "
+                f"Matched: {', '.join([s['server'] + ' (' + s['ssl_name'] + ')' for s in ssl_auto_assigned_servers])}"
+            )
+        
+        # Update SSL warning message to include pre-import tip
+        enhanced_warnings = parse_result.warnings.copy()
+        if any('SSL certificates' in w for w in enhanced_warnings):
+            enhanced_warnings.insert(0, 
+                "TIP: For automatic SSL assignment in bulk import, first upload and apply SSL certificates "
+                "via SSL Management page with matching names, then perform bulk import. "
+                "Certificates with status SYNCED will be automatically assigned."
+            )
+        
+        # Add auto-assignment info at the beginning
+        enhanced_warnings = ssl_auto_assign_info + enhanced_warnings
+        
         log_with_correlation(
             logger, "INFO",
             f"Bulk config parsed successfully",
@@ -811,7 +921,9 @@ async def parse_bulk_config(
             frontends_count=len(frontends_data),
             backends_count=len(backends_data),
             errors_count=len(parse_result.errors),
-            warnings_count=len(parse_result.warnings)
+            warnings_count=len(enhanced_warnings),
+            ssl_auto_frontends=len(ssl_auto_assigned_frontends),
+            ssl_auto_servers=len(ssl_auto_assigned_servers)
         )
         
         return {
@@ -819,11 +931,16 @@ async def parse_bulk_config(
             "frontends": frontends_data,
             "backends": backends_data,
             "errors": parse_result.errors,
-            "warnings": parse_result.warnings,
+            "warnings": enhanced_warnings,
+            "ssl_auto_assigned": {
+                "frontends": ssl_auto_assigned_frontends,
+                "servers": ssl_auto_assigned_servers
+            },
             "summary": {
                 "frontends_count": len(frontends_data),
                 "backends_count": len(backends_data),
-                "total_servers_count": sum(len(b["servers"]) for b in backends_data)
+                "total_servers_count": sum(len(b["servers"]) for b in backends_data),
+                "ssl_auto_assigned_count": len(ssl_auto_assigned_frontends) + len(ssl_auto_assigned_servers)
             }
         }
         

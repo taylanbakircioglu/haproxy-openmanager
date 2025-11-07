@@ -344,6 +344,49 @@ backend web-backend
               showIcon
               style={{ marginBottom: 16 }}
             />
+            
+            <Alert
+              message="Smart SSL Auto-Assignment"
+              description={
+                <div>
+                  <p><strong>Tip for faster import:</strong> If your configuration includes SSL certificates, you can automate SSL assignment:</p>
+                  <ol style={{ marginBottom: 8 }}>
+                    <li>First, go to <strong>SSL Management</strong> page</li>
+                    <li>Upload your SSL certificates with the <strong>exact same name</strong> as in your config</li>
+                    <li>Click <strong>Apply Changes</strong> and wait for SYNCED status</li>
+                    <li>Then perform bulk import - SSL will be automatically assigned</li>
+                  </ol>
+                  <div style={{ background: '#f0f2f5', padding: '8px 12px', borderRadius: '4px', marginTop: 8 }}>
+                    <Text strong>Example:</Text>
+                    <div style={{ marginTop: 4 }}>
+                      <Text code style={{ fontSize: '11px' }}>bind :443 ssl crt /etc/ssl/haproxy/demo-global.pem</Text>
+                      <br />
+                      <Text code style={{ fontSize: '11px' }}>server s1 ... ca-file /etc/ssl/haproxy/elastic.pem</Text>
+                    </div>
+                    <div style={{ marginTop: 8 }}>
+                      <Text type="secondary" style={{ fontSize: '12px' }}>
+                        → Upload certificates named: <Tag>demo-global</Tag> <Tag>elastic</Tag>
+                        <br />
+                        → Apply and wait for SYNCED
+                        <br />
+                        → Bulk import will auto-assign these SSL certificates
+                        <br />
+                        → No manual edit needed after import!
+                      </Text>
+                    </div>
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <Text type="warning" style={{ fontSize: '12px' }}>
+                      <WarningOutlined /> If SSL names don't match, import will work without SSL (you can assign manually later)
+                    </Text>
+                  </div>
+                </div>
+              }
+              type="success"
+              showIcon
+              icon={<CheckCircleOutlined />}
+              style={{ marginBottom: 16 }}
+            />
 
             {selectedCluster && (
               <Alert

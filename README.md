@@ -88,7 +88,7 @@ This architecture provides better security (no inbound connections to HAProxy se
 ✅ **Agent-Based Pull Architecture** - Secure, scalable management without inbound connections  
 ✅ **Multi-Cluster & Pool Management** - Organize and manage multiple HAProxy clusters from one interface  
 ✅ **Frontend/Backend/Server CRUD** - Complete entity management with visual UI  
-✅ **Bulk Config Import** - Import existing `haproxy.cfg` files instantly  
+✅ **Bulk Config Import** - Import existing `haproxy.cfg` files with smart SSL auto-assignment  
 ✅ **Version Control & Rollback** - Every change versioned with one-click restore capability  
 ✅ **Real-Time Monitoring** - Live stats, health checks, and performance dashboards  
 ✅ **SSL Certificate Management** - Centralized SSL with expiration tracking  
@@ -178,6 +178,7 @@ This architecture provides better security (no inbound connections to HAProxy se
 - **Backend Management**: Full CRUD operations for backend pools with load balancing algorithms and health checks
 - **Server Management**: Add, update, remove, and configure backend servers with weights, maintenance mode, and connection limits
 - **Bulk Configuration Import**: Import existing `haproxy.cfg` files to instantly manage all frontends, backends, and servers without manual recreation
+  - **Smart SSL Auto-Assignment**: Automatically matches and assigns SSL certificates during bulk import if they exist in SSL Management with matching names and SYNCED status - eliminates manual SSL configuration after import
 - **Configuration Synchronization**: All entities (backends, frontends, servers, SSL certificates, WAF rules) auto-sync to agents
 - **Configuration Viewer**: View live HAProxy configuration pulled from agents via Configuration Management page
 
