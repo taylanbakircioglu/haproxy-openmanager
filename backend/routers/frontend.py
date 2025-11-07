@@ -341,7 +341,7 @@ async def create_frontend(frontend: FrontendConfig, request: Request, authorizat
         """, frontend.name, frontend.bind_address, frontend.bind_port, 
             frontend.default_backend, frontend.mode, frontend.ssl_enabled,
             frontend.ssl_certificate_id, ssl_cert_ids_json, frontend.ssl_port, frontend.ssl_cert_path, frontend.ssl_cert, frontend.ssl_verify,
-            json.dumps(frontend.acl_rules or []), json.dumps(frontend.redirect_rules or []), frontend.use_backend_rules,
+            json.dumps(frontend.acl_rules or []), json.dumps(frontend.redirect_rules or []), json.dumps(frontend.use_backend_rules or []),
             frontend.request_headers, frontend.response_headers, frontend.tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
             frontend.rate_limit, frontend.compression, frontend.log_separate, frontend.monitor_uri,
             frontend.cluster_id, frontend.maxconn)
@@ -588,7 +588,7 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
         """, frontend.name, frontend.bind_address, frontend.bind_port, 
             frontend.default_backend, frontend.mode, ssl_enabled,
             ssl_certificate_id, ssl_cert_ids_json, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
-            json.dumps(frontend.acl_rules or []), json.dumps(frontend.redirect_rules or []), frontend.use_backend_rules,
+            json.dumps(frontend.acl_rules or []), json.dumps(frontend.redirect_rules or []), json.dumps(frontend.use_backend_rules or []),
             frontend.request_headers, frontend.response_headers, frontend.tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
             frontend.rate_limit, frontend.compression, frontend.log_separate, frontend.monitor_uri,
             frontend.cluster_id, frontend.maxconn, frontend_id)
