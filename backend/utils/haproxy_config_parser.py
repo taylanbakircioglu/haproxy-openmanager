@@ -263,6 +263,9 @@ class HAProxyConfigParser:
                             # Extract certificate paths for warning
                             cert_paths = re.findall(r'crt\s+([^\s]+)', line)
                             if cert_paths:
+                                # CRITICAL: Store first cert path for SSL auto-matching in bulk import
+                                frontend.ssl_cert_path = cert_paths[0]
+                                
                                 self.warnings.append(
                                     f"Frontend '{name}': SSL certificates detected in config ({', '.join(cert_paths)}). "
                                     "SSL certificates should be managed through the SSL Management page, not in the config file."

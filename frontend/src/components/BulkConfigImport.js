@@ -187,13 +187,23 @@ backend web-backend
     },
     {
       title: 'SSL',
-      dataIndex: 'ssl_enabled',
-      key: 'ssl_enabled',
-      render: (enabled) => (
-        <Tooltip title="SSL certificates must be configured separately via SSL Management page. Frontends are created without SSL.">
-          <Tag color="blue">No SSL (Bulk Import)</Tag>
-        </Tooltip>
-      )
+      key: 'ssl',
+      render: (_, record) => {
+        if (record.ssl_enabled && record.ssl_certificate_ids && record.ssl_certificate_ids.length > 0) {
+          return (
+            <div>
+              <Tag color="green">SSL Enabled</Tag>
+              <div style={{ fontSize: '11px', marginTop: 4 }}>
+                <Text type="secondary">Auto-matched ({record.ssl_certificate_ids.length} cert)</Text>
+              </div>
+            </div>
+          );
+        } else if (record.ssl_enabled) {
+          return <Tag color="orange">SSL (No Match)</Tag>;
+        } else {
+          return <Tag color="default">No SSL</Tag>;
+        }
+      }
     },
     {
       title: 'Details',
