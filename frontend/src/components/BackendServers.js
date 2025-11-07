@@ -741,8 +741,15 @@ const BackendServers = () => {
       server_port: parseInt(port),
       weight: server.weight,
       check_enabled: server.check_enabled,
+      check_port: server.check_port || null,
       backup_server: server.backup_server,
-      ssl_enabled: server.ssl_enabled || false
+      ssl_enabled: server.ssl_enabled || false,
+      ssl_verify: server.ssl_verify || null,
+      ssl_certificate_id: server.ssl_certificate_id || null,
+      cookie_value: server.cookie_value || null,
+      inter: server.inter || null,
+      fall: server.fall || null,
+      rise: server.rise || null
     });
     setServerModalVisible(true);
   };
