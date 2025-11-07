@@ -935,12 +935,22 @@ async def parse_bulk_config(
         
         # Update SSL warning message to include pre-import tip (only if there are SSL warnings left)
         enhanced_warnings = filtered_warnings.copy()
-        if any('SSL' in w or 'ca-file' in w for w in enhanced_warnings):
+        
+        # Remove generic SSL handling instructions if ALL SSL was auto-assigned
+        # If user still has unmatched SSL, they need the instructions
+        has_unmatched_ssl = any('SSL' in w or 'ca-file' in w for w in enhanced_warnings)
+        
+        if has_unmatched_ssl:
+            # There are still unmatched SSL certificates
             enhanced_warnings.insert(0, 
                 "TIP: For automatic SSL assignment in bulk import, first create and apply SSL certificates "
                 "via SSL Management page (enter PEM content) with matching names, then perform bulk import. "
                 "Certificates with status SYNCED will be automatically assigned."
             )
+        else:
+            # All SSL was auto-assigned or no SSL in config
+            # No need for manual SSL instructions
+            pass
         
         # Add auto-assignment info at the beginning
         enhanced_warnings = ssl_auto_assign_info + enhanced_warnings
@@ -1060,16 +1070,22 @@ async def bulk_create_entities(
             import json
             from services.haproxy_config import generate_haproxy_config_for_cluster
             
+            # Track skipped entities for user feedback
+            skipped_entities = []
+            
             # Create backends first (frontends may reference them)
             for backend_data in request.backends:
-                # Check if backend already exists
+                # Check if backend already exists (check both active AND inactive)
+                # CRITICAL: Must check inactive too, otherwise unique constraint fails on INSERT
                 existing = await conn.fetchrow("""
-                    SELECT id FROM backends 
-                    WHERE name = $1 AND cluster_id = $2 AND is_active = TRUE
+                    SELECT id, is_active FROM backends 
+                    WHERE name = $1 AND cluster_id = $2
                 """, backend_data["name"], request.cluster_id)
                 
                 if existing:
-                    logger.warning(f"Backend '{backend_data['name']}' already exists, skipping")
+                    status_text = "active" if existing['is_active'] else "deleted/inactive"
+                    skipped_entities.append(f"Backend '{backend_data['name']}' ({status_text})")
+                    logger.warning(f"Backend '{backend_data['name']}' already exists ({status_text}), skipping")
                     continue
                 
                 # Insert backend
@@ -1168,14 +1184,17 @@ async def bulk_create_entities(
             
             # Create frontends
             for frontend_data in request.frontends:
-                # Check if frontend already exists
+                # Check if frontend already exists (check both active AND inactive)
+                # CRITICAL: Must check inactive too, otherwise unique constraint fails on INSERT
                 existing = await conn.fetchrow("""
-                    SELECT id FROM frontends 
-                    WHERE name = $1 AND cluster_id = $2 AND is_active = TRUE
+                    SELECT id, is_active FROM frontends 
+                    WHERE name = $1 AND cluster_id = $2
                 """, frontend_data["name"], request.cluster_id)
                 
                 if existing:
-                    logger.warning(f"Frontend '{frontend_data['name']}' already exists, skipping")
+                    status_text = "active" if existing['is_active'] else "deleted/inactive"
+                    skipped_entities.append(f"Frontend '{frontend_data['name']}' ({status_text})")
+                    logger.warning(f"Frontend '{frontend_data['name']}' already exists ({status_text}), skipping")
                     continue
                 
                 # Insert frontend
@@ -1265,14 +1284,28 @@ async def bulk_create_entities(
             created_servers=len(created_entities["servers"])
         )
         
+        # Prepare user-friendly message
+        message_parts = []
+        if created_entities["frontends"] or created_entities["backends"] or created_entities["servers"]:
+            message_parts.append(f"Created: {len(created_entities['frontends'])} frontends, {len(created_entities['backends'])} backends, {len(created_entities['servers'])} servers")
+        
+        if skipped_entities:
+            message_parts.append(f"Skipped {len(skipped_entities)} existing entities: {', '.join(skipped_entities[:5])}")
+            if len(skipped_entities) > 5:
+                message_parts.append(f"... and {len(skipped_entities) - 5} more")
+        
+        message = ". ".join(message_parts) + ". Please apply changes to activate."
+        
         return {
             "success": True,
-            "message": "Entities created successfully. Please apply changes to activate.",
+            "message": message,
             "created": created_entities,
+            "skipped": skipped_entities,
             "summary": {
                 "frontends": len(created_entities["frontends"]),
                 "backends": len(created_entities["backends"]),
-                "servers": len(created_entities["servers"])
+                "servers": len(created_entities["servers"]),
+                "skipped": len(skipped_entities)
             },
             "config_version": version_name,
             "requires_apply": True
