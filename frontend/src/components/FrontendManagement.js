@@ -531,12 +531,19 @@ const FrontendManagement = () => {
       formattedRedirectRules = frontend.redirect_rules.join('\n');
     }
     
+    // Format use_backend rules for textarea (array to multi-line string)
+    let formattedUseBackendRules = frontend.use_backend_rules;
+    if (Array.isArray(frontend.use_backend_rules)) {
+      formattedUseBackendRules = frontend.use_backend_rules.join('\n');
+    }
+    
     form.setFieldsValue({
       ...frontend,
       ssl_enabled: frontend.ssl_enabled || false,
       ssl_certificate_ids: sslCertIds,
       acl_rules: formattedAclRules,
-      redirect_rules: formattedRedirectRules
+      redirect_rules: formattedRedirectRules,
+      use_backend_rules: formattedUseBackendRules
     });
     
     // Update SSL field visibility after setting values

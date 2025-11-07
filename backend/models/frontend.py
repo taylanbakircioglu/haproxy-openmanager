@@ -20,7 +20,7 @@ class FrontendConfig(BaseModel):
     ssl_verify: Optional[str] = "optional"
     acl_rules: Any = []
     redirect_rules: Any = []
-    use_backend_rules: Optional[str] = None
+    use_backend_rules: Any = []  # Changed from Optional[str] to Any for list support
     request_headers: Optional[str] = None
     response_headers: Optional[str] = None
     tcp_request_rules: Optional[str] = None
@@ -55,6 +55,25 @@ class FrontendConfig(BaseModel):
     
     @validator('redirect_rules', pre=True, always=True)  
     def parse_redirect_rules(cls, v):
+        if isinstance(v, str):
+            v = v.strip()
+            # Handle JSON string (e.g., "[]" or "[\"rule1\", \"rule2\"]")
+            if v.startswith('[') and v.endswith(']'):
+                try:
+                    parsed = json.loads(v)
+                    if isinstance(parsed, list):
+                        return parsed
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            # Handle newline-separated string
+            if v:
+                return [rule.strip() for rule in v.split('\n') if rule.strip()]
+        elif isinstance(v, list):
+            return v
+        return []
+    
+    @validator('use_backend_rules', pre=True, always=True)
+    def parse_use_backend_rules(cls, v):
         if isinstance(v, str):
             v = v.strip()
             # Handle JSON string (e.g., "[]" or "[\"rule1\", \"rule2\"]")
