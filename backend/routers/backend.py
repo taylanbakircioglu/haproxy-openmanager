@@ -174,7 +174,8 @@ async def get_backends(cluster_id: Optional[int] = None):
     try:
         conn = await get_database_connection()
         
-        # Get backends with optional cluster filter (include inactive for pending changes)
+        # Get backends with optional cluster filter (ONLY show active backends)
+        # CRITICAL FIX: Add is_active = TRUE filter to prevent soft-deleted backends from appearing
         if cluster_id:
             backends = await conn.fetch("""
                 SELECT id, name, balance_method, mode, health_check_uri, 
@@ -183,7 +184,7 @@ async def get_backends(cluster_id: Optional[int] = None):
                        request_headers, response_headers,
                        is_active, created_at, updated_at, cluster_id, last_config_status,
                        timeout_connect, timeout_server, timeout_queue
-                FROM backends WHERE cluster_id = $1 ORDER BY name
+                FROM backends WHERE cluster_id = $1 AND is_active = TRUE ORDER BY name
             """, cluster_id)
         else:
             backends = await conn.fetch("""
@@ -193,12 +194,13 @@ async def get_backends(cluster_id: Optional[int] = None):
                        request_headers, response_headers,
                        is_active, created_at, updated_at, cluster_id, last_config_status,
                        timeout_connect, timeout_server, timeout_queue
-                FROM backends ORDER BY name
+                FROM backends WHERE is_active = TRUE ORDER BY name
             """)
         
         result = []
         for backend in backends:
-            # Get servers for this backend with cluster_id
+            # Get servers for this backend with cluster_id (ONLY show active servers)
+            # CRITICAL FIX: Add is_active = TRUE filter to prevent soft-deleted servers from appearing
             if cluster_id:
                 servers = await conn.fetch("""
                     SELECT id, server_name, server_address, server_port, weight, maxconn,
@@ -207,7 +209,7 @@ async def get_backends(cluster_id: Optional[int] = None):
                            is_active, cluster_id,
                            haproxy_status, haproxy_status_updated_at, backend_name
                     FROM backend_servers 
-                    WHERE backend_name = $1 AND cluster_id = $2 ORDER BY server_name
+                    WHERE backend_name = $1 AND cluster_id = $2 AND is_active = TRUE ORDER BY server_name
                 """, backend["name"], cluster_id)
             else:
                 servers = await conn.fetch("""
@@ -217,7 +219,7 @@ async def get_backends(cluster_id: Optional[int] = None):
                            is_active, cluster_id,
                            haproxy_status, haproxy_status_updated_at, backend_name
                     FROM backend_servers 
-                    WHERE backend_name = $1 ORDER BY server_name
+                    WHERE backend_name = $1 AND is_active = TRUE ORDER BY server_name
                 """, backend["name"]) 
             
             # Prepare server list with real-time HAProxy status from agents
