@@ -1670,40 +1670,41 @@ defaults
 
             logger.info(f"APPLY CLEANUP: Hard deleted inactive entities for cluster {cluster_id}")
         
-        # CRITICAL FIX: Update ALL entities that are still PENDING to APPLIED after successful Apply
+        # CRITICAL FIX: Update ALL entities that are still PENDING or REJECTED to APPLIED after successful Apply
         # This handles cases where entities were marked PENDING but not included in specific ID lists
         # (e.g., parent backends marked PENDING due to server updates)
+        # REJECTED entities are also marked as APPLIED because applying new changes supersedes rejection
         # This must run OUTSIDE the restore block to work for all Apply operations
         try:
             await conn.execute("""
                 UPDATE backends 
                 SET last_config_status = 'APPLIED', updated_at = CURRENT_TIMESTAMP
-                WHERE cluster_id = $1 AND last_config_status = 'PENDING'
+                WHERE cluster_id = $1 AND last_config_status IN ('PENDING', 'REJECTED')
             """, cluster_id)
-            logger.info(f"APPLY CLEANUP: Updated all PENDING backends to APPLIED status")
+            logger.info(f"APPLY CLEANUP: Updated all PENDING/REJECTED backends to APPLIED status")
             
             await conn.execute("""
                 UPDATE frontends 
                 SET last_config_status = 'APPLIED', updated_at = CURRENT_TIMESTAMP
-                WHERE cluster_id = $1 AND last_config_status = 'PENDING'
+                WHERE cluster_id = $1 AND last_config_status IN ('PENDING', 'REJECTED')
             """, cluster_id)
-            logger.info(f"APPLY CLEANUP: Updated all PENDING frontends to APPLIED status")
+            logger.info(f"APPLY CLEANUP: Updated all PENDING/REJECTED frontends to APPLIED status")
             
             await conn.execute("""
                 UPDATE waf_rules 
                 SET last_config_status = 'APPLIED', updated_at = CURRENT_TIMESTAMP
-                WHERE cluster_id = $1 AND last_config_status = 'PENDING'
+                WHERE cluster_id = $1 AND last_config_status IN ('PENDING', 'REJECTED')
             """, cluster_id)
-            logger.info(f"APPLY CLEANUP: Updated all PENDING WAF rules to APPLIED status")
+            logger.info(f"APPLY CLEANUP: Updated all PENDING/REJECTED WAF rules to APPLIED status")
             
             # Backend servers might not have last_config_status column in all DB versions
             try:
                 await conn.execute("""
                     UPDATE backend_servers 
                     SET last_config_status = 'APPLIED', updated_at = CURRENT_TIMESTAMP
-                    WHERE cluster_id = $1 AND last_config_status = 'PENDING'
+                    WHERE cluster_id = $1 AND last_config_status IN ('PENDING', 'REJECTED')
                 """, cluster_id)
-                logger.info(f"APPLY CLEANUP: Updated all PENDING servers to APPLIED status")
+                logger.info(f"APPLY CLEANUP: Updated all PENDING/REJECTED servers to APPLIED status")
             except Exception as e:
                 logger.info(f"APPLY CLEANUP: backend_servers.last_config_status column not found, skipping: {e}")
             

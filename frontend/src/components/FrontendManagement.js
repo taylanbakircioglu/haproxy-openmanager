@@ -519,10 +519,24 @@ const FrontendManagement = () => {
       sslCertIds = [frontend.ssl_certificate_id];
     }
     
+    // Format ACL rules for textarea (array to multi-line string)
+    let formattedAclRules = frontend.acl_rules;
+    if (Array.isArray(frontend.acl_rules)) {
+      formattedAclRules = frontend.acl_rules.join('\n');
+    }
+    
+    // Format redirect rules for textarea (array to multi-line string)
+    let formattedRedirectRules = frontend.redirect_rules;
+    if (Array.isArray(frontend.redirect_rules)) {
+      formattedRedirectRules = frontend.redirect_rules.join('\n');
+    }
+    
     form.setFieldsValue({
       ...frontend,
       ssl_enabled: frontend.ssl_enabled || false,
-      ssl_certificate_ids: sslCertIds
+      ssl_certificate_ids: sslCertIds,
+      acl_rules: formattedAclRules,
+      redirect_rules: formattedRedirectRules
     });
     
     // Update SSL field visibility after setting values

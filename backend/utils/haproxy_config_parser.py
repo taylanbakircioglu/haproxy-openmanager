@@ -329,8 +329,10 @@ class HAProxyConfigParser:
                 
                 # Parse HTTP response headers
                 if line.startswith('http-response '):
-                    # Check for unsupported capture references
-                    if 'capture.req.hdr' in line or 'capture.res.hdr' in line or '%[capture.req.hdr' in line or '%[capture.res.hdr' in line:
+                    # Check for unsupported capture references using regex for flexible matching
+                    # Matches: %[capture.req.hdr(0)], %[capture.res.hdr(1)], capture.req.hdr, etc.
+                    capture_pattern = r'(%\[)?capture\.(req|res)\.hdr(\(\d+\))?(\])?'
+                    if re.search(capture_pattern, line):
                         self.warnings.append(
                             f"Frontend '{name}': Response header using capture reference detected and skipped: '{line.strip()}'. "
                             "This requires 'http-request capture' directive which is not supported in bulk import. "
@@ -668,6 +670,16 @@ class HAProxyConfigParser:
         verify_match = re.search(r'verify\s+(none|required)', options, re.IGNORECASE)
         if verify_match:
             server.ssl_verify = verify_match.group(1).lower()
+        
+        # Check for SSL ca-file path and warn user to remove it
+        ca_file_match = re.search(r'ca-file\s+(\S+)', options, re.IGNORECASE)
+        if ca_file_match:
+            ca_file_path = ca_file_match.group(1)
+            self.warnings.append(
+                f"🔒 SSL: Server '{name}' has ca-file path '{ca_file_path}' which has been REMOVED from import. "
+                f"SSL certificates should be managed through SSL Management page. "
+                f"After import, edit this server and select SSL certificate from the dropdown."
+            )
         
         # Parse cookie value
         cookie_match = re.search(r'cookie\s+(\S+)', options, re.IGNORECASE)

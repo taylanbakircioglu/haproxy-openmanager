@@ -62,6 +62,7 @@ const BackendServers = () => {
   const navigate = useNavigate();
   const [backends, setBackends] = useState([]);
   const [frontends, setFrontends] = useState([]);
+  const [sslCertificates, setSslCertificates] = useState([]);
   const [filteredBackends, setFilteredBackends] = useState([]);
   const [showPending, setShowPending] = useState(true);  // Default TRUE: users must see their changes
   const [showRejected, setShowRejected] = useState(true);  // Default TRUE: users must see rejected items
@@ -113,6 +114,7 @@ const BackendServers = () => {
   useEffect(() => {
     fetchBackends();
     fetchFrontends();
+    fetchSSLCertificates();
     checkPendingChanges();
   }, [selectedCluster]);
 
@@ -141,6 +143,17 @@ const BackendServers = () => {
     } catch (error) {
       console.error('Failed to fetch frontends:', error);
       // Don't show error message for frontends as it's just for dependency checking
+    }
+  };
+
+  const fetchSSLCertificates = async () => {
+    try {
+      const params = selectedCluster ? { cluster_id: selectedCluster.id } : {};
+      const response = await axios.get('/api/ssl-certificates', { params });
+      setSslCertificates(response.data.certificates || []);
+    } catch (error) {
+      console.error('Failed to fetch SSL certificates:', error);
+      // Don't show error message as SSL is optional
     }
   };
 
@@ -1857,6 +1870,49 @@ const BackendServers = () => {
               </Form.Item>
             </Col>
           </Row>
+
+          <Form.Item noStyle shouldUpdate={(prevValues, currentValues) => prevValues.ssl_enabled !== currentValues.ssl_enabled}>
+            {({ getFieldValue }) =>
+              getFieldValue('ssl_enabled') ? (
+                <Row gutter={16}>
+                  <Col span={24}>
+                    <Form.Item
+                      name="ssl_certificate_id"
+                      label="SSL Certificate"
+                      tooltip="Select SSL certificate for backend server (required if ssl_verify is 'required')"
+                      rules={[
+                        ({ getFieldValue }) => ({
+                          validator(_, value) {
+                            const sslVerify = getFieldValue('ssl_verify');
+                            if (sslVerify === 'required' && !value) {
+                              return Promise.reject(new Error('SSL Certificate is required when SSL verification is set to "required"'));
+                            }
+                            return Promise.resolve();
+                          },
+                        }),
+                      ]}
+                    >
+                      <Select
+                        allowClear
+                        placeholder="Select an SSL certificate (optional unless verify=required)"
+                        showSearch
+                        filterOption={(input, option) =>
+                          option.children.toLowerCase().includes(input.toLowerCase())
+                        }
+                      >
+                        {sslCertificates.map((cert) => (
+                          <Option key={cert.id} value={cert.id}>
+                            {cert.name} - {cert.domain}
+                            {cert.expiry_date && ` (Expires: ${new Date(cert.expiry_date).toLocaleDateString()})`}
+                          </Option>
+                        ))}
+                      </Select>
+                    </Form.Item>
+                  </Col>
+                </Row>
+              ) : null
+            }
+          </Form.Item>
 
           <Row gutter={16}>
             <Col span={24}>
