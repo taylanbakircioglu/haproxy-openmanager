@@ -112,6 +112,15 @@ const BackendServers = () => {
   };
 
   useEffect(() => {
+    // CRITICAL FIX: Clear state when cluster changes to prevent showing other cluster's data
+    // Race condition: Old cluster data remains visible while new cluster data is fetching
+    if (selectedCluster) {
+      setBackends([]);
+      setFilteredBackends([]);
+      setFrontends([]);
+      setSslCertificates([]);
+    }
+    
     fetchBackends();
     fetchFrontends();
     fetchSSLCertificates();
@@ -1932,15 +1941,41 @@ const BackendServers = () => {
                         placeholder="Select an SSL certificate (optional unless verify=required)"
                         showSearch
                         filterOption={(input, option) =>
-                          option.children.toLowerCase().includes(input.toLowerCase())
+                          (option.label || '').toLowerCase().includes(input.toLowerCase())
                         }
+                        optionLabelProp="label"
                       >
-                        {sslCertificates.map((cert) => (
-                          <Option key={cert.id} value={cert.id}>
-                            {cert.name} - {cert.domain}
-                            {cert.expiry_date && ` (Expires: ${new Date(cert.expiry_date).toLocaleDateString()})`}
-                          </Option>
-                        ))}
+                        {sslCertificates.map((cert) => {
+                          // Status icon based on certificate validity
+                          const statusIcon = cert.status === 'valid' ? '✅' : 
+                                            cert.status === 'expiring_soon' ? '⚠️' : '❌';
+                          const expiryInfo = cert.days_until_expiry !== undefined ? 
+                            `(${cert.days_until_expiry} days)` : '';
+                          const sslTypeTag = cert.ssl_type === 'Global' ? '🌍 Global' : '📍 Cluster';
+                          
+                          return (
+                            <Option 
+                              key={cert.id} 
+                              value={cert.id}
+                              label={`${cert.name} - ${cert.domain}`}
+                            >
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <span>
+                                  <strong>{cert.name}</strong> - {cert.domain}
+                                  <Tag 
+                                    color={cert.ssl_type === 'Global' ? 'blue' : 'green'} 
+                                    style={{ marginLeft: 8, fontSize: '10px' }}
+                                  >
+                                    {sslTypeTag}
+                                  </Tag>
+                                </span>
+                                <span style={{ fontSize: '12px', color: '#666', marginLeft: 12 }}>
+                                  {statusIcon} {expiryInfo}
+                                </span>
+                              </div>
+                            </Option>
+                          );
+                        })}
                       </Select>
                     </Form.Item>
                   </Col>

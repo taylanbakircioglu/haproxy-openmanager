@@ -399,6 +399,13 @@ const DashboardV2 = () => {
   useEffect(() => {
     if (!selectedCluster) return;
     
+    // CRITICAL FIX: Clear all dashboard state when cluster changes
+    setStatsData({});
+    setFrontendOptions([]);
+    setBackendOptions([]);
+    setBackendHealth([]);
+    setSlowestBackends([]);
+    
     let isMounted = true;
     
     const loadInitialData = async () => {

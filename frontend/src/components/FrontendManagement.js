@@ -147,6 +147,15 @@ const FrontendManagement = () => {
   };
 
   useEffect(() => {
+    // CRITICAL FIX: Clear state when cluster changes to prevent showing other cluster's data
+    // Race condition: Old cluster data remains visible while new cluster data is fetching
+    if (selectedCluster) {
+      setFrontends([]);
+      setFilteredFrontends([]);
+      setBackends([]);
+      setSslCertificates([]);
+    }
+    
     fetchFrontends();
     fetchBackends();
     fetchSSLCertificates();

@@ -274,6 +274,13 @@ const WAFManagement = () => {
   };
 
   useEffect(() => {
+    // CRITICAL FIX: Clear state when cluster changes to prevent showing other cluster's data
+    if (selectedCluster) {
+      setRules([]);
+      setFilteredRules([]);
+      setFrontends([]);
+    }
+    
     fetchRules();
     fetchStats();
     checkPendingChanges();
