@@ -204,6 +204,7 @@ backend web-backend
           {record.response_headers && <Tag color="green">Resp Headers</Tag>}
           {record.tcp_request_rules && <Tag color="purple">TCP Rules</Tag>}
           {record.acl_rules && record.acl_rules.length > 0 && <Tag color="orange">{record.acl_rules.length} ACLs</Tag>}
+          {record.use_backend_rules && record.use_backend_rules.length > 0 && <Tag color="cyan">{record.use_backend_rules.length} Routes</Tag>}
         </Space>
       )
     }
@@ -671,7 +672,8 @@ backend web-backend
                         expandable={{
                           expandedRowRender: (frontend) => {
                             const hasDetails = frontend.request_headers || frontend.response_headers || 
-                                             frontend.tcp_request_rules || (frontend.acl_rules && frontend.acl_rules.length > 0);
+                                             frontend.tcp_request_rules || (frontend.acl_rules && frontend.acl_rules.length > 0) ||
+                                             (frontend.use_backend_rules && frontend.use_backend_rules.length > 0);
                             
                             if (!hasDetails) return null;
                             
@@ -724,7 +726,8 @@ backend web-backend
                           },
                           rowExpandable: (record) => 
                             record.request_headers || record.response_headers || 
-                            record.tcp_request_rules || (record.acl_rules && record.acl_rules.length > 0)
+                            record.tcp_request_rules || (record.acl_rules && record.acl_rules.length > 0) ||
+                            (record.use_backend_rules && record.use_backend_rules.length > 0)
                         }}
                       />
                     </Panel>

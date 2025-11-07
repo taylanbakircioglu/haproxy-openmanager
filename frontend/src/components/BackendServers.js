@@ -131,7 +131,6 @@ const BackendServers = () => {
     // CRITICAL FIX: Don't fetch if no cluster selected to prevent race condition
     // Race condition: First fetch (cluster=undefined) returns all backends and overwrites filtered results
     if (!selectedCluster) {
-      console.log('FETCH BACKENDS: No cluster selected, skipping fetch');
       setBackends([]);
       setFilteredBackends([]);
       return;
@@ -140,14 +139,6 @@ const BackendServers = () => {
     setLoading(true);
     try {
       const params = { cluster_id: selectedCluster.id };
-      
-      // CRITICAL DEBUG: Log what we're sending to API
-      console.log('FETCH BACKENDS DEBUG:', {
-        selectedCluster: selectedCluster?.name,
-        cluster_id: selectedCluster?.id,
-        params: params,
-        url: '/api/backends'
-      });
       
       // CRITICAL FIX: Add cache busting to prevent stale data from appearing
       // Browser/axios may cache GET requests, causing deleted backends to reappear
@@ -160,14 +151,6 @@ const BackendServers = () => {
         }
       });
       const fetchedBackends = response.data.backends || [];
-      
-      // CRITICAL DEBUG: Log what API returned
-      console.log('FETCH BACKENDS RESPONSE:', {
-        total_received: fetchedBackends.length,
-        backend_ids: fetchedBackends.map(b => b.id),
-        backend_cluster_ids: fetchedBackends.map(b => ({id: b.id, name: b.name, cluster_id: b.cluster_id}))
-      });
-      
       setBackends(fetchedBackends);
       // CRITICAL FIX: Apply status filters after fetching to maintain filter state
       // This prevents backends from disappearing when updated (e.g., APPLIED → PENDING)
@@ -1979,18 +1962,21 @@ const BackendServers = () => {
                         optionLabelProp="label"
                       >
                         {sslCertificates.map((cert) => {
-                          // Status icon based on certificate validity
-                          const statusIcon = cert.status === 'valid' ? 'Valid' : 
+                          // Status and type info for both dropdown and selected view
+                          const statusText = cert.status === 'valid' ? 'Valid' : 
                                             cert.status === 'expiring_soon' ? 'Expiring' : 'Expired';
                           const expiryInfo = cert.days_until_expiry !== undefined ? 
-                            `(${cert.days_until_expiry} days)` : '';
-                          const sslTypeTag = cert.ssl_type === 'Global' ? 'Global' : 'Cluster';
+                            `${cert.days_until_expiry} days` : '';
+                          const sslType = cert.ssl_type === 'Global' ? 'Global' : 'Cluster';
+                          
+                          // Rich label for selected view (shows in the input when selected)
+                          const richLabel = `${cert.name} - ${cert.domain} [${sslType}] ${statusText}${expiryInfo ? ' (' + expiryInfo + ')' : ''}`;
                           
                           return (
                             <Option 
                               key={cert.id} 
                               value={cert.id}
-                              label={`${cert.name} - ${cert.domain}`}
+                              label={richLabel}
                             >
                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <span>
@@ -1999,11 +1985,11 @@ const BackendServers = () => {
                                     color={cert.ssl_type === 'Global' ? 'blue' : 'green'} 
                                     style={{ marginLeft: 8, fontSize: '10px' }}
                                   >
-                                    {sslTypeTag}
+                                    {sslType}
                                   </Tag>
                                 </span>
                                 <span style={{ fontSize: '12px', color: '#666', marginLeft: 12 }}>
-                                  {statusIcon} {expiryInfo}
+                                  {statusText} {expiryInfo && `(${expiryInfo})`}
                                 </span>
                               </div>
                             </Option>

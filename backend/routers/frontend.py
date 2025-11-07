@@ -270,7 +270,7 @@ async def get_frontends(cluster_id: Optional[int] = None):
                     "ssl_verify": f.get("ssl_verify", "optional"),
                     "acl_rules": parse_jsonb_field(f.get("acl_rules"), []),
                     "redirect_rules": parse_jsonb_field(f.get("redirect_rules"), []),
-                    "use_backend_rules": f.get("use_backend_rules"),
+                    "use_backend_rules": parse_jsonb_field(f.get("use_backend_rules"), []),
                     "request_headers": f.get("request_headers"),
                     "response_headers": f.get("response_headers"),
                     "timeout_client": f.get("timeout_client"),
