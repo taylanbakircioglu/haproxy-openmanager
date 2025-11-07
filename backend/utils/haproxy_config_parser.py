@@ -79,8 +79,8 @@ class ParsedFrontend:
     log_separate: bool = False
     monitor_uri: Optional[str] = None
     acl_rules: Optional[list] = None
+    use_backend_rules: Optional[list] = None  # Changed from str to list for consistency
     redirect_rules: Optional[list] = None
-    use_backend_rules: Optional[str] = None
     request_headers: Optional[str] = None
     response_headers: Optional[str] = None
     tcp_request_rules: Optional[str] = None  # TCP request directives (for TCP mode)
@@ -228,10 +228,11 @@ class HAProxyConfigParser:
             frontend = ParsedFrontend(name=name)
             ssl_cert_found = False
             
-            # Collect HTTP headers, ACL rules, and TCP rules
+            # Collect HTTP headers, ACL rules, use_backend rules, and TCP rules
             request_headers_list = []
             response_headers_list = []
             acl_rules_list = []
+            use_backend_rules_list = []
             tcp_request_rules_list = []
 
             for line in lines:
@@ -345,6 +346,10 @@ class HAProxyConfigParser:
                 if line.startswith('acl '):
                     acl_rules_list.append(line)
                 
+                # Parse use_backend rules
+                if line.startswith('use_backend '):
+                    use_backend_rules_list.append(line)
+                
                 # Parse options (httplog, http-keep-alive, etc.)
                 # CRITICAL FIX: Do NOT add option directives to request_headers
                 # Options are separate HAProxy config directives, not HTTP headers
@@ -395,6 +400,9 @@ class HAProxyConfigParser:
             
             if acl_rules_list:
                 frontend.acl_rules = acl_rules_list
+            
+            if use_backend_rules_list:
+                frontend.use_backend_rules = use_backend_rules_list
             
             if tcp_request_rules_list:
                 frontend.tcp_request_rules = '\n'.join(tcp_request_rules_list)

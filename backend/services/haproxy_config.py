@@ -316,7 +316,13 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 if isinstance(acl_rules, list):
                     for acl in acl_rules:
                         if acl and acl.strip():
-                            config_lines.append(f"    acl {acl.strip()}")
+                            # CRITICAL FIX: ACL rules from parser already include "acl" keyword
+                            # Don't add it again! Parser stores: "acl name condition value"
+                            # If ACL doesn't start with "acl ", add it (for manual entries)
+                            acl_text = acl.strip()
+                            if not acl_text.startswith('acl '):
+                                acl_text = f"acl {acl_text}"
+                            config_lines.append(f"    {acl_text}")
             
             # Redirect Rules
             if frontend.get('redirect_rules'):
@@ -326,18 +332,38 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     try:
                         redirect_rules = json.loads(redirect_rules)
                     except:
-                        redirect_rules = []
+                        # Legacy format: newline-separated string
+                        redirect_rules = [r.strip() for r in redirect_rules.split('\n') if r.strip()]
                 
                 if isinstance(redirect_rules, list):
                     for redirect in redirect_rules:
-                        if redirect and redirect.strip():
-                            config_lines.append(f"    redirect {redirect.strip()}")
+                        if redirect:
+                            redirect_text = str(redirect).strip() if redirect else ''
+                            if redirect_text:
+                                # Redirect rules don't need prefix (e.g., "scheme https if !{ ssl_fc }")
+                                config_lines.append(f"    redirect {redirect_text}")
             
             # Use Backend Rules
             if frontend.get('use_backend_rules'):
-                for rule in frontend['use_backend_rules'].split('\n'):
-                    if rule.strip():
-                        config_lines.append(f"    use_backend {rule.strip()}")
+                use_backend_rules = frontend['use_backend_rules']
+                # Parse JSON string if needed
+                if isinstance(use_backend_rules, str):
+                    try:
+                        use_backend_rules = json.loads(use_backend_rules)
+                    except:
+                        # Legacy format: newline-separated string
+                        use_backend_rules = [r.strip() for r in use_backend_rules.split('\n') if r.strip()]
+                
+                if isinstance(use_backend_rules, list):
+                    for rule in use_backend_rules:
+                        if rule and rule.strip():
+                            # CRITICAL FIX: use_backend rules from parser already include "use_backend" keyword
+                            # Don't add it again! Parser stores: "use_backend BackendName if condition"
+                            # If rule doesn't start with "use_backend ", add it (for manual entries)
+                            rule_text = rule.strip()
+                            if not rule_text.startswith('use_backend '):
+                                rule_text = f"use_backend {rule_text}"
+                            config_lines.append(f"    {rule_text}")
             
             # Default backend (already added at the beginning of frontend section)
             
