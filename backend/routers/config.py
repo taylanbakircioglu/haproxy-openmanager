@@ -7,6 +7,8 @@ from fastapi import APIRouter, HTTPException, Header, Request
 from pydantic import BaseModel
 from typing import Dict, List, Any, Optional
 import logging
+import os
+import re
 
 from utils.haproxy_validator import validate_haproxy_config, get_validation_summary
 from utils.config_templates import (
@@ -689,6 +691,7 @@ async def parse_bulk_config(
         from database.connection import get_database_connection, close_database_connection
         
         # Check if user has admin role in database
+        # CRITICAL FIX: Keep connection open for SSL query later
         conn = await get_database_connection()
         user_roles = await conn.fetch("""
             SELECT r.name 
@@ -696,7 +699,7 @@ async def parse_bulk_config(
             JOIN roles r ON ur.role_id = r.id
             WHERE ur.user_id = $1 AND r.is_active = true
         """, current_user["id"])
-        await close_database_connection(conn)
+        # DON'T close connection yet - needed for SSL query below
         
         role_names = [role['name'] for role in user_roles]
         is_super_admin = (
@@ -772,8 +775,6 @@ async def parse_bulk_config(
             if frontend.ssl_cert_path:
                 # Extract SSL certificate name from path
                 # Example: /etc/ssl/haproxy/demo-global.pem → demo-global
-                import os
-                import re
                 ssl_filename = os.path.basename(frontend.ssl_cert_path)
                 ssl_name = re.sub(r'\.(pem|crt|key)$', '', ssl_filename, flags=re.IGNORECASE)
                 
@@ -829,7 +830,6 @@ async def parse_bulk_config(
                 for warning in parse_result.warnings:
                     if f"Server '{server.server_name}'" in warning and "ca-file" in warning:
                         # Extract SSL path from warning
-                        import re
                         ca_file_match = re.search(r"ca-file '([^']+)'", warning)
                         if ca_file_match:
                             ca_file_path = ca_file_match.group(1)
@@ -926,6 +926,9 @@ async def parse_bulk_config(
             ssl_auto_servers=len(ssl_auto_assigned_servers)
         )
         
+        # Close connection before returning
+        await close_database_connection(conn)
+        
         return {
             "success": True,
             "frontends": frontends_data,
@@ -945,8 +948,14 @@ async def parse_bulk_config(
         }
         
     except HTTPException:
+        # Close connection on HTTP exception
+        if 'conn' in locals():
+            await close_database_connection(conn)
         raise
     except Exception as e:
+        # Close connection on error
+        if 'conn' in locals():
+            await close_database_connection(conn)
         logger.error(f"Bulk config parsing failed: {e}")
         raise HTTPException(
             status_code=500,
