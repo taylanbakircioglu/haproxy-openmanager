@@ -1947,11 +1947,11 @@ const BackendServers = () => {
                       >
                         {sslCertificates.map((cert) => {
                           // Status icon based on certificate validity
-                          const statusIcon = cert.status === 'valid' ? '✅' : 
-                                            cert.status === 'expiring_soon' ? '⚠️' : '❌';
+                          const statusIcon = cert.status === 'valid' ? 'Valid' : 
+                                            cert.status === 'expiring_soon' ? 'Expiring' : 'Expired';
                           const expiryInfo = cert.days_until_expiry !== undefined ? 
                             `(${cert.days_until_expiry} days)` : '';
-                          const sslTypeTag = cert.ssl_type === 'Global' ? '🌍 Global' : '📍 Cluster';
+                          const sslTypeTag = cert.ssl_type === 'Global' ? 'Global' : 'Cluster';
                           
                           return (
                             <Option 

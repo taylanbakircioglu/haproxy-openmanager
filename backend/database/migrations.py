@@ -1520,8 +1520,47 @@ async def run_all_migrations():
     await ensure_agent_config_management_tables()
     await add_cluster_id_to_agent_config_requests()
     await fix_users_unique_constraints_for_soft_delete()
+    await add_ssl_certificate_id_to_backend_servers()
     
     logger.info("Database migrations completed successfully.")
+
+async def add_ssl_certificate_id_to_backend_servers():
+    """Add ssl_certificate_id column to backend_servers table for SSL certificate management"""
+    conn = None
+    try:
+        conn = await get_database_connection()
+        
+        # Check if ssl_certificate_id column already exists
+        column_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'backend_servers' 
+                AND column_name = 'ssl_certificate_id'
+            )
+        """)
+        
+        if not column_exists:
+            # Add ssl_certificate_id column
+            await conn.execute("""
+                ALTER TABLE backend_servers 
+                ADD COLUMN ssl_certificate_id INTEGER,
+                ADD CONSTRAINT fk_backend_server_ssl_certificate 
+                    FOREIGN KEY (ssl_certificate_id) 
+                    REFERENCES ssl_certificates(id) 
+                    ON DELETE SET NULL
+            """)
+            
+            logger.info("Added ssl_certificate_id column to backend_servers table with FK constraint")
+        else:
+            logger.info("ssl_certificate_id column already exists in backend_servers table")
+        
+        await close_database_connection(conn)
+        
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"Error adding ssl_certificate_id to backend_servers: {e}")
+        # Don't raise - we'll try to proceed
 
 async def remove_haproxy_user_group_columns():
     """Remove haproxy_user and haproxy_group columns from haproxy_clusters table"""
