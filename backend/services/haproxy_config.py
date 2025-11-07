@@ -477,8 +477,12 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             # Get all servers for this backend (including inactive ones for commenting)
             # CRITICAL FIX: Handle servers with NULL cluster_id (legacy data)
             # Some servers might not have cluster_id set, so we also check for NULL cluster_id
+            # CRITICAL: Select ssl_certificate_id for SSL ca-file path generation
             servers = await db_conn.fetch("""
-                SELECT * FROM backend_servers 
+                SELECT id, backend_name, server_name, server_address, server_port, weight, maxconn,
+                       check_enabled, check_port, backup_server, ssl_enabled, ssl_verify, ssl_certificate_id,
+                       cookie_value, inter, fall, rise, is_active, cluster_id, last_config_status
+                FROM backend_servers 
                 WHERE backend_name = $1 AND (cluster_id = $2 OR cluster_id IS NULL)
                 ORDER BY COALESCE(server_name, 'server_' || id), id
             """, backend["name"], cluster_id)
@@ -512,11 +516,26 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 if server.get('max_connections'):
                     server_line += f" maxconn {server['max_connections']}"
                 
-                # SSL Configuration (new field: ssl_verify)
+                # SSL Configuration (new field: ssl_verify and ssl_certificate_id)
                 if server.get('ssl_enabled', False):
                     server_line += " ssl"
                     if server.get('ssl_verify'):
                         server_line += f" verify {server['ssl_verify']}"
+                    
+                    # Add ca-file path if SSL certificate is selected
+                    if server.get('ssl_certificate_id'):
+                        ssl_cert_id = server['ssl_certificate_id']
+                        # Get SSL certificate name to generate path
+                        ssl_cert = await db_conn.fetchrow("""
+                            SELECT name FROM ssl_certificates 
+                            WHERE id = $1 AND is_active = TRUE
+                        """, ssl_cert_id)
+                        
+                        if ssl_cert:
+                            cert_filename = f"{ssl_cert['name']}.pem"
+                            cert_path = f"/etc/ssl/haproxy/{cert_filename}"
+                            server_line += f" ca-file {cert_path}"
+                            logger.info(f"🔒 CONFIG SSL: Added ca-file for server {server_name}: {cert_path}")
                 
                 # Health Check (with new field: check_port)
                 if server.get('check_enabled', True):

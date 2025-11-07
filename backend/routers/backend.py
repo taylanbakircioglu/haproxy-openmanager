@@ -204,7 +204,7 @@ async def get_backends(cluster_id: Optional[int] = None):
             if cluster_id:
                 servers = await conn.fetch("""
                     SELECT id, server_name, server_address, server_port, weight, maxconn,
-                           check_enabled, check_port, backup_server, ssl_enabled, ssl_verify,
+                           check_enabled, check_port, backup_server, ssl_enabled, ssl_verify, ssl_certificate_id,
                            cookie_value, inter, fall, rise,
                            is_active, cluster_id,
                            haproxy_status, haproxy_status_updated_at, backend_name
@@ -214,7 +214,7 @@ async def get_backends(cluster_id: Optional[int] = None):
             else:
                 servers = await conn.fetch("""
                     SELECT id, server_name, server_address, server_port, weight, maxconn,
-                           check_enabled, check_port, backup_server, ssl_enabled, ssl_verify,
+                           check_enabled, check_port, backup_server, ssl_enabled, ssl_verify, ssl_certificate_id,
                            cookie_value, inter, fall, rise,
                            is_active, cluster_id,
                            haproxy_status, haproxy_status_updated_at, backend_name
@@ -495,12 +495,12 @@ async def add_server_to_backend(backend_id: int, server: ServerConfig):
         server_id = await conn.fetchval("""
             INSERT INTO backend_servers 
             (backend_id, backend_name, server_name, server_address, server_port, weight, 
-             maxconn, check_enabled, check_port, backup_server, ssl_enabled, ssl_verify,
+             maxconn, check_enabled, check_port, backup_server, ssl_enabled, ssl_verify, ssl_certificate_id,
              cookie_value, inter, fall, rise, cluster_id) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING id
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING id
         """, backend_id, backend["name"], server.server_name, server.server_address, server.server_port, server.weight,
             server.max_connections, server.check_enabled, server.check_port, server.backup_server, 
-            server.ssl_enabled, server.ssl_verify, server.cookie_value, server.inter, server.fall, server.rise,
+            server.ssl_enabled, server.ssl_verify, server.ssl_certificate_id, server.cookie_value, server.inter, server.fall, server.rise,
             backend["cluster_id"])
         
         # If backend has cluster_id, create new config version for agents
@@ -1070,7 +1070,7 @@ async def update_server(server_id: int, server_data: dict, request: Request, aut
         
         # Allow updating these fields
         allowed_fields = ['server_name', 'server_address', 'server_port', 'weight', 'max_connections', 
-                         'check_enabled', 'check_port', 'backup_server', 'ssl_enabled', 'ssl_verify',
+                         'check_enabled', 'check_port', 'backup_server', 'ssl_enabled', 'ssl_verify', 'ssl_certificate_id',
                          'cookie_value', 'inter', 'fall', 'rise', 'is_active']
         
         for field in allowed_fields:

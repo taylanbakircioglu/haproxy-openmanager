@@ -12,6 +12,7 @@ class ServerConfig(BaseModel):
     backup_server: bool = False
     ssl_enabled: bool = False
     ssl_verify: Optional[str] = None
+    ssl_certificate_id: Optional[int] = None  # SSL certificate for backend server
     cookie_value: Optional[str] = None
     inter: Optional[int] = None
     fall: Optional[int] = None

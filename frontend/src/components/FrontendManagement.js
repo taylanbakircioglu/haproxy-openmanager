@@ -1438,14 +1438,21 @@ const FrontendManagement = () => {
                                                   cert.status === 'expiring_soon' ? '⚠️' : '❌';
                                 const expiryInfo = cert.days_until_expiry !== undefined ? 
                                   `(${cert.days_until_expiry} days)` : '';
+                                const sslTypeTag = cert.ssl_type === 'Global' ? '🌍 Global' : '📍 Cluster';
                                 
                                 return (
                                   <Option key={cert.id} value={cert.id}>
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                       <span>
                                         <strong>{cert.name}</strong> - {cert.domain}
+                                        <Tag 
+                                          color={cert.ssl_type === 'Global' ? 'blue' : 'green'} 
+                                          style={{ marginLeft: 8, fontSize: '10px' }}
+                                        >
+                                          {sslTypeTag}
+                                        </Tag>
                                       </span>
-                                      <span style={{ fontSize: '12px', color: '#666' }}>
+                                      <span style={{ fontSize: '12px', color: '#666', marginLeft: 12 }}>
                                         {statusIcon} {expiryInfo}
                                       </span>
                                     </div>
