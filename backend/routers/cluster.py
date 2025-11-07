@@ -3549,6 +3549,7 @@ async def undo_reject_config_version(
                 m_fe = re.search(r'frontend-(\d+)-', version_to_undo['version_name'])
                 m_be = re.search(r'backend-(\d+)-', version_to_undo['version_name'])
                 m_wf = re.search(r'waf-(\d+)-', version_to_undo['version_name'])
+                m_srv = re.search(r'server-(\d+)-', version_to_undo['version_name'])
                 
                 if m_fe:
                     fe_id = int(m_fe.group(1))
@@ -3568,6 +3569,13 @@ async def undo_reject_config_version(
                         "UPDATE waf_rules SET last_config_status = 'PENDING' WHERE id = $1 AND cluster_id = $2",
                         wf_id, cluster_id
                     )
+                elif m_srv:
+                    srv_id = int(m_srv.group(1))
+                    await conn.execute(
+                        "UPDATE backend_servers SET last_config_status = 'PENDING' WHERE id = $1 AND cluster_id = $2",
+                        srv_id, cluster_id
+                    )
+                    logger.info(f"UNDO REJECT: Marked server {srv_id} as PENDING")
             except Exception as e:
                 logger.warning(f"Could not update entity status for version {version_to_undo['version_name']}: {e}")
         
@@ -4072,10 +4080,11 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
         except Exception as _:
             pass
 
-        # Reflect REJECTED for frontends and backends referenced
+        # Reflect REJECTED for frontends, backends, and servers referenced
         try:
             fe_ids = []
             be_ids = []
+            srv_ids = []
             import re
             for v in pending_versions:
                 m1 = re.search(r'^frontend-(\d+)-', v['version_name'])
@@ -4084,11 +4093,20 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                 m2 = re.search(r'^backend-(\d+)-', v['version_name'])
                 if m2:
                     be_ids.append(int(m2.group(1)))
+                # CRITICAL FIX: Also extract server IDs from version names
+                m3 = re.search(r'^server-(\d+)-', v['version_name'])
+                if m3:
+                    srv_ids.append(int(m3.group(1)))
+            
             if fe_ids:
                 await conn.execute("UPDATE frontends SET last_config_status = 'REJECTED' WHERE id = ANY($1)", fe_ids)
             if be_ids:
                 await conn.execute("UPDATE backends SET last_config_status = 'REJECTED' WHERE id = ANY($1)", be_ids)
-        except Exception:
+            if srv_ids:
+                await conn.execute("UPDATE backend_servers SET last_config_status = 'REJECTED' WHERE id = ANY($1)", srv_ids)
+                logger.info(f"REJECT: Marked {len(srv_ids)} servers as REJECTED")
+        except Exception as e:
+            logger.warning(f"Failed to update entity statuses during reject: {e}")
             pass
         
         await close_database_connection(conn)
