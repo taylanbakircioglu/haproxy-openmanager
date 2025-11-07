@@ -301,10 +301,11 @@ backend web-backend
       title: 'Flags',
       key: 'flags',
       render: (_, record) => (
-        <Space size="small">
+        <Space size="small" wrap>
           {record.backup_server && <Tag color="orange">Backup</Tag>}
           {record.ssl_enabled && <Tag color="gold">SSL</Tag>}
           {record.ssl_verify && <Tag color="purple">Verify: {record.ssl_verify}</Tag>}
+          {record.ssl_certificate_name && <Tag color="green">SSL Cert: {record.ssl_certificate_name}</Tag>}
           {record.cookie_value && <Tag color="cyan">Cookie: {record.cookie_value}</Tag>}
         </Space>
       )
@@ -352,7 +353,7 @@ backend web-backend
                   <p><strong>Tip for faster import:</strong> If your configuration includes SSL certificates, you can automate SSL assignment:</p>
                   <ol style={{ marginBottom: 8 }}>
                     <li>First, go to <strong>SSL Management</strong> page</li>
-                    <li>Upload your SSL certificates with the <strong>exact same name</strong> as in your config</li>
+                    <li>Create SSL certificates by entering PEM content with the <strong>exact same name</strong> as in your config</li>
                     <li>Click <strong>Apply Changes</strong> and wait for SYNCED status</li>
                     <li>Then perform bulk import - SSL will be automatically assigned</li>
                   </ol>

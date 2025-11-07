@@ -848,6 +848,14 @@ async def parse_bulk_config(
                                 logger.info(f"BULK IMPORT SSL AUTO-ASSIGN: Server '{backend.name}/{server.server_name}' matched SSL '{ssl_name}' (ID: {ssl_certificate_id})")
                                 break
                 
+                # Get SSL certificate name for UI display
+                ssl_certificate_name = None
+                if ssl_certificate_id:
+                    for cert in ssl_certificates:
+                        if cert['id'] == ssl_certificate_id:
+                            ssl_certificate_name = cert['name']
+                            break
+                
                 servers_data.append({
                     "server_name": server.server_name,
                     "server_address": server.server_address,
@@ -860,6 +868,7 @@ async def parse_bulk_config(
                     "ssl_enabled": server.ssl_enabled,
                     "ssl_verify": ssl_verify,  # Smart: 'required' if SSL matched, else parser value
                     "ssl_certificate_id": ssl_certificate_id,  # Smart: Auto-assigned if matched
+                    "ssl_certificate_name": ssl_certificate_name,  # For UI display
                     "cookie_value": server.cookie_value,
                     "inter": server.inter,
                     "fall": server.fall,
@@ -887,6 +896,28 @@ async def parse_bulk_config(
                 "servers": servers_data
             })
         
+        # CRITICAL: Filter out SSL warnings for auto-assigned certificates
+        # If SSL was auto-assigned, user doesn't need warnings about manual assignment
+        auto_assigned_ssl_names = set()
+        for f in ssl_auto_assigned_frontends:
+            auto_assigned_ssl_names.add(f['ssl_name'].lower())
+        for s in ssl_auto_assigned_servers:
+            auto_assigned_ssl_names.add(s['ssl_name'].lower())
+        
+        # Filter warnings - remove SSL warnings for auto-assigned certificates
+        filtered_warnings = []
+        for warning in parse_result.warnings:
+            # Check if this warning is about an auto-assigned SSL
+            is_auto_assigned_warning = False
+            for ssl_name in auto_assigned_ssl_names:
+                if ssl_name in warning.lower() and ('ca-file' in warning or 'SSL certificates detected' in warning):
+                    is_auto_assigned_warning = True
+                    break
+            
+            # Keep warning only if NOT about auto-assigned SSL
+            if not is_auto_assigned_warning:
+                filtered_warnings.append(warning)
+        
         # Add SSL auto-assignment info to warnings
         ssl_auto_assign_info = []
         if ssl_auto_assigned_frontends:
@@ -902,12 +933,12 @@ async def parse_bulk_config(
                 f"Matched: {', '.join([s['server'] + ' (' + s['ssl_name'] + ')' for s in ssl_auto_assigned_servers])}"
             )
         
-        # Update SSL warning message to include pre-import tip
-        enhanced_warnings = parse_result.warnings.copy()
-        if any('SSL certificates' in w for w in enhanced_warnings):
+        # Update SSL warning message to include pre-import tip (only if there are SSL warnings left)
+        enhanced_warnings = filtered_warnings.copy()
+        if any('SSL' in w or 'ca-file' in w for w in enhanced_warnings):
             enhanced_warnings.insert(0, 
-                "TIP: For automatic SSL assignment in bulk import, first upload and apply SSL certificates "
-                "via SSL Management page with matching names, then perform bulk import. "
+                "TIP: For automatic SSL assignment in bulk import, first create and apply SSL certificates "
+                "via SSL Management page (enter PEM content) with matching names, then perform bulk import. "
                 "Certificates with status SYNCED will be automatically assigned."
             )
         
@@ -1103,10 +1134,10 @@ async def bulk_create_entities(
                         INSERT INTO backend_servers (
                             backend_id, backend_name, server_name, server_address, 
                             server_port, weight, maxconn, check_enabled, check_port,
-                            backup_server, ssl_enabled, ssl_verify, cookie_value,
+                            backup_server, ssl_enabled, ssl_verify, ssl_certificate_id, cookie_value,
                             inter, fall, rise, cluster_id
                         ) 
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) 
                         RETURNING id
                     """, 
                         backend_id,
@@ -1121,6 +1152,7 @@ async def bulk_create_entities(
                         server_data.get("backup_server", False),
                         server_data.get("ssl_enabled", False),
                         server_data.get("ssl_verify"),
+                        server_data.get("ssl_certificate_id"),  # CRITICAL: Auto-assigned SSL ID
                         server_data.get("cookie_value"),
                         server_data.get("inter"),
                         server_data.get("fall"),
@@ -1147,14 +1179,17 @@ async def bulk_create_entities(
                     continue
                 
                 # Insert frontend
+                # CRITICAL: Convert ssl_certificate_ids to JSON for database
+                ssl_cert_ids_json = json.dumps(frontend_data.get("ssl_certificate_ids", []))
+                
                 frontend_id = await conn.fetchval("""
                     INSERT INTO frontends (
                         name, bind_address, bind_port, default_backend, mode,
-                        ssl_enabled, ssl_port, timeout_client, maxconn,
+                        ssl_enabled, ssl_certificate_ids, ssl_port, timeout_client, maxconn,
                         request_headers, response_headers, tcp_request_rules,
                         cluster_id, acl_rules, use_backend_rules, redirect_rules, updated_at
                     ) 
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP) 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, CURRENT_TIMESTAMP) 
                     RETURNING id
                 """, 
                     frontend_data["name"],
@@ -1163,6 +1198,7 @@ async def bulk_create_entities(
                     frontend_data.get("default_backend"),
                     frontend_data.get("mode", "http"),
                     frontend_data.get("ssl_enabled", False),
+                    ssl_cert_ids_json,  # ssl_certificate_ids (JSONB)
                     frontend_data.get("ssl_port"),
                     frontend_data.get("timeout_client"),
                     frontend_data.get("maxconn"),
@@ -1171,7 +1207,7 @@ async def bulk_create_entities(
                     frontend_data.get("tcp_request_rules"),
                     request.cluster_id,
                     json.dumps(frontend_data.get("acl_rules", [])),  # acl_rules
-                    json.dumps(frontend_data.get("use_backend_rules", [])),  # use_backend_rules - CRITICAL FIX
+                    json.dumps(frontend_data.get("use_backend_rules", [])),  # use_backend_rules
                     json.dumps([])   # redirect_rules
                 )
                 
