@@ -462,7 +462,12 @@ const UserManagement = () => {
   const fetchUsers = async () => {
     setUsersLoading(true);
     try {
-      const response = await axios.get('/api/users');
+      const response = await axios.get('/api/users', {
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      });
       setUsers(response.data.users);
     } catch (error) {
       message.error('Failed to fetch users: ' + error.message);

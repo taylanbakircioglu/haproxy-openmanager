@@ -93,25 +93,32 @@ const ApplyManagement = () => {
       }
 
       // Fetch pending changes from all modules
+      // CRITICAL FIX: Add cache-control headers to prevent stale data
+      const cacheHeaders = {
+        'Authorization': `Bearer ${token}`,
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache'
+      };
+      
       const [frontendsRes, backendsRes, wafRes, sslRes] = await Promise.all([
         axios.get('/api/frontends', { 
           params: { cluster_id: selectedCluster.id },
-          headers: { Authorization: `Bearer ${token}` }
+          headers: cacheHeaders
         }).catch(() => ({ data: { frontends: [] } })),
         
         axios.get('/api/backends', { 
           params: { cluster_id: selectedCluster.id },
-          headers: { Authorization: `Bearer ${token}` }
+          headers: cacheHeaders
         }).catch(() => ({ data: { backends: [] } })),
         
         axios.get('/api/waf/rules', { 
           params: { cluster_id: selectedCluster.id },
-          headers: { Authorization: `Bearer ${token}` }
+          headers: cacheHeaders
         }).catch(() => ({ data: { rules: [] } })),
         
         axios.get('/api/ssl/certificates', { 
           params: { cluster_id: selectedCluster.id },
-          headers: { Authorization: `Bearer ${token}` }
+          headers: cacheHeaders
         }).catch(() => ({ data: [] }))
       ]);
 

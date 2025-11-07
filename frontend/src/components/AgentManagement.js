@@ -235,7 +235,14 @@ const AgentManagement = () => {
     console.log(`📡 fetchAgents: Fetching agents for pool_id=${targetCluster.pool_id}`);
     try {
       const params = { pool_id: targetCluster.pool_id };
-      const response = await axios.get('/api/agents', { params, timeout: 10000 });
+      const response = await axios.get('/api/agents', { 
+        params, 
+        timeout: 10000,
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      });
       const agentsData = response.data.agents || [];
       console.log(`✅ fetchAgents: Received ${agentsData.length} agents from API`);
       
@@ -308,12 +315,16 @@ const AgentManagement = () => {
           timeout: 5000,
           headers: {
             'Authorization': `Bearer ${localStorage.getItem('authToken') || ''}`,
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache'
           },
         }),
         axios.get('/api/agents/platforms', { 
           timeout: 5000,
           headers: {
             'Authorization': `Bearer ${localStorage.getItem('authToken') || ''}`,
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache'
           },
         })
       ]);

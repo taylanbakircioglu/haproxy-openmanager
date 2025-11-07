@@ -157,7 +157,13 @@ const FrontendManagement = () => {
     setLoading(true);
     try {
       const params = selectedCluster ? { cluster_id: selectedCluster.id } : {};
-      const response = await axios.get('/api/frontends', { params });
+      const response = await axios.get('/api/frontends', { 
+        params,
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      });
       
       // 🔍 DEBUG: Log frontend data to check SSL fields
       console.log('🔍 FRONTEND FETCH DEBUG: Response data:', response.data);
@@ -243,7 +249,13 @@ const FrontendManagement = () => {
   const fetchBackends = async () => {
     try {
       const params = selectedCluster ? { cluster_id: selectedCluster.id } : {};
-      const response = await axios.get('/api/backends', { params });
+      const response = await axios.get('/api/backends', { 
+        params,
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      });
       setBackends(response.data.backends);
     } catch (error) {
       console.error('Failed to fetch backends:', error);
@@ -261,7 +273,11 @@ const FrontendManagement = () => {
       console.log('🔍 SSL FETCH DEBUG: Token exists:', token ? 'Yes' : 'No');
       
       const response = await axios.get(`/api/ssl/certificates?cluster_id=${selectedCluster.id}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
       });
       
       console.log('🔍 SSL FETCH DEBUG: Response received:', response.data);

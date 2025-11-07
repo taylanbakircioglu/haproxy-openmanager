@@ -84,6 +84,8 @@ const PoolManagement = () => {
       const response = await axios.get('/api/haproxy-cluster-pools', {
         headers: {
           'Authorization': `Bearer ${token}`,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
         },
       });
       const poolsData = response.data.pools || [];
@@ -144,6 +146,8 @@ const PoolManagement = () => {
       const response = await axios.get(`/api/haproxy-cluster-pools/${poolId}/agents`, {
         headers: {
           'Authorization': `Bearer ${token}`,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
         },
       });
       setPoolAgents(response.data.agents || []);

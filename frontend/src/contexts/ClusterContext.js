@@ -22,7 +22,12 @@ export const ClusterProvider = ({ children }) => {
   // Fetch all clusters
   const fetchClusters = async () => {
     try {
-      const response = await axios.get('/api/clusters');
+      const response = await axios.get('/api/clusters', {
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      });
       const clustersData = response.data.clusters || [];
       setClusters(clustersData);
       // Precompute health by pool to avoid flicker when switching clusters

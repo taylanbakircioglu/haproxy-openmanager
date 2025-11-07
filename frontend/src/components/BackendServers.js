@@ -122,7 +122,16 @@ const BackendServers = () => {
     setLoading(true);
     try {
       const params = selectedCluster ? { cluster_id: selectedCluster.id } : {};
-      const response = await axios.get('/api/backends', { params });
+      // CRITICAL FIX: Add cache busting to prevent stale data from appearing
+      // Browser/axios may cache GET requests, causing deleted backends to reappear
+      const response = await axios.get('/api/backends', { 
+        params,
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0'
+        }
+      });
       const fetchedBackends = response.data.backends || [];
       setBackends(fetchedBackends);
       // CRITICAL FIX: Apply status filters after fetching to maintain filter state
@@ -138,7 +147,13 @@ const BackendServers = () => {
   const fetchFrontends = async () => {
     try {
       const params = selectedCluster ? { cluster_id: selectedCluster.id } : {};
-      const response = await axios.get('/api/frontends', { params });
+      const response = await axios.get('/api/frontends', { 
+        params,
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      });
       setFrontends(response.data.frontends || []);
     } catch (error) {
       console.error('Failed to fetch frontends:', error);
@@ -153,18 +168,26 @@ const BackendServers = () => {
       const token = localStorage.getItem('token');
       // CRITICAL FIX: Use same endpoint as Frontend (/api/ssl/certificates not /api/ssl-certificates)
       const response = await axios.get(`/api/ssl/certificates?cluster_id=${selectedCluster.id}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
       });
+      
+      // CRITICAL FIX: API returns array directly, not wrapped in {certificates: [...]}
+      const certificates = Array.isArray(response.data) ? response.data : (response.data.certificates || []);
       
       console.log('🔍 SSL FETCH DEBUG (BackendServers):', {
         cluster_id: selectedCluster.id,
-        certificates_count: response.data?.certificates?.length || 0,
-        certificates: response.data?.certificates
+        certificates_count: certificates.length,
+        certificates: certificates.map(c => ({ id: c.id, name: c.name, ssl_type: c.ssl_type }))
       });
       
-      setSslCertificates(response.data.certificates || []);
+      setSslCertificates(certificates);
     } catch (error) {
       console.error('Failed to fetch SSL certificates:', error);
+      setSslCertificates([]);
       // Don't show error message as SSL is optional
     }
   };

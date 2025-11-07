@@ -102,7 +102,12 @@ const SSLManagement = () => {
     setFilteredCertificates([]);
     
     try {
-      const response = await axios.get(`/api/ssl/certificates?cluster_id=${selectedCluster.id}`);
+      const response = await axios.get(`/api/ssl/certificates?cluster_id=${selectedCluster.id}`, {
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      });
       // Handle different response formats
       const certs = response.data.certificates || response.data || [];
       console.log('🎯 SSL FETCH DEBUG: Response structure:', {

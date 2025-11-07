@@ -86,7 +86,14 @@ const Configuration = () => {
     setLoading(true);
     try {
       const params = { pool_id: selectedCluster.pool_id };
-      const response = await axios.get('/api/agents', { params, timeout: 10000 });
+      const response = await axios.get('/api/agents', { 
+        params, 
+        timeout: 10000,
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      });
       const agentsData = response.data.agents || [];
       
       setAgents(agentsData);

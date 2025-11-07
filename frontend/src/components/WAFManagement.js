@@ -329,7 +329,12 @@ const WAFManagement = () => {
     if (!selectedCluster) return;
     
     try {
-      const response = await axios.get(`/api/frontends?cluster_id=${selectedCluster.id}`);
+      const response = await axios.get(`/api/frontends?cluster_id=${selectedCluster.id}`, {
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      });
       setFrontends(response.data.frontends || []);
     } catch (error) {
       console.error('Failed to fetch frontends:', error);
