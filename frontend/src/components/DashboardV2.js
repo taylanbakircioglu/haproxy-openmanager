@@ -465,6 +465,10 @@ const DashboardV2 = () => {
     
     return () => {
       isMounted = false;
+      // CRITICAL FIX: Reset loading states when component unmounts
+      // This prevents Dashboard's heavy load from affecting other pages
+      setLoading(false);
+      setInitialLoad(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCluster?.id]); // Only depend on cluster ID change
@@ -552,7 +556,11 @@ const DashboardV2 = () => {
       }
     }, 60000); // 60 seconds
     
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      // CRITICAL FIX: Cleanup on unmount to prevent background fetches
+      // Dashboard makes 13 API calls, cleanup ensures they stop when user leaves
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCluster?.id, initialLoad, activeTab]);
   
