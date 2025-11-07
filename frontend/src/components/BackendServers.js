@@ -147,9 +147,21 @@ const BackendServers = () => {
   };
 
   const fetchSSLCertificates = async () => {
+    if (!selectedCluster) return;
+    
     try {
-      const params = selectedCluster ? { cluster_id: selectedCluster.id } : {};
-      const response = await axios.get('/api/ssl-certificates', { params });
+      const token = localStorage.getItem('token');
+      // CRITICAL FIX: Use same endpoint as Frontend (/api/ssl/certificates not /api/ssl-certificates)
+      const response = await axios.get(`/api/ssl/certificates?cluster_id=${selectedCluster.id}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      
+      console.log('🔍 SSL FETCH DEBUG (BackendServers):', {
+        cluster_id: selectedCluster.id,
+        certificates_count: response.data?.certificates?.length || 0,
+        certificates: response.data?.certificates
+      });
+      
       setSslCertificates(response.data.certificates || []);
     } catch (error) {
       console.error('Failed to fetch SSL certificates:', error);
