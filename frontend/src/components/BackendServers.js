@@ -128,9 +128,18 @@ const BackendServers = () => {
   }, [selectedCluster]);
 
   const fetchBackends = async () => {
+    // CRITICAL FIX: Don't fetch if no cluster selected to prevent race condition
+    // Race condition: First fetch (cluster=undefined) returns all backends and overwrites filtered results
+    if (!selectedCluster) {
+      console.log('FETCH BACKENDS: No cluster selected, skipping fetch');
+      setBackends([]);
+      setFilteredBackends([]);
+      return;
+    }
+    
     setLoading(true);
     try {
-      const params = selectedCluster ? { cluster_id: selectedCluster.id } : {};
+      const params = { cluster_id: selectedCluster.id };
       
       // CRITICAL DEBUG: Log what we're sending to API
       console.log('FETCH BACKENDS DEBUG:', {

@@ -163,9 +163,18 @@ const FrontendManagement = () => {
   }, [selectedCluster]);
 
   const fetchFrontends = async () => {
+    // CRITICAL FIX: Don't fetch if no cluster selected to prevent race condition
+    // Same race condition as BackendServers - prevents all frontends from appearing
+    if (!selectedCluster) {
+      console.log('FETCH FRONTENDS: No cluster selected, skipping fetch');
+      setFrontends([]);
+      setFilteredFrontends([]);
+      return;
+    }
+    
     setLoading(true);
     try {
-      const params = selectedCluster ? { cluster_id: selectedCluster.id } : {};
+      const params = { cluster_id: selectedCluster.id };
       const response = await axios.get('/api/frontends', { 
         params,
         headers: {
@@ -256,8 +265,14 @@ const FrontendManagement = () => {
   }, [frontends, showPending, showRejected]);
 
   const fetchBackends = async () => {
+    // CRITICAL FIX: Guard clause to prevent race condition
+    if (!selectedCluster) {
+      setBackends([]);
+      return;
+    }
+    
     try {
-      const params = selectedCluster ? { cluster_id: selectedCluster.id } : {};
+      const params = { cluster_id: selectedCluster.id };
       const response = await axios.get('/api/backends', { 
         params,
         headers: {
