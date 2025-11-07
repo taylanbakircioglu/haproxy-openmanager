@@ -709,6 +709,15 @@ backend web-backend
                                       ))}
                                     </Descriptions.Item>
                                   )}
+                                  {frontend.use_backend_rules && frontend.use_backend_rules.length > 0 && (
+                                    <Descriptions.Item label={`Backend Routing Rules (${frontend.use_backend_rules.length})`}>
+                                      {frontend.use_backend_rules.map((rule, idx) => (
+                                        <div key={idx}>
+                                          <Text code style={{ fontSize: '11px' }}>{rule}</Text>
+                                        </div>
+                                      ))}
+                                    </Descriptions.Item>
+                                  )}
                                 </Descriptions>
                               </div>
                             );

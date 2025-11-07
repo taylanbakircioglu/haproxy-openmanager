@@ -758,7 +758,8 @@ async def parse_bulk_config(
                 "request_headers": frontend.request_headers,
                 "response_headers": frontend.response_headers,
                 "tcp_request_rules": frontend.tcp_request_rules,
-                "acl_rules": frontend.acl_rules
+                "acl_rules": frontend.acl_rules,
+                "use_backend_rules": frontend.use_backend_rules  # CRITICAL FIX: Include routing rules
             })
         
         backends_data = []
