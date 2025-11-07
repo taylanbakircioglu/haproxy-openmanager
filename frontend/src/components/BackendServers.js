@@ -131,6 +131,15 @@ const BackendServers = () => {
     setLoading(true);
     try {
       const params = selectedCluster ? { cluster_id: selectedCluster.id } : {};
+      
+      // CRITICAL DEBUG: Log what we're sending to API
+      console.log('FETCH BACKENDS DEBUG:', {
+        selectedCluster: selectedCluster?.name,
+        cluster_id: selectedCluster?.id,
+        params: params,
+        url: '/api/backends'
+      });
+      
       // CRITICAL FIX: Add cache busting to prevent stale data from appearing
       // Browser/axios may cache GET requests, causing deleted backends to reappear
       const response = await axios.get('/api/backends', { 
@@ -142,6 +151,14 @@ const BackendServers = () => {
         }
       });
       const fetchedBackends = response.data.backends || [];
+      
+      // CRITICAL DEBUG: Log what API returned
+      console.log('FETCH BACKENDS RESPONSE:', {
+        total_received: fetchedBackends.length,
+        backend_ids: fetchedBackends.map(b => b.id),
+        backend_cluster_ids: fetchedBackends.map(b => ({id: b.id, name: b.name, cluster_id: b.cluster_id}))
+      });
+      
       setBackends(fetchedBackends);
       // CRITICAL FIX: Apply status filters after fetching to maintain filter state
       // This prevents backends from disappearing when updated (e.g., APPLIED → PENDING)
