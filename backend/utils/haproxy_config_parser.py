@@ -844,7 +844,8 @@ class HAProxyConfigParser:
             
             # Check if frontend has any backend routing
             has_default_backend = frontend.default_backend is not None
-            has_use_backend_rules = frontend.use_backend_rules is not None and frontend.use_backend_rules.strip()
+            # CRITICAL FIX: use_backend_rules is now a list, not a string
+            has_use_backend_rules = bool(frontend.use_backend_rules)
             
             if not has_default_backend and not has_use_backend_rules:
                 # Frontend has no routing - check if it has redirect rules
