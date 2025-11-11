@@ -168,7 +168,8 @@ async def ensure_agents_table():
             'ssl_certificates': {
                 'expires_at': "ALTER TABLE ssl_certificates ADD COLUMN expires_at TIMESTAMP;",
                 'auto_renew': "ALTER TABLE ssl_certificates ADD COLUMN auto_renew BOOLEAN DEFAULT FALSE;",
-                'cluster_id': "ALTER TABLE ssl_certificates ADD COLUMN cluster_id INTEGER;"
+                'cluster_id': "ALTER TABLE ssl_certificates ADD COLUMN cluster_id INTEGER;",
+                'usage_type': "ALTER TABLE ssl_certificates ADD COLUMN usage_type VARCHAR(50) DEFAULT 'frontend';"
             },
             'agents': {
                 'architecture': "ALTER TABLE agents ADD COLUMN architecture VARCHAR(50) DEFAULT 'amd64';",
@@ -202,6 +203,16 @@ async def ensure_agents_table():
         for table_name, columns in missing_columns.items():
             for col_name, alter_query in columns.items():
                 try:
+                    # Check if table exists first
+                    table_exists = await conn.fetchval(f"""
+                        SELECT 1 FROM information_schema.tables 
+                        WHERE table_name='{table_name}'
+                    """)
+                    
+                    if not table_exists:
+                        logger.warning(f"Table '{table_name}' does not exist yet, skipping column '{col_name}'")
+                        continue
+                    
                     column_exists = await conn.fetchval(f"""
                         SELECT 1 FROM information_schema.columns 
                         WHERE table_name='{table_name}' AND column_name='{col_name}'
@@ -209,9 +220,14 @@ async def ensure_agents_table():
                     if not column_exists:
                         logger.info(f"Adding missing column '{col_name}' to table '{table_name}'...")
                         await conn.execute(alter_query)
-                        logger.info(f"Successfully added column '{col_name}' to '{table_name}'.")
+                        logger.info(f"✅ Successfully added column '{col_name}' to '{table_name}'.")
+                    else:
+                        logger.debug(f"Column '{col_name}' already exists in '{table_name}'")
                 except Exception as col_error:
-                    logger.warning(f"Could not add column '{col_name}' to '{table_name}': {col_error}")
+                    # Log error but don't crash - some columns may be optional
+                    logger.error(f"❌ Could not add column '{col_name}' to '{table_name}': {col_error}")
+                    # For critical columns like usage_type, we should still try to continue
+                    # The error will be visible in logs for manual intervention
 
         # Fix agents table ID issue - recreate if needed
         try:
@@ -363,10 +379,11 @@ async def ensure_agents_table():
                 name VARCHAR(100) NOT NULL UNIQUE,
                 domain VARCHAR(255) NOT NULL,
                 certificate_content TEXT NOT NULL,
-                private_key_content TEXT NOT NULL,
+                private_key_content TEXT,
                 chain_content TEXT,
                 expires_at TIMESTAMP,
                 expiry_date DATE,
+                usage_type VARCHAR(50) DEFAULT 'frontend',
                 is_active BOOLEAN DEFAULT TRUE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -750,13 +767,30 @@ async def ensure_ssl_certificates_new_columns():
             logger.info("ssl_certificates table does not exist, skipping migration")
             return
         
+        # CRITICAL: Make private_key_content nullable for server SSL support
+        # Check if private_key_content exists and is NOT NULL
+        private_key_not_null = await conn.fetchval("""
+            SELECT is_nullable = 'NO' 
+            FROM information_schema.columns 
+            WHERE table_name = 'ssl_certificates' AND column_name = 'private_key_content'
+        """)
+        
+        if private_key_not_null:
+            logger.info("🔧 Altering private_key_content to allow NULL (for server SSL)...")
+            await conn.execute("""
+                ALTER TABLE ssl_certificates 
+                ALTER COLUMN private_key_content DROP NOT NULL
+            """)
+            logger.info("✅ private_key_content is now nullable (server SSL support)")
+        
         # Add missing columns if they don't exist
         columns_to_add = [
             ("issuer", "VARCHAR(255)"),
             ("fingerprint", "VARCHAR(128)"),
             ("status", "VARCHAR(20) DEFAULT 'valid'"),
             ("days_until_expiry", "INTEGER DEFAULT 0"),
-            ("all_domains", "JSONB DEFAULT '[]'")
+            ("all_domains", "JSONB DEFAULT '[]'"),
+            ("usage_type", "VARCHAR(50) DEFAULT 'frontend'")  # CRITICAL: Frontend/Server SSL differentiation
         ]
         
         for column_name, column_def in columns_to_add:
@@ -1681,41 +1715,54 @@ async def create_initial_system_data(conn):
         ]
         
         for role_data in system_roles:
-            await conn.execute("""
-                INSERT INTO roles (name, display_name, description, permissions, is_active, is_system)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (name) DO NOTHING
-            """, 
-                role_data['name'],
-                role_data['display_name'],
-                role_data['description'],
-                role_data['permissions'],  # Direct list, not JSON string
-                True,
-                True
-            )
+            # Check if role exists first (safer than ON CONFLICT)
+            role_exists = await conn.fetchval("SELECT id FROM roles WHERE name = $1", role_data['name'])
+            
+            if not role_exists:
+                await conn.execute("""
+                    INSERT INTO roles (name, display_name, description, permissions, is_active, is_system)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                """, 
+                    role_data['name'],
+                    role_data['display_name'],
+                    role_data['description'],
+                    json.dumps(role_data['permissions']),  # FIXED: Convert list to JSON string for JSONB column
+                    True,
+                    True
+                )
         
         logger.info("✅ System roles created")
         
         # Create default admin user
         import bcrypt
-        password_hash = bcrypt.hashpw('admin123'.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         
-        admin_id = await conn.fetchval("""
-            INSERT INTO users (username, email, password_hash, full_name, is_active, is_admin, is_verified)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (username) DO NOTHING
-            RETURNING id
-        """, 'admin', 'admin@haproxy-openmanager.local', password_hash, 'System Administrator', True, True, True)
+        # Check if admin user already exists first (safer than ON CONFLICT)
+        admin_id = await conn.fetchval("SELECT id FROM users WHERE username = 'admin'")
+        
+        if not admin_id:
+            password_hash = bcrypt.hashpw('admin123'.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            
+            admin_id = await conn.fetchval("""
+                INSERT INTO users (username, email, password_hash, full_name, is_active, is_admin, is_verified)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                RETURNING id
+            """, 'admin', 'admin@haproxy-openmanager.local', password_hash, 'System Administrator', True, True, True)
         
         if admin_id:
             # Assign super_admin role to admin user
             super_admin_role = await conn.fetchval("SELECT id FROM roles WHERE name = 'super_admin'")
             if super_admin_role:
-                await conn.execute("""
-                    INSERT INTO user_roles (user_id, role_id, assigned_by)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (user_id, role_id) DO NOTHING
-                """, admin_id, super_admin_role, admin_id)
+                # Check if role assignment exists
+                role_assigned = await conn.fetchval("""
+                    SELECT id FROM user_roles 
+                    WHERE user_id = $1 AND role_id = $2
+                """, admin_id, super_admin_role)
+                
+                if not role_assigned:
+                    await conn.execute("""
+                        INSERT INTO user_roles (user_id, role_id, assigned_by)
+                        VALUES ($1, $2, $3)
+                    """, admin_id, super_admin_role, admin_id)
             
             logger.info("✅ Default admin user created")
         else:
@@ -2073,7 +2120,7 @@ async def create_essential_tables(conn):
                 name VARCHAR(100) NOT NULL,
                 primary_domain VARCHAR(255),
                 certificate_content TEXT NOT NULL,
-                private_key_content TEXT NOT NULL,
+                private_key_content TEXT,
                 chain_content TEXT,
                 expiry_date TIMESTAMP,
                 issuer TEXT,
@@ -2083,6 +2130,7 @@ async def create_essential_tables(conn):
                 all_domains JSONB DEFAULT '[]'::jsonb,
                 cluster_id INTEGER REFERENCES haproxy_clusters(id) ON DELETE SET NULL,
                 last_config_status config_status DEFAULT 'APPLIED',
+                usage_type VARCHAR(50) DEFAULT 'frontend',
                 is_active BOOLEAN DEFAULT TRUE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -2184,25 +2232,10 @@ async def create_essential_tables(conn):
         logger.error(f"Failed to create essential tables: {e}")
         raise
 
-async def ensure_agents_table():
-    """Ensures that all necessary tables, columns, and types exist in the database."""
-    conn = None
-    try:
-        conn = await get_database_connection()
-        
-        # First, create all essential tables if they don't exist
-        await create_essential_tables(conn)
-        
-        # Then, ensure additional columns exist in existing tables
-        # Status column is already created in create_essential_tables
-        logger.info("✅ Database schema initialization completed")
-        
-    except Exception as e:
-        logger.error(f"Database schema initialization failed: {e}")
-        raise
-    finally:
-        if conn:
-            await close_database_connection(conn)
+# REMOVED: Duplicate function that was overriding the correct ensure_agents_table() at line 33
+# The detailed version (line 33) includes missing_columns loop with usage_type migration
+# This basic version only called create_essential_tables() without column additions
+# Keeping it removed to ensure proper migration execution
 
 async def ensure_frontends_ssl_columns():
     """Add missing SSL columns to frontends table for proper SSL certificate support"""

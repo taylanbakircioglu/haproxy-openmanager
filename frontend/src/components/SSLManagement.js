@@ -221,7 +221,8 @@ const SSLManagement = () => {
     form.resetFields();
     // Set default values for new certificate
     form.setFieldsValue({
-      ssl_type: 'cluster'
+      ssl_type: 'cluster',
+      usage_type: 'frontend'  // Default to frontend SSL
     });
     setSelectedCertificate(null);
     setModalVisible(true);
@@ -249,7 +250,8 @@ const SSLManagement = () => {
         private_key_content: cert.private_key_content,
         chain_content: cert.chain_content,
         ssl_type: cert.is_global ? 'global' : 'cluster',
-        cluster_ids: cert.is_global ? null : cert.cluster_ids
+        cluster_ids: cert.is_global ? null : cert.cluster_ids,
+        usage_type: cert.usage_type || 'frontend'
       });
       
       setSelectedCertificate(cert);
@@ -313,7 +315,8 @@ const SSLManagement = () => {
         private_key_content: values.private_key_content,
         chain_content: values.chain_content,
         is_global: values.ssl_type === 'global',
-        cluster_ids: values.ssl_type === 'global' ? null : values.cluster_ids
+        cluster_ids: values.ssl_type === 'global' ? null : values.cluster_ids,
+        usage_type: values.usage_type || 'frontend'
       };
       const response = isEditing 
         ? await axios.put(`/api/ssl/certificates/${selectedCertificate.id}`, payload)
@@ -441,7 +444,7 @@ const SSLManagement = () => {
       ),
     },
     {
-      title: 'Type',
+      title: 'Scope',
       dataIndex: 'ssl_type',
       key: 'ssl_type',
       render: (type, record) => {
@@ -449,6 +452,19 @@ const SSLManagement = () => {
         return (
           <Tag color={isGlobal ? 'blue' : 'green'}>
             {isGlobal ? 'Global' : 'Cluster-specific'}
+          </Tag>
+        );
+      },
+    },
+    {
+      title: 'Usage',
+      dataIndex: 'usage_type',
+      key: 'usage_type',
+      render: (usage_type) => {
+        const isFrontend = usage_type === 'frontend';
+        return (
+          <Tag color={isFrontend ? 'purple' : 'orange'}>
+            {isFrontend ? 'Frontend SSL' : 'Server SSL'}
           </Tag>
         );
       },
@@ -811,12 +827,25 @@ const SSLManagement = () => {
           <Row gutter={16}>
             <Col span={8}>
               <Form.Item
+                name="usage_type"
+                label="SSL Usage Type"
+                rules={[{ required: true, message: 'Please select usage type' }]}
+                tooltip="Frontend SSL requires private key, Server SSL does not"
+              >
+                <Select placeholder="Select usage type">
+                  <Select.Option value="frontend">Frontend SSL (HAProxy Listen)</Select.Option>
+                  <Select.Option value="server">Server SSL (Backend Verification)</Select.Option>
+                </Select>
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item
                 name="ssl_type"
-                label="SSL Certificate Type"
-                rules={[{ required: true, message: 'Please select SSL type' }]}
+                label="SSL Certificate Scope"
+                rules={[{ required: true, message: 'Please select SSL scope' }]}
               >
                 <Select
-                  placeholder="Select SSL type"
+                  placeholder="Select SSL scope"
                   onChange={(value) => {
                     form.setFieldsValue({ cluster_ids: undefined });
                   }}
@@ -826,7 +855,7 @@ const SSLManagement = () => {
                 </Select>
               </Form.Item>
             </Col>
-            <Col span={16}>
+            <Col span={8}>
               <Form.Item shouldUpdate={(prevValues, currentValues) => prevValues.ssl_type !== currentValues.ssl_type}>
                 {({ getFieldValue }) => {
                   const sslType = getFieldValue('ssl_type');
@@ -890,16 +919,54 @@ MIIDXTCCAkWgAwIBAgIJAKoK/OvD...
           </Form.Item>
 
           <Form.Item
-            name="private_key_content"
-            label="Private Key Content (PEM Format)"
-            rules={[{ required: true, message: 'Please enter private key content' }]}
+            noStyle
+            shouldUpdate={(prevValues, currentValues) => prevValues.usage_type !== currentValues.usage_type}
           >
-            <TextArea
-              rows={8}
-              placeholder="-----BEGIN PRIVATE KEY-----
+            {({ getFieldValue }) => {
+              const usageType = getFieldValue('usage_type');
+              const isRequired = usageType === 'frontend';
+              
+              return (
+                <Form.Item
+                  name="private_key_content"
+                  label={
+                    <span>
+                      Private Key Content (PEM Format)
+                      {isRequired && <span style={{ color: 'red' }}> *</span>}
+                      {usageType === 'server' && <span style={{ color: '#999', fontWeight: 'normal' }}> - Optional</span>}
+                    </span>
+                  }
+                  rules={[
+                    {
+                      required: isRequired,
+                      message: 'Private key is required for Frontend SSL'
+                    },
+                    {
+                      validator: (_, value) => {
+                        // If value provided, validate format
+                        if (value && value.trim()) {
+                          if (!value.includes('-----BEGIN') || !value.includes('-----END')) {
+                            return Promise.reject('Private key must be in PEM format');
+                          }
+                        }
+                        return Promise.resolve();
+                      }
+                    }
+                  ]}
+                  extra={isRequired ? 
+                    <span style={{ color: '#ff4d4f' }}>⚠️ Required for Frontend SSL</span> : 
+                    <span style={{ color: '#52c41a' }}>✓ Optional for Server SSL (used for backend verification)</span>
+                  }
+                >
+                  <TextArea
+                    rows={8}
+                    placeholder="-----BEGIN PRIVATE KEY-----
 MIIEvgIBADANBgkqhkiG9w0BAQEF...
 -----END PRIVATE KEY-----"
-            />
+                  />
+                </Form.Item>
+              );
+            }}
           </Form.Item>
 
           <Form.Item

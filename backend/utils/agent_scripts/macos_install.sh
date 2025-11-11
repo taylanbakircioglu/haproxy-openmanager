@@ -1193,8 +1193,9 @@ deploy_ssl_certificates() {
         local key_content=$(echo "$cert_data" | jq -r '.private_key_content // ""')
         local chain_content=$(echo "$cert_data" | jq -r '.chain_content // ""')
         local cert_status=$(echo "$cert_data" | jq -r '.status // "unknown"')
+        local usage_type=$(echo "$cert_data" | jq -r '.usage_type // "frontend"')
         
-        log "INFO" "Deploying SSL certificate: $cert_name ($cert_domain) - Status: $cert_status"
+        log "INFO" "Deploying SSL certificate: $cert_name ($cert_domain) - Usage: $usage_type - Status: $cert_status"
         
         # Validate certificate content
         if [[ -z "$cert_content" || "$cert_content" == "null" ]]; then
@@ -1202,9 +1203,14 @@ deploy_ssl_certificates() {
             continue
         fi
         
-        if [[ -z "$key_content" || "$key_content" == "null" ]]; then
-            log "ERROR" "Private key content is empty for $cert_name, skipping"
-            continue
+        # CRITICAL: Private key validation depends on usage_type
+        # - Frontend SSL: private key REQUIRED (for HAProxy bind)
+        # - Server SSL: private key OPTIONAL (CA certificate only for backend verification)
+        if [[ "$usage_type" == "frontend" ]]; then
+            if [[ -z "$key_content" || "$key_content" == "null" ]]; then
+                log "ERROR" "Private key is required for Frontend SSL: $cert_name, skipping"
+                continue
+            fi
         fi
         
         # Create combined PEM file (HAProxy format: cert + key + chain)
@@ -1213,9 +1219,11 @@ deploy_ssl_certificates() {
         # Write certificate
         echo "$cert_content" > "$temp_cert_file"
         
-        # Append private key
-        echo "" >> "$temp_cert_file"
-        echo "$key_content" >> "$temp_cert_file"
+        # Append private key (only if provided - server SSL may not have it)
+        if [[ -n "$key_content" && "$key_content" != "null" ]]; then
+            echo "" >> "$temp_cert_file"
+            echo "$key_content" >> "$temp_cert_file"
+        fi
         
         # Append certificate chain if present
         if [[ -n "$chain_content" && "$chain_content" != "null" ]]; then
@@ -2421,8 +2429,18 @@ CONFIG_RESPONSE_EOF
                             key_content=$(echo "$cert_data" | jq -r '.private_key_content // ""' 2>/dev/null)
                             chain_content=$(echo "$cert_data" | jq -r '.chain_content // ""' 2>/dev/null)
                             cert_file_path=$(echo "$cert_data" | jq -r '.file_path // ""' 2>/dev/null)
+                            usage_type=$(echo "$cert_data" | jq -r '.usage_type // "frontend"' 2>/dev/null)
                             
-                            if [[ -n "$cert_content" && "$cert_content" != "null" && -n "$key_content" && "$key_content" != "null" ]]; then
+                            # CRITICAL: Certificate content is always required, but private key depends on usage_type
+                            # - Frontend SSL: requires both cert AND private key (for bind ssl crt)
+                            # - Server SSL: requires only cert (CA file for backend verification)
+                            if [[ -n "$cert_content" && "$cert_content" != "null" ]]; then
+                                # For frontend SSL, private key is required
+                                if [[ "$usage_type" == "frontend" && ( -z "$key_content" || "$key_content" == "null" ) ]]; then
+                                    log "WARN" "Skipping Frontend SSL $cert_name: private key missing"
+                                    continue
+                                fi
+                                
                                 # Use alternative path if original fails
                                 if [[ -n "$cert_file_path" ]]; then
                                     ssl_file="$SSL_DIR/$(basename "$cert_file_path")"
@@ -2432,11 +2450,23 @@ CONFIG_RESPONSE_EOF
                                 
                                 # Check if certificate already exists and is unchanged
                                 # IMPORTANT: Calculate checksum with EXACT same format as file will be written
-                                # Format: cert + blank line + key [+ blank line + chain if exists]
-                                if [[ -n "$chain_content" && "$chain_content" != "null" ]]; then
-                                    new_content=$(printf "%s\n\n%s\n\n%s" "$cert_content" "$key_content" "$chain_content")
+                                # Format depends on what content is available:
+                                # - Frontend SSL: cert + key [+ chain]
+                                # - Server SSL: cert [+ chain] (no private key)
+                                if [[ -n "$key_content" && "$key_content" != "null" ]]; then
+                                    # Has private key - frontend SSL
+                                    if [[ -n "$chain_content" && "$chain_content" != "null" ]]; then
+                                        new_content=$(printf "%s\n\n%s\n\n%s" "$cert_content" "$key_content" "$chain_content")
+                                    else
+                                        new_content=$(printf "%s\n\n%s" "$cert_content" "$key_content")
+                                    fi
                                 else
-                                    new_content=$(printf "%s\n\n%s" "$cert_content" "$key_content")
+                                    # No private key - server SSL (CA cert only)
+                                    if [[ -n "$chain_content" && "$chain_content" != "null" ]]; then
+                                        new_content=$(printf "%s\n\n%s" "$cert_content" "$chain_content")
+                                    else
+                                        new_content="$cert_content"
+                                    fi
                                 fi
                                 
                                 existing_checksum=""
@@ -2448,11 +2478,17 @@ CONFIG_RESPONSE_EOF
                                 
                                 # Only deploy if certificate is new or changed
                                 if [[ "$existing_checksum" != "$new_checksum" ]]; then
-                                    # Create combined PEM file (HAProxy format: cert + key + chain)
+                                    # Create combined PEM file
+                                    # Format depends on usage_type:
+                                    # - Frontend SSL: cert + key + [chain]
+                                    # - Server SSL: cert + [chain] (CA cert only, no private key)
                                     {
                                         echo "$cert_content"
-                                        echo ""
-                                        echo "$key_content"
+                                        # Only add private key if provided (server SSL may not have it)
+                                        if [[ -n "$key_content" && "$key_content" != "null" ]]; then
+                                            echo ""
+                                            echo "$key_content"
+                                        fi
                                         # Add chain if present
                                         if [[ -n "$chain_content" && "$chain_content" != "null" ]]; then
                                             echo ""

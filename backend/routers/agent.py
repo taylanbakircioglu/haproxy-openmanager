@@ -1524,7 +1524,7 @@ async def get_agent_ssl_certificates(agent_name: str, since: Optional[str] = Non
         ssl_query = """
             SELECT DISTINCT s.id, s.name, s.primary_domain as domain, s.certificate_content, 
                    s.private_key_content, s.chain_content, s.expiry_date, s.status, s.fingerprint, 
-                   s.created_at, s.updated_at, s.last_config_status
+                   s.usage_type, s.created_at, s.updated_at, s.last_config_status
             FROM ssl_certificates s
             LEFT JOIN ssl_certificate_clusters scc ON s.id = scc.ssl_certificate_id
             WHERE s.is_active = TRUE 
@@ -1584,6 +1584,7 @@ async def get_agent_ssl_certificates(agent_name: str, since: Optional[str] = Non
                 "certificate_content": cert['certificate_content'],
                 "private_key_content": cert['private_key_content'],
                 "chain_content": cert['chain_content'],
+                "usage_type": cert.get('usage_type', 'frontend'),  # Default to frontend for backward compatibility
                 "file_path": f"/etc/ssl/haproxy/{cert['name']}.pem",
                 "expiry_date": cert['expiry_date'].isoformat() if cert['expiry_date'] else None,
                 "status": cert['status'],

@@ -12,15 +12,15 @@ ENV npm_config_fund=false \
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies with network timeout optimization
+# Install dependencies with aggressive network timeout optimization
 RUN npm cache clean --force \
-    && npm config set maxsockets 3 \
-    && npm config set fetch-retries 5 \
-    && npm config set fetch-retry-mintimeout 20000 \
-    && npm config set fetch-retry-maxtimeout 120000 \
-    && npm config set fetch-timeout 300000 \
+    && npm config set maxsockets 1 \
+    && npm config set fetch-retries 10 \
+    && npm config set fetch-retry-mintimeout 30000 \
+    && npm config set fetch-retry-maxtimeout 300000 \
+    && npm config set fetch-timeout 600000 \
     && npm config set registry https://registry.npmjs.org/ \
-    && npm install --no-audit --no-fund --progress=false --legacy-peer-deps --timeout=300000 \
+    && npm install --no-audit --no-fund --progress=false --legacy-peer-deps --timeout=600000 \
     && npm cache clean --force
 
 # Copy source code
@@ -42,10 +42,11 @@ WORKDIR /app
 # Keep npm quiet and reduce file operations in runtime image too
 ENV npm_config_fund=false npm_config_audit=false npm_config_progress=false
 
-# Install serve to serve static files with timeout optimization
-RUN npm config set fetch-timeout 300000 \
-    && npm config set fetch-retries 5 \
-    && npm install -g serve --no-fund --no-audit --progress=false --timeout=300000
+# Install serve to serve static files with aggressive timeout optimization
+RUN npm config set fetch-timeout 600000 \
+    && npm config set fetch-retries 10 \
+    && npm config set maxsockets 1 \
+    && npm install -g serve --no-fund --no-audit --progress=false --timeout=600000
 
 # Create non-root user for OpenShift compatibility (Alpine-based)
 RUN addgroup -g 1001 nodejs && \

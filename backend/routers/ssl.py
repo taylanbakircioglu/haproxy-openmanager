@@ -90,7 +90,7 @@ async def validate_user_cluster_access(user_id: int, cluster_id: int, conn):
     return True
 
 @router.get("/certificates", response_model=List[dict], summary="Get SSL Certificates", response_description="List of SSL certificates")
-async def get_ssl_certificates(cluster_id: Optional[int] = None):
+async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Optional[str] = None):
     """
     # Get SSL Certificates
     
@@ -140,9 +140,23 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None):
             
             # Query with new schema fields - show cluster-specific + global SSLs
             if cluster_id:
-                certificates = await conn.fetch("""
+                # Build WHERE clause with optional usage_type filter
+                where_clauses = ["s.is_active = TRUE"]
+                where_clauses.append("""(
+                    NOT EXISTS (SELECT 1 FROM ssl_certificate_clusters WHERE ssl_certificate_id = s.id)  -- Global SSLs (no cluster associations)
+                    OR scc.cluster_id = $1  -- Cluster-specific SSLs for this cluster
+                )""")
+                
+                params = [cluster_id]
+                if usage_type:
+                    where_clauses.append(f"s.usage_type = ${len(params) + 1}")
+                    params.append(usage_type)
+                
+                where_clause = " AND ".join(where_clauses)
+                
+                certificates = await conn.fetch(f"""
                     SELECT DISTINCT s.id, s.name, s.primary_domain as domain, s.expiry_date, s.issuer, s.fingerprint, s.status, 
-                           s.days_until_expiry, s.all_domains, s.is_active, s.cluster_id,
+                           s.days_until_expiry, s.all_domains, s.is_active, s.cluster_id, s.usage_type,
                            s.created_at, s.updated_at,
                            CASE 
                                WHEN NOT EXISTS (SELECT 1 FROM ssl_certificate_clusters WHERE ssl_certificate_id = s.id) THEN 'Global'
@@ -169,24 +183,30 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None):
                     FROM ssl_certificates s
                     LEFT JOIN ssl_certificate_clusters scc ON s.id = scc.ssl_certificate_id
                     LEFT JOIN haproxy_clusters c ON scc.cluster_id = c.id
-                    WHERE s.is_active = TRUE 
-                    AND (
-                        NOT EXISTS (SELECT 1 FROM ssl_certificate_clusters WHERE ssl_certificate_id = s.id)  -- Global SSLs (no cluster associations)
-                        OR scc.cluster_id = $1  -- Cluster-specific SSLs for this cluster
-                    )
+                    WHERE {where_clause}
                     GROUP BY s.id, s.name, s.primary_domain, s.expiry_date, s.issuer, s.fingerprint, s.status, 
-                             s.days_until_expiry, s.all_domains, s.is_active, s.cluster_id, s.created_at, s.updated_at
+                             s.days_until_expiry, s.all_domains, s.is_active, s.cluster_id, s.usage_type, s.created_at, s.updated_at
                     ORDER BY s.created_at DESC
-                """, cluster_id)
+                """, *params)
             else:
-                certificates = await conn.fetch("""
+                # Build WHERE clause with optional usage_type filter
+                where_clauses = ["is_active = TRUE"]
+                params = []
+                
+                if usage_type:
+                    where_clauses.append(f"usage_type = ${len(params) + 1}")
+                    params.append(usage_type)
+                
+                where_clause = " AND ".join(where_clauses)
+                
+                certificates = await conn.fetch(f"""
                     SELECT id, name, domain, expiry_date, issuer, fingerprint, status, 
-                           days_until_expiry, all_domains, is_active, cluster_id,
+                           days_until_expiry, all_domains, is_active, cluster_id, usage_type,
                            created_at, updated_at
                     FROM ssl_certificates
-                    WHERE is_active = TRUE
+                    WHERE {where_clause}
                     ORDER BY created_at DESC
-                """)
+                """, *params)
             
             await close_database_connection(conn)
             
@@ -215,6 +235,7 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None):
                     'status': cert.get('status', 'valid'),
                     'days_until_expiry': cert.get('days_until_expiry', 0),
                     'cluster_id': cert['cluster_id'],
+                    'usage_type': cert.get('usage_type', 'frontend'),
                     'ssl_type': cert.get('ssl_type', 'Global' if cert['cluster_id'] is None else 'Cluster-specific'),
                     'cluster_names': cert.get('cluster_names', []),
                     'created_at': cert['created_at'].isoformat().replace('+00:00', 'Z') if cert['created_at'] else None,
@@ -282,8 +303,8 @@ async def create_ssl_certificate(certificate: SSLCertificateCreate, request: Req
                 detail=f"SSL certificate parsing error: {str(parse_error)}"
             )
         
-        # Validate private key
-        if not validate_private_key(certificate.private_key_content):
+        # Validate private key (only if provided - server SSL may not have private key)
+        if certificate.private_key_content and not validate_private_key(certificate.private_key_content):
             await close_database_connection(conn)
             raise HTTPException(status_code=400, detail="Invalid private key format")
         
@@ -336,10 +357,11 @@ async def create_ssl_certificate(certificate: SSLCertificateCreate, request: Req
                         primary_domain = $5,
                         all_domains = $6,
                         expiry_date = $7,
+                        usage_type = $8,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = $1
                 """, existing['id'], certificate.certificate_content, certificate.private_key_content,
-                    certificate.chain_content, primary_domain, all_domains, expiry_date)
+                    certificate.chain_content, primary_domain, all_domains, expiry_date, certificate.usage_type)
                 
                 cert_id = existing['id']
                 logger.info(f"SSL REACTIVATED: SSL certificate '{certificate.name}' (ID: {cert_id}) reactivated successfully")
@@ -411,13 +433,13 @@ async def create_ssl_certificate(certificate: SSLCertificateCreate, request: Req
                 INSERT INTO ssl_certificates 
                 (name, primary_domain, certificate_content, private_key_content, chain_content, 
                  expiry_date, issuer, fingerprint, status, days_until_expiry, all_domains,
-                 is_active, cluster_id, last_config_status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                 is_active, cluster_id, last_config_status, usage_type)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 RETURNING id
             """, certificate.name, primary_domain, certificate.certificate_content, 
                 certificate.private_key_content, certificate.chain_content, expiry_date,
                 issuer, fingerprint, status, days_until_expiry, json.dumps(all_domains),
-                True, None, 'PENDING')  # Always NULL for cluster_id, use junction table
+                True, None, 'PENDING', certificate.usage_type)  # Always NULL for cluster_id, use junction table
         
         # If not global, insert cluster associations in junction table
         if not certificate.is_global and certificate.cluster_ids:
@@ -561,7 +583,7 @@ async def get_ssl_certificate(cert_id: int, authorization: str = Header(None)):
         certificate = await conn.fetchrow("""
             SELECT s.id, s.name, s.primary_domain as domain, s.all_domains, s.certificate_content, 
                    s.private_key_content, s.chain_content, s.expiry_date, s.issuer, s.status, 
-                   s.days_until_expiry, s.fingerprint, s.cluster_id, s.created_at, s.updated_at,
+                   s.days_until_expiry, s.fingerprint, s.cluster_id, s.usage_type, s.created_at, s.updated_at,
                    CASE 
                        WHEN NOT EXISTS (SELECT 1 FROM ssl_certificate_clusters WHERE ssl_certificate_id = s.id) THEN TRUE
                        ELSE FALSE
@@ -575,7 +597,7 @@ async def get_ssl_certificate(cert_id: int, authorization: str = Header(None)):
             WHERE s.id = $1
             GROUP BY s.id, s.name, s.primary_domain, s.all_domains, s.certificate_content, 
                      s.private_key_content, s.chain_content, s.expiry_date, s.issuer, s.status, 
-                     s.days_until_expiry, s.fingerprint, s.cluster_id, s.created_at, s.updated_at
+                     s.days_until_expiry, s.fingerprint, s.cluster_id, s.usage_type, s.created_at, s.updated_at
         """, cert_id)
         
         if not certificate:
@@ -677,7 +699,7 @@ async def update_ssl_certificate(cert_id: int, certificate: SSLCertificateUpdate
         
         # Get existing certificate with all details including cluster associations
         existing = await conn.fetchrow("""
-            SELECT s.id, s.name, s.cluster_id, s.certificate_content, s.private_key_content, s.chain_content,
+            SELECT s.id, s.name, s.cluster_id, s.certificate_content, s.private_key_content, s.chain_content, s.usage_type,
                    CASE 
                        WHEN NOT EXISTS (SELECT 1 FROM ssl_certificate_clusters WHERE ssl_certificate_id = s.id) THEN TRUE
                        ELSE FALSE
@@ -731,8 +753,8 @@ async def update_ssl_certificate(cert_id: int, certificate: SSLCertificateUpdate
                     detail=f"SSL certificate parsing error: {str(parse_error)}"
                 )
             
-            # Validate private key
-            if not validate_private_key(key_content):
+            # Validate private key (only if provided - server SSL may not have private key)
+            if key_content and not validate_private_key(key_content):
                 await close_database_connection(conn)
                 raise HTTPException(status_code=400, detail="Invalid private key format")
             
@@ -844,6 +866,11 @@ async def update_ssl_certificate(cert_id: int, certificate: SSLCertificateUpdate
         if certificate.cluster_id is not None:
             update_fields.append(f"cluster_id = ${param_count}")
             update_values.append(certificate.cluster_id)
+            param_count += 1
+        
+        if certificate.usage_type is not None:
+            update_fields.append(f"usage_type = ${param_count}")
+            update_values.append(certificate.usage_type)
             param_count += 1
         
         # CRITICAL: If content was updated, set last_config_status to PENDING

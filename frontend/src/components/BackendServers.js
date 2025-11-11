@@ -184,8 +184,8 @@ const BackendServers = () => {
     
     try {
       const token = localStorage.getItem('token');
-      // CRITICAL FIX: Use same endpoint as Frontend (/api/ssl/certificates not /api/ssl-certificates)
-      const response = await axios.get(`/api/ssl/certificates?cluster_id=${selectedCluster.id}`, {
+      // CRITICAL: Only fetch server SSL certificates (usage_type=server) for backend servers
+      const response = await axios.get(`/api/ssl/certificates?cluster_id=${selectedCluster.id}&usage_type=server`, {
         headers: { 
           'Authorization': `Bearer ${token}`,
           'Cache-Control': 'no-cache, no-store, must-revalidate',

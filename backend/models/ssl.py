@@ -1,4 +1,4 @@
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import logging
@@ -8,12 +8,21 @@ logger = logging.getLogger(__name__)
 class SSLCertificateCreate(BaseModel):
     name: str
     certificate_content: str  # PEM format certificate
-    private_key_content: str  # PEM format private key
+    private_key_content: Optional[str] = None  # PEM format private key (optional for server SSL)
     chain_content: Optional[str] = None  # PEM format certificate chain (optional)
     cluster_ids: Optional[List[int]] = None  # List of cluster IDs for multi-cluster support
     is_global: bool = False  # True for global SSL certificates
+    usage_type: str = "frontend"  # "frontend" or "server" - determines if private key is required
     
-    @validator('certificate_content')
+    @field_validator('usage_type')
+    @classmethod
+    def validate_usage_type(cls, v):
+        if v not in ['frontend', 'server']:
+            raise ValueError('usage_type must be either "frontend" or "server"')
+        return v
+    
+    @field_validator('certificate_content')
+    @classmethod
     def validate_certificate(cls, v):
         if not v or not v.strip():
             raise ValueError('Certificate content is required')
@@ -25,19 +34,33 @@ class SSLCertificateCreate(BaseModel):
         
         return v
     
-    @validator('private_key_content')
-    def validate_private_key(cls, v):
-        if not v or not v.strip():
-            raise ValueError('Private key content is required')
+    @model_validator(mode='after')
+    def validate_private_key_based_on_usage(self):
+        """Private key is required for frontend SSL, optional for server SSL"""
+        usage_type = self.usage_type
+        private_key = self.private_key_content
         
-        # Basic PEM format check
-        v = v.strip()
-        if '-----BEGIN' not in v or '-----END' not in v:
-            raise ValueError('Private key must be in PEM format')
+        if usage_type == 'frontend':
+            # Frontend SSL requires private key
+            if not private_key or not private_key.strip():
+                raise ValueError('Private key is required for frontend SSL certificates')
+            
+            # Basic PEM format check
+            private_key = private_key.strip()
+            if '-----BEGIN' not in private_key or '-----END' not in private_key:
+                raise ValueError('Private key must be in PEM format')
+        elif usage_type == 'server':
+            # Server SSL - private key is optional
+            if private_key and private_key.strip():
+                # If provided, validate format
+                private_key = private_key.strip()
+                if '-----BEGIN' not in private_key or '-----END' not in private_key:
+                    raise ValueError('Private key must be in PEM format')
         
-        return v
+        return self
     
-    @validator('chain_content')
+    @field_validator('chain_content')
+    @classmethod
     def validate_chain(cls, v):
         if v and v.strip():
             # Basic PEM format check for chain
@@ -52,6 +75,14 @@ class SSLCertificateUpdate(BaseModel):
     private_key_content: Optional[str] = None
     chain_content: Optional[str] = None
     cluster_id: Optional[int] = None
+    usage_type: Optional[str] = None  # "frontend" or "server"
+    
+    @field_validator('usage_type')
+    @classmethod
+    def validate_usage_type(cls, v):
+        if v is not None and v not in ['frontend', 'server']:
+            raise ValueError('usage_type must be either "frontend" or "server"')
+        return v
 
 class SSLCertificate(BaseModel):
     id: int
@@ -59,7 +90,7 @@ class SSLCertificate(BaseModel):
     domain: str  # Auto-parsed from certificate
     all_domains: List[str] = []  # All domains from SAN + CN
     certificate_content: str
-    private_key_content: str
+    private_key_content: Optional[str] = None  # Optional for server SSL
     chain_content: Optional[str] = None
     expiry_date: Optional[datetime] = None  # Auto-parsed from certificate
     issuer: Optional[str] = None  # Auto-parsed from certificate
@@ -67,6 +98,7 @@ class SSLCertificate(BaseModel):
     days_until_expiry: int = 0
     fingerprint: Optional[str] = None
     cluster_id: Optional[int] = None
+    usage_type: str = "frontend"  # "frontend" or "server"
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     has_pending_config: bool = False
@@ -86,6 +118,7 @@ class SSLCertificateResponse(BaseModel):
     issuer: Optional[str] = None
     fingerprint: Optional[str] = None
     cluster_id: Optional[int] = None
+    usage_type: str = "frontend"  # "frontend" or "server"
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     has_pending_config: bool = False

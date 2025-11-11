@@ -290,12 +290,13 @@ const FrontendManagement = () => {
     
     setSslLoading(true);
     try {
-      console.log('🔍 SSL FETCH DEBUG: Fetching certificates for cluster:', selectedCluster.id);
+      console.log('🔍 SSL FETCH DEBUG: Fetching FRONTEND certificates for cluster:', selectedCluster.id);
       
       const token = localStorage.getItem('token');
       console.log('🔍 SSL FETCH DEBUG: Token exists:', token ? 'Yes' : 'No');
       
-      const response = await axios.get(`/api/ssl/certificates?cluster_id=${selectedCluster.id}`, {
+      // CRITICAL: Only fetch frontend SSL certificates (usage_type=frontend)
+      const response = await axios.get(`/api/ssl/certificates?cluster_id=${selectedCluster.id}&usage_type=frontend`, {
         headers: { 
           'Authorization': `Bearer ${token}`,
           'Cache-Control': 'no-cache, no-store, must-revalidate',
