@@ -706,8 +706,9 @@ CLUSTER_ID=$(jq -r '.management.cluster_id' "$CONFIG_FILE")
 AGENT_NAME=$(jq -r '.agent.name' "$CONFIG_FILE")
 HOSTNAME=$(jq -r '.agent.hostname' "$CONFIG_FILE")
 
-# SSL incremental update timestamp file
-SSL_SYNC_TIMESTAMP_FILE="/tmp/haproxy-agent-ssl-sync-timestamp"
+# SSL incremental update timestamp file (agent-specific to avoid race conditions)
+# Each agent maintains its own SSL sync timestamp to prevent conflicts
+SSL_SYNC_TIMESTAMP_FILE="/tmp/haproxy-agent-ssl-sync-${AGENT_NAME}"
 
 # Get dynamic HAProxy paths from cluster configuration
 get_cluster_paths() {
@@ -1547,9 +1548,6 @@ check_config_updates() {
     
     log "DEBUG" "Config status: $CONFIG_STATUS, version: $CONFIG_VERSION"
     
-    # Fetch and deploy SSL certificates separately
-    fetch_and_deploy_ssl_certificates
-    
     # Check if config is available
     if [[ "$CONFIG_STATUS" != "available" ]]; then
         log "WARN" "No configuration available (status: $CONFIG_STATUS)"
@@ -1580,8 +1578,15 @@ check_config_updates() {
     # Check if this version is already applied (CRITICAL: Prevent reapplying same config)
     if [[ "$CONFIG_VERSION" == "$last_applied_version" ]]; then
         log "DEBUG" "Configuration version $CONFIG_VERSION already applied, skipping"
+        # OPTIMIZATION: SSL certificates are fetched separately and independently
+        # Only fetch SSL if config hasn't changed to reduce unnecessary API calls
         return 0
     fi
+    
+    # OPTIMIZATION: Fetch and deploy SSL certificates ONLY when config changes
+    # This prevents unnecessary SSL API calls every 30 seconds
+    log "INFO" "Config version changed ($last_applied_version → $CONFIG_VERSION), fetching SSL certificates..."
+    fetch_and_deploy_ssl_certificates
     
     # Create backup of current config (CRITICAL: Always backup before changes)
     if [[ -f "$HAPROXY_CONFIG_PATH" ]]; then
@@ -1818,8 +1823,26 @@ run_daemon() {
     
     log "INFO" "Using curl: $CURL_BIN"
     
-    # Initialize version tracking variable
-    last_applied_version="none"
+    # CRITICAL FIX: Initialize version tracking from database (prevent config reapply on restart)
+    # Agent restart should NOT trigger config reapplication - fetch last applied version from backend
+    log "INFO" "Fetching last applied config version from backend..."
+    agent_info_response=$("$CURL_BIN" -k -s -X GET "$MANAGEMENT_URL/api/agents" \
+        -H "X-API-Key: $AGENT_TOKEN" 2>/dev/null)
+    
+    if [[ $? -eq 0 && -n "$agent_info_response" ]]; then
+        # Extract applied_config_version for this agent
+        last_applied_version=$(echo "$agent_info_response" | jq -r ".agents[] | select(.name==\"$AGENT_NAME\") | .applied_config_version // \"none\"" 2>/dev/null)
+        
+        if [[ -z "$last_applied_version" || "$last_applied_version" == "null" ]]; then
+            last_applied_version="none"
+            log "WARN" "Could not fetch applied_config_version from backend, starting with 'none'"
+        else
+            log "INFO" "Loaded last applied version from database: $last_applied_version"
+        fi
+    else
+        last_applied_version="none"
+        log "WARN" "Failed to fetch agent info from backend, starting with version 'none'"
+    fi
     
     # CRITICAL: Startup delay to avoid race conditions
     log "INFO" "Startup delay for system stabilization..."
@@ -2374,8 +2397,27 @@ CONFIG_RESPONSE_EOF
     # Write PID (use /tmp to avoid permission issues)
     echo $$ > "$PID_FILE" 2>/dev/null || true
     
-    # Initialize version tracking variables for daemon loop
-    last_applied_version="none"
+    # CRITICAL FIX: Initialize version tracking from database (prevent config reapply on restart)
+    # Agent restart/upgrade should NOT trigger config reapplication - fetch last applied version
+    log "DEBUG" "DAEMON: Fetching last applied config version from backend..."
+    agent_info_response=$(curl -k -s -X GET "$MANAGEMENT_URL/api/agents" \
+        -H "X-API-Key: $AGENT_TOKEN" 2>/dev/null)
+    
+    if [[ $? -eq 0 && -n "$agent_info_response" ]]; then
+        # Extract applied_config_version for this agent using jq
+        last_applied_version=$(echo "$agent_info_response" | jq -r ".agents[] | select(.name==\"$AGENT_NAME\") | .applied_config_version // \"none\"" 2>/dev/null)
+        
+        if [[ -z "$last_applied_version" || "$last_applied_version" == "null" ]]; then
+            last_applied_version="none"
+            log "WARN" "DAEMON: Could not fetch applied_config_version, starting with 'none'"
+        else
+            log "INFO" "DAEMON: Loaded last applied version from database: $last_applied_version"
+        fi
+    else
+        last_applied_version="none"
+        log "WARN" "DAEMON: Failed to fetch agent info, starting with version 'none'"
+    fi
+    
     last_validation_failed_version="none"
     
     # Enhanced daemon loop with upgrade capability  

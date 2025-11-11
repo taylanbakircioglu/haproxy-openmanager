@@ -86,7 +86,7 @@ async def validate_user_cluster_access(user_id: int, cluster_id: int, conn):
     return True
 
 @router.get("", summary="Get All Frontends", response_description="List of frontend configurations")
-async def get_frontends(cluster_id: Optional[int] = None):
+async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool = False):
     """
     # Get All Frontends
     
@@ -179,29 +179,57 @@ async def get_frontends(cluster_id: Optional[int] = None):
             logger.info(f"FRONTEND DEBUG (Global): ssl_certificate_id column exists: {ssl_cert_id_exists}")
             
             if ssl_cert_id_exists:
-                frontends = await conn.fetch("""
-                    SELECT id, name, bind_address, bind_port, default_backend, mode,
-                           ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
-                           acl_rules, redirect_rules, use_backend_rules,
-                           request_headers, response_headers, tcp_request_rules,
-                           timeout_client, timeout_http_request,
-                           rate_limit, compression, log_separate, monitor_uri,
-                           maxconn, is_active, created_at, updated_at, cluster_id, last_config_status
-                    FROM frontends ORDER BY name
-                """)
+                # include_inactive parameter controls deleted entity visibility
+                # Default FALSE: Only show active frontends (prevents phantom deleted entities)
+                # Set TRUE: Apply Management shows all including deleted for pending change visibility
+                # This matches backend GET behavior for consistency
+                if include_inactive:
+                    frontends = await conn.fetch("""
+                        SELECT id, name, bind_address, bind_port, default_backend, mode,
+                               ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
+                               acl_rules, redirect_rules, use_backend_rules,
+                               request_headers, response_headers, tcp_request_rules,
+                               timeout_client, timeout_http_request,
+                               rate_limit, compression, log_separate, monitor_uri,
+                               maxconn, is_active, created_at, updated_at, cluster_id, last_config_status
+                        FROM frontends ORDER BY name
+                    """)
+                else:
+                    frontends = await conn.fetch("""
+                        SELECT id, name, bind_address, bind_port, default_backend, mode,
+                               ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
+                               acl_rules, redirect_rules, use_backend_rules,
+                               request_headers, response_headers, tcp_request_rules,
+                               timeout_client, timeout_http_request,
+                               rate_limit, compression, log_separate, monitor_uri,
+                               maxconn, is_active, created_at, updated_at, cluster_id, last_config_status
+                        FROM frontends WHERE is_active = TRUE ORDER BY name
+                    """)
             else:
                 # Fallback query without ssl_certificate_id
                 logger.warning("FRONTEND DEBUG (Global): ssl_certificate_id column missing, using fallback query")
-                frontends = await conn.fetch("""
-                    SELECT id, name, bind_address, bind_port, default_backend, mode,
-                           ssl_enabled, ssl_cert_path, ssl_cert, ssl_verify,
-                           acl_rules, redirect_rules, use_backend_rules,
-                           request_headers, response_headers, tcp_request_rules,
-                           timeout_client, timeout_http_request,
-                           rate_limit, compression, log_separate, monitor_uri,
-                           maxconn, is_active, created_at, updated_at, cluster_id, last_config_status
-                    FROM frontends ORDER BY name
-                """)
+                if include_inactive:
+                    frontends = await conn.fetch("""
+                        SELECT id, name, bind_address, bind_port, default_backend, mode,
+                               ssl_enabled, ssl_cert_path, ssl_cert, ssl_verify,
+                               acl_rules, redirect_rules, use_backend_rules,
+                               request_headers, response_headers, tcp_request_rules,
+                               timeout_client, timeout_http_request,
+                               rate_limit, compression, log_separate, monitor_uri,
+                               maxconn, is_active, created_at, updated_at, cluster_id, last_config_status
+                        FROM frontends ORDER BY name
+                    """)
+                else:
+                    frontends = await conn.fetch("""
+                        SELECT id, name, bind_address, bind_port, default_backend, mode,
+                               ssl_enabled, ssl_cert_path, ssl_cert, ssl_verify,
+                               acl_rules, redirect_rules, use_backend_rules,
+                               request_headers, response_headers, tcp_request_rules,
+                               timeout_client, timeout_http_request,
+                               rate_limit, compression, log_separate, monitor_uri,
+                               maxconn, is_active, created_at, updated_at, cluster_id, last_config_status
+                        FROM frontends WHERE is_active = TRUE ORDER BY name
+                    """)
         
         # Check for pending configurations by cluster
         pending_frontend_ids = set()
@@ -285,7 +313,11 @@ async def get_frontends(cluster_id: Optional[int] = None):
                     "created_at": f["created_at"].isoformat().replace('+00:00', 'Z') if f["created_at"] else None,
                     "updated_at": f["updated_at"].isoformat().replace('+00:00', 'Z') if f["updated_at"] else None,
                     "cluster_id": f.get("cluster_id"),
-                    "has_pending_config": f["id"] in pending_frontend_ids or not f.get("is_active", True)
+                    "has_pending_config": (
+                        f["id"] in pending_frontend_ids or 
+                        f.get("last_config_status") == "PENDING" or 
+                        not f.get("is_active", True)
+                    )
                 } for f in frontends
             ]
         }

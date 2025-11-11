@@ -16,7 +16,7 @@ export const useCluster = () => {
 export const ClusterProvider = ({ children }) => {
   const [clusters, setClusters] = useState([]);
   const [selectedCluster, setSelectedCluster] = useState(null);
-  const [agentHealthByPool, setAgentHealthByPool] = useState({});
+  const [agentHealthByPool, setAgentHealthByPool] = useState({});  // Deprecated but kept for backward compatibility
   const [loading, setLoading] = useState(true);
 
   // Fetch all clusters
@@ -39,20 +39,35 @@ export const ClusterProvider = ({ children }) => {
       });
       setAgentHealthByPool(healthMap);
       
-      // Set selected cluster - handle empty clusters list gracefully
+      // Set or update selected cluster
       if (response.data.clusters.length > 0) {
         const defaultCluster = response.data.clusters.find(c => c.is_default);
         const savedClusterId = localStorage.getItem('selectedClusterId');
         
-        if (savedClusterId) {
-          const savedCluster = response.data.clusters.find(c => c.id === parseInt(savedClusterId));
+        // CRITICAL FIX: Update selectedCluster with fresh data if it exists in new clusters
+        // This ensures agent status dot indicator stays current
+        const currentSelectedId = selectedCluster?.id;
+        
+        if (currentSelectedId) {
+          // Update existing selection with fresh data
+          const updatedCluster = clustersData.find(c => c.id === currentSelectedId);
+          if (updatedCluster) {
+            setSelectedCluster(updatedCluster);  // Update with fresh agent health data
+          } else {
+            // Selected cluster no longer exists, fall back to default
+            setSelectedCluster(defaultCluster || clustersData[0]);
+          }
+        } else if (savedClusterId) {
+          // Initial load from localStorage
+          const savedCluster = clustersData.find(c => c.id === parseInt(savedClusterId));
           if (savedCluster) {
             setSelectedCluster(savedCluster);
           } else {
-            setSelectedCluster(defaultCluster || response.data.clusters[0]);
+            setSelectedCluster(defaultCluster || clustersData[0]);
           }
         } else {
-          setSelectedCluster(defaultCluster || response.data.clusters[0]);
+          // No saved preference, use default
+          setSelectedCluster(defaultCluster || clustersData[0]);
         }
       } else {
         // No clusters available - clear selection
@@ -147,6 +162,14 @@ export const ClusterProvider = ({ children }) => {
 
   useEffect(() => {
     fetchClusters();
+    
+    // Auto-refresh cluster status every 30 seconds to keep agent health updated
+    // This prevents stale agent status in cluster selector dot indicator
+    const refreshInterval = setInterval(() => {
+      fetchClusters();
+    }, 30000); // 30 seconds - matches agent heartbeat interval
+    
+    return () => clearInterval(refreshInterval);
   }, []);
 
   const value = {

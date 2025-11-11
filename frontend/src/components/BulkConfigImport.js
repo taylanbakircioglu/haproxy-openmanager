@@ -90,7 +90,28 @@ backend web-backend
       }
 
       setParseResult(data);
-      message.success(`Parsed ${data.summary.frontends_count} frontends, ${data.summary.backends_count} backends, ${data.summary.total_servers_count} servers`);
+      
+      // Build multi-line success message showing only NEW entities
+      // "Existing" entities are shown in table, no need to clutter message
+      const totalCount = data.summary.frontends_count + data.summary.backends_count + data.summary.total_servers_count;
+      
+      const messageLines = [`Parsed ${totalCount} entities successfully`];
+      
+      // Only show NEW entities in success message (cleaner, focused on changes)
+      if (data.summary.new_frontends > 0) {
+        messageLines.push(`✓ Frontends: ${data.summary.new_frontends} new`);
+      }
+      if (data.summary.new_backends > 0) {
+        messageLines.push(`✓ Backends: ${data.summary.new_backends} new`);
+      }
+      if (data.summary.new_servers > 0) {
+        messageLines.push(`✓ Servers: ${data.summary.new_servers} new`);
+      }
+      
+      // Show multi-line message (each line visible)
+      messageLines.forEach((line, index) => {
+        setTimeout(() => message.success(line, 4), index * 100);
+      });
     } catch (error) {
       console.error('Parse error:', error);
       message.error(error.message || 'Failed to parse configuration');
@@ -118,27 +139,81 @@ backend web-backend
       const data = await response.json();
 
       if (!response.ok) {
+        // Handle conflict error (409) - pending apply exists
+        if (response.status === 409) {
+          Modal.error({
+            title: 'Pending Changes Detected',
+            content: (
+              <div>
+                <p>{data.detail}</p>
+                <Alert 
+                  type="warning" 
+                  message="Action Required"
+                  description="Please apply or discard existing changes before performing bulk import to avoid conflicts."
+                  style={{ marginTop: 12 }}
+                />
+              </div>
+            ),
+            okText: 'Go to Apply Management',
+            onOk: () => {
+              window.location.href = '/apply-management';
+            }
+          });
+          return;
+        }
         throw new Error(data.detail || 'Failed to create entities');
       }
 
       message.success(data.message);
       
-      // Show summary
+      // Show detailed summary with new/update breakdown
       Modal.success({
-        title: 'Entities Created Successfully',
+        title: 'Bulk Import Completed Successfully',
+        width: 600,
         content: (
           <div>
-            <p><strong>Created:</strong></p>
-            <ul>
-              <li>Frontends: {data.summary.frontends}</li>
-              <li>Backends: {data.summary.backends}</li>
-              <li>Servers: {data.summary.servers}</li>
-            </ul>
-            <p><strong>Config Version:</strong> {data.config_version}</p>
+            {/* Created entities */}
+            {(data.summary.frontends > 0 || data.summary.backends > 0 || data.summary.servers > 0) && (
+              <>
+                <p><strong>✨ Created (New):</strong></p>
+                <ul>
+                  <li>Frontends: {data.summary.frontends}</li>
+                  <li>Backends: {data.summary.backends}</li>
+                  <li>Servers: {data.summary.servers}</li>
+                </ul>
+              </>
+            )}
+            
+            {/* Updated entities */}
+            {(data.summary.updated_frontends > 0 || data.summary.updated_backends > 0) && (
+              <>
+                <p><strong>🔄 Updated (Existing):</strong></p>
+                <ul>
+                  {data.summary.updated_frontends > 0 && (
+                    <li>Frontends: {data.summary.updated_frontends}</li>
+                  )}
+                  {data.summary.updated_backends > 0 && (
+                    <li>Backends: {data.summary.updated_backends}</li>
+                  )}
+                </ul>
+              </>
+            )}
+            
+            <Divider style={{ margin: '12px 0' }} />
+            
+            <p><strong>Config Version:</strong> <Tag color="blue">{data.config_version}</Tag></p>
+            
+            <Alert 
+              type="info" 
+              message="Merge Strategy Applied"
+              description="Existing entities were updated with new values. Unspecified fields were preserved. SSL and ACL configurations were not modified."
+              style={{ marginTop: 12, marginBottom: 12 }}
+            />
+            
             <Alert 
               type="warning" 
               message="Please go to Apply Changes page to activate these configurations"
-              style={{ marginTop: 16 }}
+              style={{ marginTop: 12 }}
             />
           </div>
         ),
@@ -162,6 +237,20 @@ backend web-backend
   };
 
   const frontendColumns = [
+    {
+      title: 'Status',
+      key: 'status',
+      width: 100,
+      render: (_, record) => {
+        if (record._isNew) {
+          return <Tag color="green">New</Tag>;
+        } else if (record._isUpdate) {
+          return <Tooltip title="Existing entity - will be checked for changes on confirm"><Tag color="blue">Existing</Tag></Tooltip>;
+        } else {
+          return <Tag color="default">-</Tag>;
+        }
+      }
+    },
     {
       title: 'Name',
       dataIndex: 'name',
@@ -222,6 +311,20 @@ backend web-backend
 
   const backendColumns = [
     {
+      title: 'Status',
+      key: 'status',
+      width: 100,
+      render: (_, record) => {
+        if (record._isNew) {
+          return <Tag color="green">New</Tag>;
+        } else if (record._isUpdate) {
+          return <Tooltip title="Existing entity - will be checked for changes on confirm"><Tag color="blue">Existing</Tag></Tooltip>;
+        } else {
+          return <Tag color="default">-</Tag>;
+        }
+      }
+    },
+    {
       title: 'Name',
       dataIndex: 'name',
       key: 'name',
@@ -270,6 +373,18 @@ backend web-backend
   ];
 
   const serverColumns = [
+    {
+      title: 'Status',
+      key: 'status',
+      width: 90,
+      render: (_, record) => {
+        if (record._isNew) {
+          return <Tag color="green">New</Tag>;
+        } else {
+          return <Tag color="blue">Exists</Tag>;
+        }
+      }
+    },
     {
       title: 'Server Name',
       dataIndex: 'server_name',
@@ -695,16 +810,65 @@ backend web-backend
           {parseResult && (
             <Card title="Step 2: Review Parsed Entities" size="small">
               <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                {/* Summary */}
+                {/* Import Strategy Info */}
+                {parseResult.summary.update_frontends > 0 || parseResult.summary.update_backends > 0 ? (
+                  <Alert
+                    type="info"
+                    message="UPSERT Mode: Smart Merge Strategy"
+                    description={
+                      <div>
+                        <p>This import uses intelligent change detection:</p>
+                        <ul style={{ marginBottom: 0 }}>
+                          <li><strong>New entities:</strong> Will be created</li>
+                          <li><strong>Existing entities:</strong> Will be compared - only actual changes updated</li>
+                          <li><strong>Preserved:</strong> SSL mappings, ACL rules, unchanged fields</li>
+                          <li><strong>Servers:</strong> New servers added, existing servers preserved</li>
+                          <li><strong>Note:</strong> "Existing" entities without changes will not be updated</li>
+                        </ul>
+                      </div>
+                    }
+                    showIcon
+                  />
+                ) : (
+                  <Alert
+                    type="success"
+                    message="All entities are new - no conflicts"
+                    description="All parsed entities will be created as new. No existing entities will be modified."
+                    showIcon
+                  />
+                )}
+                
+                {/* Summary with New/Update Breakdown */}
                 <Descriptions bordered size="small" column={3}>
                   <Descriptions.Item label="Frontends">
-                    <Tag color="blue">{parseResult.summary.frontends_count}</Tag>
+                    <Space size="small">
+                      <Tag color="blue">{parseResult.summary.frontends_count} total</Tag>
+                      {parseResult.summary.new_frontends > 0 && (
+                        <Tag color="green">{parseResult.summary.new_frontends} new</Tag>
+                      )}
+                      {parseResult.summary.update_frontends > 0 && (
+                        <Tag color="blue">{parseResult.summary.update_frontends} existing</Tag>
+                      )}
+                    </Space>
                   </Descriptions.Item>
                   <Descriptions.Item label="Backends">
-                    <Tag color="green">{parseResult.summary.backends_count}</Tag>
+                    <Space size="small">
+                      <Tag color="blue">{parseResult.summary.backends_count} total</Tag>
+                      {parseResult.summary.new_backends > 0 && (
+                        <Tag color="green">{parseResult.summary.new_backends} new</Tag>
+                      )}
+                      {parseResult.summary.update_backends > 0 && (
+                        <Tag color="blue">{parseResult.summary.update_backends} existing</Tag>
+                      )}
+                    </Space>
                   </Descriptions.Item>
                   <Descriptions.Item label="Total Servers">
-                    <Tag color="purple">{parseResult.summary.total_servers_count}</Tag>
+                    <Space size="small">
+                      <Tag color="purple">{parseResult.summary.total_servers_count} total</Tag>
+                      {parseResult.summary.new_servers > 0 && (
+                        <Tag color="green">{parseResult.summary.new_servers} new</Tag>
+                      )}
+                    </Space>
                   </Descriptions.Item>
                 </Descriptions>
 

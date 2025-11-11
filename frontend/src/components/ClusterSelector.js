@@ -166,7 +166,7 @@ const ClusterSelector = () => {
           <Badge 
             dot 
             color={getAgentStatusColor(
-              agentHealthByPool[selectedCluster.pool_id] || selectedCluster.agent_status,
+              selectedCluster.agent_status,  // Use direct agent_status instead of cache
               selectedCluster.total_agents
             )} 
           />

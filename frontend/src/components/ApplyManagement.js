@@ -102,12 +102,12 @@ const ApplyManagement = () => {
       
       const [frontendsRes, backendsRes, wafRes, sslRes] = await Promise.all([
         axios.get('/api/frontends', { 
-          params: { cluster_id: selectedCluster.id },
+          params: { cluster_id: selectedCluster.id, include_inactive: true },
           headers: cacheHeaders
         }).catch(() => ({ data: { frontends: [] } })),
         
         axios.get('/api/backends', { 
-          params: { cluster_id: selectedCluster.id },
+          params: { cluster_id: selectedCluster.id, include_inactive: true },
           headers: cacheHeaders
         }).catch(() => ({ data: { backends: [] } })),
         

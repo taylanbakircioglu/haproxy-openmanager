@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 # Import configurations and database
 
 from config import CORS_ORIGINS, REDIS_URL, LOG_LEVEL
-from database.connection import redis_client, get_database_connection, close_database_connection
+from database.connection import redis_client, get_database_connection, close_database_connection, init_database_pool, close_database_pool
 from database.migrations import run_all_migrations
 
 # Import routers
@@ -349,6 +349,11 @@ async def startup_event():
     logger.info("HAProxy OpenManager API starting up...")
     
     try:
+        # Initialize database connection pool FIRST (before any DB operations)
+        logger.info("Initializing database connection pool...")
+        await init_database_pool()
+        logger.info("✅ Database connection pool initialized successfully")
+        
         # Run database migrations
         logger.info("Forcing re-check of database schema...")
         await run_all_migrations()
@@ -447,6 +452,14 @@ async def startup_event():
 async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("HAProxy OpenManager API shutting down...")
+    
+    # Close database connection pool gracefully
+    try:
+        logger.info("Closing database connection pool...")
+        await close_database_pool()
+        logger.info("✅ Database connection pool closed successfully")
+    except Exception as e:
+        logger.error(f"❌ Error closing database connection pool: {e}")
 
 @app.get("/")
 async def root():

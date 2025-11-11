@@ -106,7 +106,7 @@ async def check_server_health(host: str, port: int, timeout: int = 5) -> str:
         return "DOWN"
 
 @router.get("", summary="Get All Backends", response_description="List of backends with servers")
-async def get_backends(cluster_id: Optional[int] = None):
+async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool = False):
     """
     # Get All Backends
     
@@ -174,28 +174,52 @@ async def get_backends(cluster_id: Optional[int] = None):
     try:
         conn = await get_database_connection()
         
-        # Get backends with optional cluster filter (ONLY show active backends)
-        # CRITICAL FIX: Add is_active = TRUE filter to prevent soft-deleted backends from appearing
+        # Get backends with optional cluster filter
+        # include_inactive parameter controls whether to show soft-deleted (is_active=FALSE) backends
+        # Default FALSE: Normal views (BackendServers, FrontendManagement, Dashboard) only show active
+        # Set TRUE: Apply Management shows all including deleted for pending change visibility
         if cluster_id:
-            backends = await conn.fetch("""
-                SELECT id, name, balance_method, mode, health_check_uri, 
-                       health_check_interval, health_check_expected_status, fullconn,
-                       cookie_name, cookie_options, default_server_inter, default_server_fall, default_server_rise,
-                       request_headers, response_headers,
-                       is_active, created_at, updated_at, cluster_id, last_config_status,
-                       timeout_connect, timeout_server, timeout_queue
-                FROM backends WHERE cluster_id = $1 AND is_active = TRUE ORDER BY name
-            """, cluster_id)
+            if include_inactive:
+                backends = await conn.fetch("""
+                    SELECT id, name, balance_method, mode, health_check_uri, 
+                           health_check_interval, health_check_expected_status, fullconn,
+                           cookie_name, cookie_options, default_server_inter, default_server_fall, default_server_rise,
+                           request_headers, response_headers,
+                           is_active, created_at, updated_at, cluster_id, last_config_status,
+                           timeout_connect, timeout_server, timeout_queue
+                    FROM backends WHERE cluster_id = $1 ORDER BY name
+                """, cluster_id)
+            else:
+                backends = await conn.fetch("""
+                    SELECT id, name, balance_method, mode, health_check_uri, 
+                           health_check_interval, health_check_expected_status, fullconn,
+                           cookie_name, cookie_options, default_server_inter, default_server_fall, default_server_rise,
+                           request_headers, response_headers,
+                           is_active, created_at, updated_at, cluster_id, last_config_status,
+                           timeout_connect, timeout_server, timeout_queue
+                    FROM backends WHERE cluster_id = $1 AND is_active = TRUE ORDER BY name
+                """, cluster_id)
         else:
-            backends = await conn.fetch("""
-                SELECT id, name, balance_method, mode, health_check_uri, 
-                       health_check_interval, health_check_expected_status, fullconn,
-                       cookie_name, cookie_options, default_server_inter, default_server_fall, default_server_rise,
-                       request_headers, response_headers,
-                       is_active, created_at, updated_at, cluster_id, last_config_status,
-                       timeout_connect, timeout_server, timeout_queue
-                FROM backends WHERE is_active = TRUE ORDER BY name
-            """)
+            if include_inactive:
+                backends = await conn.fetch("""
+                    SELECT id, name, balance_method, mode, health_check_uri, 
+                           health_check_interval, health_check_expected_status, fullconn,
+                           cookie_name, cookie_options, default_server_inter, default_server_fall, default_server_rise,
+                           request_headers, response_headers,
+                           is_active, created_at, updated_at, cluster_id, last_config_status,
+                           timeout_connect, timeout_server, timeout_queue
+                    FROM backends ORDER BY name
+                """)
+            else:
+                backends = await conn.fetch("""
+                    SELECT id, name, balance_method, mode, health_check_uri, 
+                           health_check_interval, health_check_expected_status, fullconn,
+                           cookie_name, cookie_options, default_server_inter, default_server_fall, default_server_rise,
+                           request_headers, response_headers,
+                           is_active, created_at, updated_at, cluster_id, last_config_status,
+                           timeout_connect, timeout_server, timeout_queue
+                    FROM backends WHERE is_active = TRUE ORDER BY name
+                """)
         
         result = []
         for backend in backends:
@@ -345,20 +369,20 @@ async def get_backends(cluster_id: Optional[int] = None):
         # Add has_pending_config field to each backend (entity-specific)
         for backend in result:
             # Check if backend has pending changes via:
-            # 1. Config versions (pending_backend_ids) - this is the primary indicator
-            # 2. Backend is inactive (soft delete)
-            # Note: We don't check entity's own config_status because Apply Changes should immediately
-            # clear pending status regardless of agent sync status
+            # 1. Config versions (pending_backend_ids) - version name parsing
+            # 2. Entity's own last_config_status (for bulk import and other operations)
+            # 3. Backend is inactive (soft delete)
             has_config_version = backend["id"] in pending_backend_ids
+            has_pending_status = backend.get("last_config_status") == "PENDING"
             is_inactive = not backend.get("is_active", True)
             
-            backend["has_pending_config"] = has_config_version or is_inactive
+            backend["has_pending_config"] = has_config_version or has_pending_status or is_inactive
             
-            # Enhanced debug logging for backend7 issue
-            if backend['name'] == 'backend7' or has_config_version:
-                logger.info(f"BACKEND DEBUG {backend['id']} ({backend['name']}): has_config_version={has_config_version}, is_inactive={is_inactive}, config_status={backend.get('config_status')}, final_has_pending={backend['has_pending_config']}")
+            # Enhanced debug logging
+            if backend['name'] == 'backend7' or has_config_version or has_pending_status:
+                logger.info(f"BACKEND DEBUG {backend['id']} ({backend['name']}): has_config_version={has_config_version}, has_pending_status={has_pending_status}, is_inactive={is_inactive}, config_status={backend.get('config_status')}, final_has_pending={backend['has_pending_config']}")
             else:
-                logger.debug(f"BACKEND {backend['id']} ({backend['name']}): has_config_version={has_config_version}, is_inactive={is_inactive}, final={backend['has_pending_config']}")
+                logger.debug(f"BACKEND {backend['id']} ({backend['name']}): has_config_version={has_config_version}, has_pending_status={has_pending_status}, is_inactive={is_inactive}, final={backend['has_pending_config']}")
         
         await close_database_connection(conn)
         return {"backends": result}
@@ -880,6 +904,36 @@ async def delete_backend(backend_id: int, authorization: str = Header(None)):
             SET default_backend = NULL, last_config_status = 'PENDING', updated_at = CURRENT_TIMESTAMP
             WHERE default_backend = $1
         """, backend_name)
+        
+        # 2b. CRITICAL FIX: Remove use_backend rules referencing deleted backend from frontends
+        # Frontend may have ACL rules like "use_backend Apmserver if Apmserver"
+        # These must be removed to prevent HAProxy validation errors
+        frontends_with_acl_refs = await conn.fetch("""
+            SELECT id, name, use_backend_rules, acl_rules 
+            FROM frontends 
+            WHERE cluster_id = $1 AND is_active = TRUE
+        """, cluster_id)
+        
+        for frontend in frontends_with_acl_refs:
+            # Parse use_backend_rules (JSONB array)
+            use_backend_rules = frontend['use_backend_rules'] if frontend['use_backend_rules'] else []
+            acl_rules = frontend['acl_rules'] if frontend['acl_rules'] else []
+            
+            # Filter out rules referencing deleted backend
+            filtered_use_backend = [rule for rule in use_backend_rules if backend_name not in rule]
+            filtered_acl = [rule for rule in acl_rules if backend_name not in rule]
+            
+            # Update frontend if rules were removed
+            if len(filtered_use_backend) != len(use_backend_rules) or len(filtered_acl) != len(acl_rules):
+                import json
+                await conn.execute("""
+                    UPDATE frontends 
+                    SET use_backend_rules = $1, acl_rules = $2, 
+                        last_config_status = 'PENDING', updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $3
+                """, json.dumps(filtered_use_backend), json.dumps(filtered_acl), frontend['id'])
+                
+                logger.info(f"BACKEND DELETE: Cleaned ACL/use_backend rules for frontend '{frontend['name']}' (removed {backend_name} references)")
         
         # 3. Soft delete the backend (mark as inactive and set PENDING)
         await conn.execute("""

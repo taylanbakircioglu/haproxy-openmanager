@@ -955,6 +955,67 @@ async def parse_bulk_config(
         # Add auto-assignment info at the beginning
         enhanced_warnings = ssl_auto_assign_info + enhanced_warnings
         
+        # BULK IMPORT MVP: Check existing entities for UPSERT detection
+        # Mark each entity as new or update for UI display
+        new_frontends = 0
+        update_frontends = 0
+        new_backends = 0
+        update_backends = 0
+        new_servers = 0
+        
+        for frontend in frontends_data:
+            existing = await conn.fetchrow("""
+                SELECT id, is_active FROM frontends 
+                WHERE name = $1 AND cluster_id = $2
+            """, frontend["name"], request.cluster_id)
+            
+            if existing:
+                frontend["_isNew"] = False
+                frontend["_isUpdate"] = True
+                frontend["_existingId"] = existing['id']
+                frontend["_isActive"] = existing['is_active']
+                update_frontends += 1
+            else:
+                frontend["_isNew"] = True
+                frontend["_isUpdate"] = False
+                new_frontends += 1
+        
+        for backend in backends_data:
+            existing = await conn.fetchrow("""
+                SELECT id, is_active FROM backends 
+                WHERE name = $1 AND cluster_id = $2
+            """, backend["name"], request.cluster_id)
+            
+            if existing:
+                backend["_isNew"] = False
+                backend["_isUpdate"] = True
+                backend["_existingId"] = existing['id']
+                backend["_isActive"] = existing['is_active']
+                update_backends += 1
+                
+                # Check servers for this backend
+                for server in backend.get("servers", []):
+                    existing_server = await conn.fetchrow("""
+                        SELECT id FROM backend_servers 
+                        WHERE backend_name = $1 AND server_name = $2 
+                        AND cluster_id = $3 AND is_active = TRUE
+                    """, backend["name"], server["server_name"], request.cluster_id)
+                    
+                    if not existing_server:
+                        server["_isNew"] = True
+                        new_servers += 1
+                    else:
+                        server["_isNew"] = False
+            else:
+                backend["_isNew"] = True
+                backend["_isUpdate"] = False
+                new_backends += 1
+                
+                # All servers are new for a new backend
+                for server in backend.get("servers", []):
+                    server["_isNew"] = True
+                    new_servers += 1
+        
         log_with_correlation(
             logger, "INFO",
             f"Bulk config parsed successfully",
@@ -964,7 +1025,12 @@ async def parse_bulk_config(
             errors_count=len(parse_result.errors),
             warnings_count=len(enhanced_warnings),
             ssl_auto_frontends=len(ssl_auto_assigned_frontends),
-            ssl_auto_servers=len(ssl_auto_assigned_servers)
+            ssl_auto_servers=len(ssl_auto_assigned_servers),
+            new_frontends=new_frontends,
+            update_frontends=update_frontends,
+            new_backends=new_backends,
+            update_backends=update_backends,
+            new_servers=new_servers
         )
         
         # Close connection before returning
@@ -984,7 +1050,12 @@ async def parse_bulk_config(
                 "frontends_count": len(frontends_data),
                 "backends_count": len(backends_data),
                 "total_servers_count": sum(len(b["servers"]) for b in backends_data),
-                "ssl_auto_assigned_count": len(ssl_auto_assigned_frontends) + len(ssl_auto_assigned_servers)
+                "ssl_auto_assigned_count": len(ssl_auto_assigned_frontends) + len(ssl_auto_assigned_servers),
+                "new_frontends": new_frontends,
+                "update_frontends": update_frontends,
+                "new_backends": new_backends,
+                "update_backends": update_backends,
+                "new_servers": new_servers
             }
         }
         
@@ -1057,6 +1128,30 @@ async def bulk_create_entities(
         )
         
         conn = await get_database_connection()
+        
+        # BULK IMPORT MVP: Check for pending apply changes
+        # Prevent bulk import if there are unapplied changes (conflict prevention)
+        pending_changes = await conn.fetchval("""
+            SELECT COUNT(*) FROM (
+                SELECT 1 FROM frontends 
+                WHERE cluster_id = $1 AND last_config_status = 'PENDING'
+                UNION ALL
+                SELECT 1 FROM backends 
+                WHERE cluster_id = $1 AND last_config_status = 'PENDING'
+                UNION ALL
+                SELECT 1 FROM backend_servers 
+                WHERE cluster_id = $1 AND last_config_status = 'PENDING'
+            ) AS pending
+        """, request.cluster_id)
+        
+        if pending_changes and pending_changes > 0:
+            await close_database_connection(conn)
+            raise HTTPException(
+                status_code=409,  # Conflict
+                detail=f"Cannot perform bulk import: {pending_changes} pending changes found. "
+                       f"Please apply or discard existing changes in Apply Management page before importing."
+            )
+        
         created_entities = {
             "frontends": [],
             "backends": [],
@@ -1070,170 +1165,441 @@ async def bulk_create_entities(
             import json
             from services.haproxy_config import generate_haproxy_config_for_cluster
             
-            # Track skipped entities for user feedback
-            skipped_entities = []
+            # Track updated entities for user feedback
+            updated_entities = {
+                "frontends": [],
+                "backends": []
+            }
             
-            # Create backends first (frontends may reference them)
+            # BULK IMPORT MVP: Process backends with UPSERT (merge strategy)
+            # Create or update backends first (frontends may reference them)
             for backend_data in request.backends:
                 # Check if backend already exists (check both active AND inactive)
-                # CRITICAL: Must check inactive too, otherwise unique constraint fails on INSERT
                 existing = await conn.fetchrow("""
                     SELECT id, is_active FROM backends 
                     WHERE name = $1 AND cluster_id = $2
                 """, backend_data["name"], request.cluster_id)
                 
-                if existing:
-                    status_text = "active" if existing['is_active'] else "deleted/inactive"
-                    skipped_entities.append(f"Backend '{backend_data['name']}' ({status_text})")
-                    logger.warning(f"Backend '{backend_data['name']}' already exists ({status_text}), skipping")
+                backend_id = None
+                
+                if existing and backend_data.get("_isUpdate"):
+                    # UPDATE MODE: Merge strategy - only update fields present in config
+                    # Preserve existing values for fields not in imported config
+                    backend_id = existing['id']
+                    
+                    # Fetch full backend to compare values (only UPDATE if changed)
+                    existing_full = await conn.fetchrow("SELECT * FROM backends WHERE id = $1", backend_id)
+                    
+                    # Build update query dynamically for merge strategy
+                    update_fields = []
+                    update_values = [backend_id]  # $1 is always backend_id
+                    param_index = 2
+                    
+                    # Only update fields that are explicitly provided in import AND different from DB
+                    if backend_data.get("balance_method") and backend_data["balance_method"] != existing_full["balance_method"]:
+                        update_fields.append(f"balance_method = ${param_index}")
+                        update_values.append(backend_data["balance_method"])
+                        param_index += 1
+                    
+                    if backend_data.get("mode") and backend_data["mode"] != existing_full["mode"]:
+                        update_fields.append(f"mode = ${param_index}")
+                        update_values.append(backend_data["mode"])
+                        param_index += 1
+                    
+                    if backend_data.get("health_check_uri") and backend_data["health_check_uri"] != existing_full["health_check_uri"]:
+                        update_fields.append(f"health_check_uri = ${param_index}")
+                        update_values.append(backend_data["health_check_uri"])
+                        param_index += 1
+                    
+                    if backend_data.get("health_check_interval") and backend_data["health_check_interval"] != existing_full["health_check_interval"]:
+                        update_fields.append(f"health_check_interval = ${param_index}")
+                        update_values.append(backend_data["health_check_interval"])
+                        param_index += 1
+                    
+                    # Health check expected status (only for HTTP mode)
+                    backend_mode = backend_data.get("mode", existing_full["mode"])
+                    if backend_mode == "http" and backend_data.get("health_check_expected_status") is not None:
+                        if backend_data["health_check_expected_status"] != existing_full["health_check_expected_status"]:
+                            update_fields.append(f"health_check_expected_status = ${param_index}")
+                            update_values.append(backend_data["health_check_expected_status"])
+                            param_index += 1
+                    
+                    if backend_data.get("fullconn") and backend_data["fullconn"] != existing_full["fullconn"]:
+                        update_fields.append(f"fullconn = ${param_index}")
+                        update_values.append(backend_data["fullconn"])
+                        param_index += 1
+                    
+                    if backend_data.get("timeout_connect") and backend_data["timeout_connect"] != existing_full["timeout_connect"]:
+                        update_fields.append(f"timeout_connect = ${param_index}")
+                        update_values.append(backend_data["timeout_connect"])
+                        param_index += 1
+                    
+                    if backend_data.get("timeout_server") and backend_data["timeout_server"] != existing_full["timeout_server"]:
+                        update_fields.append(f"timeout_server = ${param_index}")
+                        update_values.append(backend_data["timeout_server"])
+                        param_index += 1
+                    
+                    if backend_data.get("timeout_queue") and backend_data["timeout_queue"] != existing_full["timeout_queue"]:
+                        update_fields.append(f"timeout_queue = ${param_index}")
+                        update_values.append(backend_data["timeout_queue"])
+                        param_index += 1
+                    
+                    # CRITICAL FIX: Add missing fields from normal backend create with value comparison
+                    if backend_data.get("cookie_name") and backend_data["cookie_name"] != existing_full["cookie_name"]:
+                        update_fields.append(f"cookie_name = ${param_index}")
+                        update_values.append(backend_data["cookie_name"])
+                        param_index += 1
+                    
+                    if backend_data.get("cookie_options") and backend_data["cookie_options"] != existing_full["cookie_options"]:
+                        update_fields.append(f"cookie_options = ${param_index}")
+                        update_values.append(backend_data["cookie_options"])
+                        param_index += 1
+                    
+                    if backend_data.get("default_server_inter") and backend_data["default_server_inter"] != existing_full["default_server_inter"]:
+                        update_fields.append(f"default_server_inter = ${param_index}")
+                        update_values.append(backend_data["default_server_inter"])
+                        param_index += 1
+                    
+                    if backend_data.get("default_server_fall") and backend_data["default_server_fall"] != existing_full["default_server_fall"]:
+                        update_fields.append(f"default_server_fall = ${param_index}")
+                        update_values.append(backend_data["default_server_fall"])
+                        param_index += 1
+                    
+                    if backend_data.get("default_server_rise") and backend_data["default_server_rise"] != existing_full["default_server_rise"]:
+                        update_fields.append(f"default_server_rise = ${param_index}")
+                        update_values.append(backend_data["default_server_rise"])
+                        param_index += 1
+                    
+                    if backend_data.get("request_headers") and backend_data["request_headers"] != existing_full["request_headers"]:
+                        update_fields.append(f"request_headers = ${param_index}")
+                        update_values.append(backend_data["request_headers"])
+                        param_index += 1
+                    
+                    if backend_data.get("response_headers") and backend_data["response_headers"] != existing_full["response_headers"]:
+                        update_fields.append(f"response_headers = ${param_index}")
+                        update_values.append(backend_data["response_headers"])
+                        param_index += 1
+                    
+                    # NOTE: maxconn field exists in database but is not used in normal backend UPDATE
+                    # Preserving consistency with existing backend UPDATE endpoint (backend.py)
+                    # maxconn field intentionally excluded from bulk import UPDATE
+                    
+                    # Only update is_active if entity is currently inactive (reactivation)
+                    # This prevents unnecessary UPDATE when backend is already active
+                    if not existing['is_active']:
+                        update_fields.append(f"is_active = ${param_index}")
+                        update_values.append(True)
+                        param_index += 1
+                    
+                    # Execute UPDATE only if there are actual field changes
+                    if update_fields:
+                        update_query = f"""
+                            UPDATE backends 
+                            SET {', '.join(update_fields)}, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = $1
+                        """
+                        await conn.execute(update_query, *update_values)
+                        
+                        updated_entities["backends"].append({
+                            "id": backend_id,
+                            "name": backend_data["name"],
+                            "was_inactive": not existing['is_active']
+                        })
+                        
+                        logger.info(f"Updated backend '{backend_data['name']}' (ID: {backend_id})")
+                    
+                    # Don't skip - continue to process servers below
+                
+                elif existing:
+                    # Backend exists but not flagged for update (shouldn't happen with MVP logic)
+                    # Skip silently
+                    logger.warning(f"Backend '{backend_data['name']}' exists but not marked for update, skipping")
                     continue
                 
-                # Insert backend
-                # CRITICAL: Only set health_check_expected_status for HTTP mode backends
-                # TCP backends cannot use http-check directives
-                # Only set if explicitly defined in config (http-check expect status directive)
-                backend_mode = backend_data.get("mode", "http")
-                health_check_expected_status = None
-                if backend_mode == "http" and backend_data.get("health_check_expected_status") is not None:
-                    health_check_expected_status = backend_data["health_check_expected_status"]
-                
-                backend_id = await conn.fetchval("""
-                    INSERT INTO backends (
-                        name, balance_method, mode, health_check_uri, 
-                        health_check_interval, health_check_expected_status, fullconn,
-                        cookie_name, cookie_options, default_server_inter, 
-                        default_server_fall, default_server_rise, request_headers, 
-                        response_headers, timeout_connect, timeout_server, timeout_queue, cluster_id
-                    ) 
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) 
-                    RETURNING id
-                """, 
-                    backend_data["name"],
-                    backend_data.get("balance_method", "roundrobin"),
-                    backend_mode,
-                    backend_data.get("health_check_uri"),
-                    backend_data.get("health_check_interval", 2000),
-                    health_check_expected_status,  # Now correctly NULL for TCP
-                    backend_data.get("fullconn"),
-                    backend_data.get("cookie_name"),
-                    backend_data.get("cookie_options"),
-                    backend_data.get("default_server_inter"),
-                    backend_data.get("default_server_fall"),
-                    backend_data.get("default_server_rise"),
-                    backend_data.get("request_headers"),
-                    backend_data.get("response_headers"),
-                    backend_data.get("timeout_connect", 10000),
-                    backend_data.get("timeout_server", 60000),
-                    backend_data.get("timeout_queue", 60000),
-                    request.cluster_id
-                )
-                
-                created_entities["backends"].append({
-                    "id": backend_id,
-                    "name": backend_data["name"]
-                })
-                
-                # Create servers for this backend
-                for server_data in backend_data.get("servers", []):
-                    # Check if server already exists
-                    existing_server = await conn.fetchrow("""
-                        SELECT id FROM backend_servers 
-                        WHERE backend_name = $1 AND server_name = $2 
-                        AND cluster_id = $3 AND is_active = TRUE
-                    """, backend_data["name"], server_data["server_name"], request.cluster_id)
+                else:
+                    # CREATE MODE: Insert new backend
+                    # CRITICAL: Only set health_check_expected_status for HTTP mode backends
+                    # TCP backends cannot use http-check directives
+                    backend_mode = backend_data.get("mode", "http")
+                    health_check_expected_status = None
+                    if backend_mode == "http" and backend_data.get("health_check_expected_status") is not None:
+                        health_check_expected_status = backend_data["health_check_expected_status"]
                     
-                    if existing_server:
-                        logger.warning(f"Server '{server_data['server_name']}' already exists in backend '{backend_data['name']}', skipping")
-                        continue
-                    
-                    server_id = await conn.fetchval("""
-                        INSERT INTO backend_servers (
-                            backend_id, backend_name, server_name, server_address, 
-                            server_port, weight, maxconn, check_enabled, check_port,
-                            backup_server, ssl_enabled, ssl_verify, ssl_certificate_id, cookie_value,
-                            inter, fall, rise, cluster_id
+                    backend_id = await conn.fetchval("""
+                        INSERT INTO backends (
+                            name, balance_method, mode, health_check_uri, 
+                            health_check_interval, health_check_expected_status, fullconn,
+                            cookie_name, cookie_options, default_server_inter, 
+                            default_server_fall, default_server_rise, request_headers, 
+                            response_headers, timeout_connect, timeout_server, timeout_queue, cluster_id
                         ) 
                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) 
                         RETURNING id
                     """, 
-                        backend_id,
                         backend_data["name"],
-                        server_data["server_name"],
-                        server_data["server_address"],
-                        server_data["server_port"],
-                        server_data.get("weight", 100),
-                        server_data.get("max_connections"),
-                        server_data.get("check_enabled", True),
-                        server_data.get("check_port"),
-                        server_data.get("backup_server", False),
-                        server_data.get("ssl_enabled", False),
-                        server_data.get("ssl_verify"),
-                        server_data.get("ssl_certificate_id"),  # CRITICAL: Auto-assigned SSL ID
-                        server_data.get("cookie_value"),
-                        server_data.get("inter"),
-                        server_data.get("fall"),
-                        server_data.get("rise"),
+                        backend_data.get("balance_method", "roundrobin"),
+                        backend_mode,
+                        backend_data.get("health_check_uri"),
+                        backend_data.get("health_check_interval", 2000),
+                        health_check_expected_status,  # Now correctly NULL for TCP
+                        backend_data.get("fullconn"),
+                        backend_data.get("cookie_name"),
+                        backend_data.get("cookie_options"),
+                        backend_data.get("default_server_inter"),
+                        backend_data.get("default_server_fall"),
+                        backend_data.get("default_server_rise"),
+                        backend_data.get("request_headers"),
+                        backend_data.get("response_headers"),
+                        backend_data.get("timeout_connect", 10000),
+                        backend_data.get("timeout_server", 60000),
+                        backend_data.get("timeout_queue", 60000),
                         request.cluster_id
                     )
                     
-                    created_entities["servers"].append({
-                        "id": server_id,
-                        "name": server_data["server_name"],
-                        "backend": backend_data["name"]
+                    created_entities["backends"].append({
+                        "id": backend_id,
+                        "name": backend_data["name"]
                     })
+                
+                # SERVERS: Process servers for both CREATE and UPDATE modes
+                # MVP: Only add new servers, preserve existing ones (no deletion)
+                backend_has_new_servers = False  # Track if new servers were added
+                if backend_id:  # Only if we have a valid backend_id
+                    for server_data in backend_data.get("servers", []):
+                        # Only create server if marked as new (MVP: skip existing)
+                        if not server_data.get("_isNew", True):
+                            logger.debug(f"Server '{server_data['server_name']}' already exists in backend '{backend_data['name']}', preserving")
+                            continue
+                        
+                        server_id = await conn.fetchval("""
+                                INSERT INTO backend_servers (
+                                backend_id, backend_name, server_name, server_address, 
+                                server_port, weight, maxconn, check_enabled, check_port,
+                                backup_server, ssl_enabled, ssl_verify, ssl_certificate_id, cookie_value,
+                                inter, fall, rise, cluster_id
+                            ) 
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) 
+                            RETURNING id
+                        """, 
+                            backend_id,
+                            backend_data["name"],
+                            server_data["server_name"],
+                            server_data["server_address"],
+                            server_data["server_port"],
+                            server_data.get("weight", 100),
+                            server_data.get("max_connections"),
+                            server_data.get("check_enabled", True),
+                            server_data.get("check_port"),
+                            server_data.get("backup_server", False),
+                            server_data.get("ssl_enabled", False),
+                            server_data.get("ssl_verify"),
+                            server_data.get("ssl_certificate_id"),  # CRITICAL: Auto-assigned SSL ID
+                            server_data.get("cookie_value"),
+                            server_data.get("inter"),
+                            server_data.get("fall"),
+                            server_data.get("rise"),
+                            request.cluster_id
+                        )
+                        
+                        created_entities["servers"].append({
+                            "id": server_id,
+                            "name": server_data["server_name"],
+                            "backend": backend_data["name"]
+                        })
+                        backend_has_new_servers = True
+                    
+                    # If backend wasn't updated but has new servers, add to updated_entities
+                    # This ensures backend gets marked as PENDING for Apply Management
+                    if backend_has_new_servers and existing and backend_data.get("_isUpdate"):
+                        if backend_id not in [b["id"] for b in updated_entities["backends"]]:
+                            updated_entities["backends"].append({
+                                "id": backend_id,
+                                "name": backend_data["name"],
+                                "was_inactive": not existing['is_active']
+                            })
+                            logger.info(f"Backend '{backend_data['name']}' marked for update (new servers added)")
             
-            # Create frontends
+            # BULK IMPORT MVP: Process frontends with UPSERT (merge strategy)
             for frontend_data in request.frontends:
                 # Check if frontend already exists (check both active AND inactive)
-                # CRITICAL: Must check inactive too, otherwise unique constraint fails on INSERT
                 existing = await conn.fetchrow("""
                     SELECT id, is_active FROM frontends 
                     WHERE name = $1 AND cluster_id = $2
                 """, frontend_data["name"], request.cluster_id)
                 
-                if existing:
-                    status_text = "active" if existing['is_active'] else "deleted/inactive"
-                    skipped_entities.append(f"Frontend '{frontend_data['name']}' ({status_text})")
-                    logger.warning(f"Frontend '{frontend_data['name']}' already exists ({status_text}), skipping")
+                frontend_id = None
+                
+                if existing and frontend_data.get("_isUpdate"):
+                    # UPDATE MODE: Merge strategy - only update fields present in config
+                    # MVP DECISION: Preserve SSL mappings, ACL rules, and complex configurations
+                    # NOTE: This differs from normal frontend UPDATE endpoint (PUT /api/frontends/{id})
+                    # which does full replace. Bulk import uses merge strategy for safety.
+                    frontend_id = existing['id']
+                    
+                    # Fetch full frontend to compare values (only UPDATE if changed)
+                    existing_full = await conn.fetchrow("SELECT * FROM frontends WHERE id = $1", frontend_id)
+                    
+                    # Build update query dynamically for merge strategy
+                    update_fields = []
+                    update_values = [frontend_id]  # $1 is always frontend_id
+                    param_index = 2
+                    
+                    # Only update fields that are explicitly provided in import AND different from DB
+                    if frontend_data.get("bind_address") and frontend_data["bind_address"] != existing_full["bind_address"]:
+                        update_fields.append(f"bind_address = ${param_index}")
+                        update_values.append(frontend_data["bind_address"])
+                        param_index += 1
+                    
+                    if frontend_data.get("bind_port") and frontend_data["bind_port"] != existing_full["bind_port"]:
+                        update_fields.append(f"bind_port = ${param_index}")
+                        update_values.append(frontend_data["bind_port"])
+                        param_index += 1
+                    
+                    if frontend_data.get("default_backend") and frontend_data["default_backend"] != existing_full["default_backend"]:
+                        update_fields.append(f"default_backend = ${param_index}")
+                        update_values.append(frontend_data["default_backend"])
+                        param_index += 1
+                    
+                    if frontend_data.get("mode") and frontend_data["mode"] != existing_full["mode"]:
+                        update_fields.append(f"mode = ${param_index}")
+                        update_values.append(frontend_data["mode"])
+                        param_index += 1
+                    
+                    # MVP: DON'T update SSL settings (preserve manual configuration)
+                    # ssl_enabled and ssl_certificate_ids are preserved
+                    
+                    if frontend_data.get("timeout_client") and frontend_data["timeout_client"] != existing_full["timeout_client"]:
+                        update_fields.append(f"timeout_client = ${param_index}")
+                        update_values.append(frontend_data["timeout_client"])
+                        param_index += 1
+                    
+                    if frontend_data.get("maxconn") and frontend_data["maxconn"] != existing_full["maxconn"]:
+                        update_fields.append(f"maxconn = ${param_index}")
+                        update_values.append(frontend_data["maxconn"])
+                        param_index += 1
+                    
+                    # CRITICAL FIX: Add missing fields from normal frontend create with value comparison
+                    if frontend_data.get("request_headers") and frontend_data["request_headers"] != existing_full["request_headers"]:
+                        update_fields.append(f"request_headers = ${param_index}")
+                        update_values.append(frontend_data["request_headers"])
+                        param_index += 1
+                    
+                    if frontend_data.get("response_headers") and frontend_data["response_headers"] != existing_full["response_headers"]:
+                        update_fields.append(f"response_headers = ${param_index}")
+                        update_values.append(frontend_data["response_headers"])
+                        param_index += 1
+                    
+                    if frontend_data.get("tcp_request_rules") and frontend_data["tcp_request_rules"] != existing_full["tcp_request_rules"]:
+                        update_fields.append(f"tcp_request_rules = ${param_index}")
+                        update_values.append(frontend_data["tcp_request_rules"])
+                        param_index += 1
+                    
+                    if frontend_data.get("timeout_http_request") and frontend_data["timeout_http_request"] != existing_full["timeout_http_request"]:
+                        update_fields.append(f"timeout_http_request = ${param_index}")
+                        update_values.append(frontend_data["timeout_http_request"])
+                        param_index += 1
+                    
+                    if frontend_data.get("rate_limit") and frontend_data["rate_limit"] != existing_full["rate_limit"]:
+                        update_fields.append(f"rate_limit = ${param_index}")
+                        update_values.append(frontend_data["rate_limit"])
+                        param_index += 1
+                    
+                    if "compression" in frontend_data and frontend_data["compression"] != existing_full.get("compression", False):
+                        update_fields.append(f"compression = ${param_index}")
+                        update_values.append(frontend_data["compression"])
+                        param_index += 1
+                    
+                    if "log_separate" in frontend_data and frontend_data["log_separate"] != existing_full.get("log_separate", False):
+                        update_fields.append(f"log_separate = ${param_index}")
+                        update_values.append(frontend_data["log_separate"])
+                        param_index += 1
+                    
+                    if frontend_data.get("monitor_uri") and frontend_data["monitor_uri"] != existing_full["monitor_uri"]:
+                        update_fields.append(f"monitor_uri = ${param_index}")
+                        update_values.append(frontend_data["monitor_uri"])
+                        param_index += 1
+                    
+                    # MVP: DON'T update ACL rules (preserve manual configuration)
+                    # acl_rules, use_backend_rules are preserved
+                    
+                    # Only update is_active if entity is currently inactive (reactivation)
+                    if not existing['is_active']:
+                        update_fields.append(f"is_active = ${param_index}")
+                        update_values.append(True)
+                        param_index += 1
+                    
+                    # Execute UPDATE if there are fields to update
+                    if update_fields:
+                        update_query = f"""
+                            UPDATE frontends 
+                            SET {', '.join(update_fields)}, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = $1
+                        """
+                        await conn.execute(update_query, *update_values)
+                        
+                        updated_entities["frontends"].append({
+                            "id": frontend_id,
+                            "name": frontend_data["name"],
+                            "was_inactive": not existing['is_active']
+                        })
+                        
+                        logger.info(f"Updated frontend '{frontend_data['name']}' (ID: {frontend_id})")
+                
+                elif existing:
+                    # Frontend exists but not flagged for update
+                    logger.warning(f"Frontend '{frontend_data['name']}' exists but not marked for update, skipping")
                     continue
                 
-                # Insert frontend
-                # CRITICAL: Convert ssl_certificate_ids to JSON for database
-                ssl_cert_ids_json = json.dumps(frontend_data.get("ssl_certificate_ids", []))
-                
-                frontend_id = await conn.fetchval("""
-                    INSERT INTO frontends (
-                        name, bind_address, bind_port, default_backend, mode,
-                        ssl_enabled, ssl_certificate_ids, ssl_port, timeout_client, maxconn,
-                        request_headers, response_headers, tcp_request_rules,
-                        cluster_id, acl_rules, use_backend_rules, redirect_rules, updated_at
-                    ) 
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, CURRENT_TIMESTAMP) 
-                    RETURNING id
-                """, 
-                    frontend_data["name"],
-                    frontend_data.get("bind_address", "*"),
-                    frontend_data["bind_port"],
-                    frontend_data.get("default_backend"),
-                    frontend_data.get("mode", "http"),
-                    frontend_data.get("ssl_enabled", False),
-                    ssl_cert_ids_json,  # ssl_certificate_ids (JSONB)
-                    frontend_data.get("ssl_port"),
-                    frontend_data.get("timeout_client"),
-                    frontend_data.get("maxconn"),
-                    frontend_data.get("request_headers"),
-                    frontend_data.get("response_headers"),
-                    frontend_data.get("tcp_request_rules"),
-                    request.cluster_id,
-                    json.dumps(frontend_data.get("acl_rules", [])),  # acl_rules
-                    json.dumps(frontend_data.get("use_backend_rules", [])),  # use_backend_rules
-                    json.dumps([])   # redirect_rules
-                )
-                
-                created_entities["frontends"].append({
-                    "id": frontend_id,
-                    "name": frontend_data["name"]
-                })
+                else:
+                    # CREATE MODE: Insert new frontend
+                    # CRITICAL: Convert ssl_certificate_ids to JSON for database
+                    ssl_cert_ids_json = json.dumps(frontend_data.get("ssl_certificate_ids", []))
+                    
+                    frontend_id = await conn.fetchval("""
+                        INSERT INTO frontends (
+                            name, bind_address, bind_port, default_backend, mode,
+                            ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, 
+                            ssl_cert_path, ssl_cert, ssl_verify,
+                            timeout_client, timeout_http_request, maxconn,
+                            request_headers, response_headers, tcp_request_rules,
+                            rate_limit, compression, log_separate, monitor_uri,
+                            cluster_id, acl_rules, use_backend_rules, redirect_rules, updated_at
+                        ) 
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, CURRENT_TIMESTAMP) 
+                        RETURNING id
+                    """, 
+                        frontend_data["name"],
+                        frontend_data.get("bind_address", "*"),
+                        frontend_data["bind_port"],
+                        frontend_data.get("default_backend"),
+                        frontend_data.get("mode", "http"),
+                        frontend_data.get("ssl_enabled", False),
+                        frontend_data.get("ssl_certificate_id"),  # Legacy single SSL ID (backward compat)
+                        ssl_cert_ids_json,  # ssl_certificate_ids (JSONB) - multiple SSL support
+                        frontend_data.get("ssl_port"),
+                        frontend_data.get("ssl_cert_path"),
+                        frontend_data.get("ssl_cert"),
+                        frontend_data.get("ssl_verify", "optional"),
+                        frontend_data.get("timeout_client"),
+                        frontend_data.get("timeout_http_request"),
+                        frontend_data.get("maxconn"),
+                        frontend_data.get("request_headers"),
+                        frontend_data.get("response_headers"),
+                        frontend_data.get("tcp_request_rules"),
+                        frontend_data.get("rate_limit"),
+                        frontend_data.get("compression", False),
+                        frontend_data.get("log_separate", False),
+                        frontend_data.get("monitor_uri"),
+                        request.cluster_id,
+                        json.dumps(frontend_data.get("acl_rules", [])),  # acl_rules
+                        json.dumps(frontend_data.get("use_backend_rules", [])),  # use_backend_rules
+                        json.dumps([])   # redirect_rules
+                    )
+                    
+                    created_entities["frontends"].append({
+                        "id": frontend_id,
+                        "name": frontend_data["name"]
+                    })
             
             # Generate config version for the cluster
             config_content = await generate_haproxy_config_for_cluster(request.cluster_id)
@@ -1248,20 +1614,46 @@ async def bulk_create_entities(
                 RETURNING id
             """, request.cluster_id, version_name, config_content, config_hash, current_user['id'])
             
-            # Mark all created entities as PENDING
+            # CRITICAL: Mark ALL affected entities as PENDING (both created AND updated)
+            # This ensures Apply Management shows all changes
+            all_backend_ids = []
             if created_entities["backends"]:
-                backend_ids = [b["id"] for b in created_entities["backends"]]
-                await conn.execute("""
-                    UPDATE backends SET last_config_status = 'PENDING' 
-                    WHERE id = ANY($1)
-                """, backend_ids)
+                all_backend_ids.extend([b["id"] for b in created_entities["backends"]])
+            if updated_entities["backends"]:
+                all_backend_ids.extend([b["id"] for b in updated_entities["backends"]])
             
-            if created_entities["frontends"]:
-                frontend_ids = [f["id"] for f in created_entities["frontends"]]
+            if all_backend_ids:
                 await conn.execute("""
-                    UPDATE frontends SET last_config_status = 'PENDING' 
+                    UPDATE backends SET last_config_status = 'PENDING', updated_at = CURRENT_TIMESTAMP
                     WHERE id = ANY($1)
-                """, frontend_ids)
+                """, all_backend_ids)
+                logger.info(f"Marked {len(all_backend_ids)} backends as PENDING")
+            
+            all_frontend_ids = []
+            if created_entities["frontends"]:
+                all_frontend_ids.extend([f["id"] for f in created_entities["frontends"]])
+            if updated_entities["frontends"]:
+                all_frontend_ids.extend([f["id"] for f in updated_entities["frontends"]])
+            
+            if all_frontend_ids:
+                await conn.execute("""
+                    UPDATE frontends SET last_config_status = 'PENDING', updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ANY($1)
+                """, all_frontend_ids)
+                logger.info(f"Marked {len(all_frontend_ids)} frontends as PENDING")
+            
+            # Mark all created/updated servers as PENDING
+            if created_entities["servers"]:
+                server_ids = [s["id"] for s in created_entities["servers"]]
+                try:
+                    await conn.execute("""
+                        UPDATE backend_servers SET last_config_status = 'PENDING', updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ANY($1)
+                    """, server_ids)
+                    logger.info(f"Marked {len(server_ids)} servers as PENDING")
+                except Exception as server_status_error:
+                    # Column might not exist in older database versions
+                    logger.warning(f"Could not mark servers as PENDING (column may not exist): {server_status_error}")
             
             logger.info(f"BULK IMPORT: Created PENDING config version {version_name} for cluster {request.cluster_id}")
             
@@ -1281,18 +1673,44 @@ async def bulk_create_entities(
             cluster_id=request.cluster_id,
             created_frontends=len(created_entities["frontends"]),
             created_backends=len(created_entities["backends"]),
-            created_servers=len(created_entities["servers"])
+            created_servers=len(created_entities["servers"]),
+            updated_frontends=len(updated_entities["frontends"]),
+            updated_backends=len(updated_entities["backends"])
         )
         
-        # Prepare user-friendly message
+        # Prepare user-friendly message with UPSERT details
         message_parts = []
-        if created_entities["frontends"] or created_entities["backends"] or created_entities["servers"]:
-            message_parts.append(f"Created: {len(created_entities['frontends'])} frontends, {len(created_entities['backends'])} backends, {len(created_entities['servers'])} servers")
         
-        if skipped_entities:
-            message_parts.append(f"Skipped {len(skipped_entities)} existing entities: {', '.join(skipped_entities[:5])}")
-            if len(skipped_entities) > 5:
-                message_parts.append(f"... and {len(skipped_entities) - 5} more")
+        # Created entities
+        created_count = len(created_entities["frontends"]) + len(created_entities["backends"]) + len(created_entities["servers"])
+        if created_count > 0:
+            message_parts.append(
+                f"Created: {len(created_entities['frontends'])} frontends, "
+                f"{len(created_entities['backends'])} backends, "
+                f"{len(created_entities['servers'])} servers"
+            )
+        
+        # Updated entities
+        updated_count = len(updated_entities["frontends"]) + len(updated_entities["backends"])
+        if updated_count > 0:
+            message_parts.append(
+                f"Updated: {len(updated_entities['frontends'])} frontends, "
+                f"{len(updated_entities['backends'])} backends"
+            )
+        
+        # Reactivated entities (were deleted)
+        reactivated = []
+        for fe in updated_entities["frontends"]:
+            if fe.get("was_inactive"):
+                reactivated.append(f"frontend '{fe['name']}'")
+        for be in updated_entities["backends"]:
+            if be.get("was_inactive"):
+                reactivated.append(f"backend '{be['name']}'")
+        
+        if reactivated:
+            message_parts.append(f"Reactivated: {', '.join(reactivated[:3])}")
+            if len(reactivated) > 3:
+                message_parts.append(f"... and {len(reactivated) - 3} more")
         
         message = ". ".join(message_parts) + ". Please apply changes to activate."
         
@@ -1300,12 +1718,13 @@ async def bulk_create_entities(
             "success": True,
             "message": message,
             "created": created_entities,
-            "skipped": skipped_entities,
+            "updated": updated_entities,
             "summary": {
                 "frontends": len(created_entities["frontends"]),
                 "backends": len(created_entities["backends"]),
                 "servers": len(created_entities["servers"]),
-                "skipped": len(skipped_entities)
+                "updated_frontends": len(updated_entities["frontends"]),
+                "updated_backends": len(updated_entities["backends"])
             },
             "config_version": version_name,
             "requires_apply": True
