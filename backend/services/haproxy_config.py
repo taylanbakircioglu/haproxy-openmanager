@@ -244,6 +244,15 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             
             config_lines.append(f"    mode {frontend['mode']}")
             
+            # Frontend Options (option httplog, option forwardfor, etc.)
+            # Place options early as per HAProxy best practice
+            if frontend.get('options'):
+                for line in frontend['options'].split('\n'):
+                    if line.strip():
+                        # Lines are complete HAProxy option directives
+                        # Examples: "option httplog", "option forwardfor", "option dontlognull"
+                        config_lines.append(f"    {line.strip()}")
+            
             # CRITICAL: Validate frontend-backend mode compatibility
             if frontend.get('default_backend'):
                 default_backend_name = frontend['default_backend']
@@ -282,22 +291,14 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             if frontend.get('monitor_uri'):
                 config_lines.append(f"    monitor-uri {frontend['monitor_uri']}")
             
-            # Frontend Options (NEW: option httplog, option forwardfor, etc.)
-            if frontend.get('options'):
-                for line in frontend['options'].split('\n'):
-                    if line.strip():
-                        # Lines are complete HAProxy option directives
-                        # Examples: "option httplog", "option forwardfor", "option dontlognull"
-                        config_lines.append(f"    {line.strip()}")
-            
-            # Request Headers (includes options, http-request directives - already formatted)
+            # HTTP Request Headers
             if frontend.get('request_headers'):
                 for line in frontend['request_headers'].split('\n'):
                     if line.strip():
-                        # Lines are already complete directives (e.g., "option httplog", "http-request set-header X-Test 1")
+                        # Lines are already complete directives (e.g., "http-request set-header X-Test 1")
                         config_lines.append(f"    {line.strip()}")
             
-            # Response Headers (includes http-response directives - already formatted)
+            # HTTP Response Headers
             if frontend.get('response_headers'):
                 for line in frontend['response_headers'].split('\n'):
                     if line.strip():
@@ -422,13 +423,23 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             
             config_lines.append(f"backend {backend['name']}")
             
-            # --- CRITICAL FIX: Restore legacy backend properties ---
+            # --- HAProxy Configuration Best Practice Order ---
+            # 1. Mode and balance method
             if backend.get('balance_method'):
                 config_lines.append(f"    balance {backend['balance_method']}")
             if backend.get('mode'):
                 config_lines.append(f"    mode {backend['mode']}")
-
-            # Health check (legacy)
+            
+            # 2. Backend Options (option http-keep-alive, option forwardfor, etc.)
+            # Place options early as per HAProxy best practice
+            if backend.get('options'):
+                for line in backend['options'].split('\n'):
+                    if line.strip():
+                        # Lines are complete HAProxy option directives
+                        # Examples: "option http-keep-alive", "option forwardfor"
+                        config_lines.append(f"    {line.strip()}")
+            
+            # 3. Health check configuration
             if backend.get('health_check_uri'):
                 config_lines.append(f"    option httpchk GET {backend['health_check_uri']}")
             
@@ -437,7 +448,7 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             if backend.get('health_check_expected_status') and backend.get('mode') == 'http':
                 config_lines.append(f"    http-check expect status {backend['health_check_expected_status']}")
 
-            # Timeouts (legacy)
+            # 4. Timeouts
             if backend.get('timeout_connect'):
                 config_lines.append(f"    timeout connect {backend.get('timeout_connect')}ms")
             if backend.get('timeout_server'):
@@ -445,18 +456,18 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             if backend.get('timeout_queue'):
                 config_lines.append(f"    timeout queue {backend.get('timeout_queue')}ms")
             
-            # Full Connections (new field)
-            if backend.get('fullconn'):
-                config_lines.append(f"    fullconn {backend['fullconn']}")
-            
-            # Cookie Persistence (new fields)
+            # 5. Cookie Persistence
             if backend.get('cookie_name'):
                 cookie_line = f"    cookie {backend['cookie_name']}"
                 if backend.get('cookie_options'):
                     cookie_line += f" {backend['cookie_options']}"
                 config_lines.append(cookie_line)
             
-            # Default Server Options (new fields)
+            # 6. Full Connections
+            if backend.get('fullconn'):
+                config_lines.append(f"    fullconn {backend['fullconn']}")
+            
+            # 7. Default Server Options
             if backend.get('default_server_inter') or backend.get('default_server_fall') or backend.get('default_server_rise'):
                 default_server_line = "    default-server"
                 if backend.get('default_server_inter'):
@@ -467,28 +478,19 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     default_server_line += f" rise {backend['default_server_rise']}"
                 config_lines.append(default_server_line)
             
-            # Backend Options (NEW: option http-keep-alive, option forwardfor, etc.)
-            if backend.get('options'):
-                for line in backend['options'].split('\n'):
-                    if line.strip():
-                        # Lines are complete HAProxy option directives
-                        # Examples: "option http-keep-alive", "option forwardfor", "option httpchk"
-                        config_lines.append(f"    {line.strip()}")
-            
-            # Backend Request Headers (new field - includes options, http-request directives)
+            # 8. HTTP Request Headers
             if backend.get('request_headers'):
                 for line in backend['request_headers'].split('\n'):
                     if line.strip():
-                        # Lines are already complete directives (e.g., "option http-keep-alive", "http-request set-header X-Backend test")
+                        # Lines are already complete directives (e.g., "http-request set-header X-Backend test")
                         config_lines.append(f"    {line.strip()}")
             
-            # Backend Response Headers (new field)
+            # 9. HTTP Response Headers
             if backend.get('response_headers'):
                 for line in backend['response_headers'].split('\n'):
                     if line.strip():
                         # Lines are already complete directives (e.g., "http-response add-header X-Powered-By Backend")
                         config_lines.append(f"    {line.strip()}")
-            # --- END CRITICAL FIX ---
 
             # Get all servers for this backend (including inactive ones for commenting)
             # CRITICAL FIX: Handle servers with NULL cluster_id (legacy data)

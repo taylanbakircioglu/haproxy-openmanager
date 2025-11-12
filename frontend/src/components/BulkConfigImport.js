@@ -890,7 +890,8 @@ backend web-backend
                         expandable={{
                           expandedRowRender: (frontend) => {
                             const hasDetails = frontend.request_headers || frontend.response_headers || 
-                                             frontend.tcp_request_rules || (frontend.acl_rules && frontend.acl_rules.length > 0) ||
+                                             frontend.options || frontend.tcp_request_rules || 
+                                             (frontend.acl_rules && frontend.acl_rules.length > 0) ||
                                              (frontend.use_backend_rules && frontend.use_backend_rules.length > 0);
                             
                             if (!hasDetails) return null;
@@ -899,6 +900,13 @@ backend web-backend
                               <div style={{ paddingLeft: 24 }}>
                                 <Text strong>Frontend Configuration Details:</Text>
                                 <Descriptions size="small" bordered column={1} style={{ marginTop: 8 }}>
+                                  {frontend.options && (
+                                    <Descriptions.Item label="Frontend Options">
+                                      <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                        {frontend.options}
+                                      </Text>
+                                    </Descriptions.Item>
+                                  )}
                                   {frontend.request_headers && (
                                     <Descriptions.Item label="Request Headers">
                                       <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
@@ -971,7 +979,7 @@ backend web-backend
                               <div style={{ paddingLeft: 24 }}>
                                 {/* Backend Details */}
                                 {(backend.default_server_inter || backend.default_server_fall || backend.default_server_rise ||
-                                  backend.request_headers || backend.response_headers || backend.cookie_options) && (
+                                  backend.request_headers || backend.response_headers || backend.options || backend.cookie_options) && (
                                   <div style={{ marginBottom: 16 }}>
                                     <Text strong>Backend Configuration Details:</Text>
                                     <Descriptions size="small" bordered column={2} style={{ marginTop: 8 }}>
@@ -993,6 +1001,13 @@ backend web-backend
                                       {backend.cookie_options && (
                                         <Descriptions.Item label="Cookie Options" span={2}>
                                           <Text code>{backend.cookie_options}</Text>
+                                        </Descriptions.Item>
+                                      )}
+                                      {backend.options && (
+                                        <Descriptions.Item label="Backend Options" span={2}>
+                                          <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                            {backend.options}
+                                          </Text>
                                         </Descriptions.Item>
                                       )}
                                       {backend.request_headers && (
