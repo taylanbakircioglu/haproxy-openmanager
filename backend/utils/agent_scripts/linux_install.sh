@@ -1863,6 +1863,19 @@ run_daemon() {
     log "INFO" "Starting HAProxy Agent: $AGENT_NAME (Linux)"
     echo $$ > "$PID_FILE"
     
+    # CRITICAL: Setup graceful shutdown signal handling
+    # This allows agent to stop quickly (<2s) instead of waiting for systemd timeout (90s)
+    SHUTDOWN_REQUESTED=false
+    
+    trap_handler() {
+        log "INFO" "Shutdown signal received (SIGTERM/SIGINT), stopping agent gracefully..."
+        SHUTDOWN_REQUESTED=true
+    }
+    
+    # Register signal handlers for graceful shutdown
+    trap trap_handler SIGTERM SIGINT SIGQUIT
+    log "INFO" "Signal handlers registered for graceful shutdown"
+    
     # Dynamically locate required binaries for daemon operations
     SOCAT_BIN=$(find_binary socat)
     JQ_BIN=$(find_binary jq)
@@ -1914,22 +1927,71 @@ run_daemon() {
     sleep 1
     send_heartbeat
     
-    while true; do
-        sleep 30
+    # Main agent loop with interruptible sleep for fast shutdown
+    # Sleep is broken into 1-second intervals to check shutdown flag every second
+    # This allows agent to stop in 1-2 seconds instead of waiting up to 30 seconds
+    while [[ "$SHUTDOWN_REQUESTED" == "false" ]]; do
+        # Interruptible sleep: break 30s into 30x 1s intervals
+        for i in {1..30}; do
+            # Check shutdown flag every second
+            [[ "$SHUTDOWN_REQUESTED" == "true" ]] && break
+            sleep 1
+        done
+        
+        # Exit loop if shutdown requested
+        [[ "$SHUTDOWN_REQUESTED" == "true" ]] && break
+        
+        # Normal agent operations
         send_heartbeat
+        
         # Check for pending config requests (if function exists)
         if type check_config_requests &>/dev/null; then
             check_config_requests
         fi
+        
         check_config_updates
         check_agent_upgrade
     done
+    
+    # Graceful shutdown cleanup
+    log "INFO" "Agent stopped gracefully"
+    rm -f "$PID_FILE"
+    exit 0
 }
 
 case "${1:-daemon}" in
     "daemon") run_daemon ;;
-    "stop") 
-        [[ -f "$PID_FILE" ]] && kill "$(cat "$PID_FILE")" 2>/dev/null
+    "stop")
+        # Improved stop command with graceful → force kill escalation
+        if [[ -f "$PID_FILE" ]]; then
+            local pid=$(cat "$PID_FILE" 2>/dev/null)
+            if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                echo "Stopping HAProxy Agent (PID: $pid)..."
+                
+                # Try graceful SIGTERM first
+                kill -TERM "$pid" 2>/dev/null
+                
+                # Wait up to 5 seconds for graceful shutdown
+                local count=0
+                while kill -0 "$pid" 2>/dev/null && [[ $count -lt 5 ]]; do
+                    sleep 1
+                    count=$((count + 1))
+                done
+                
+                # Force kill if still running after 5 seconds
+                if kill -0 "$pid" 2>/dev/null; then
+                    echo "Graceful stop timeout, force stopping agent..."
+                    kill -KILL "$pid" 2>/dev/null
+                    sleep 1
+                fi
+                
+                echo "Agent stopped successfully"
+            else
+                echo "Agent is not running (stale PID file)"
+            fi
+        else
+            echo "Agent is not running (no PID file)"
+        fi
         rm -f "$PID_FILE"
         ;;
     *) echo "Usage: $0 {daemon|stop}"; exit 1 ;;
@@ -2021,6 +2083,15 @@ Type=simple
 User=root
 ExecStart=$INSTALL_DIR/haproxy-agent daemon
 ExecStop=$INSTALL_DIR/haproxy-agent stop
+
+# Graceful shutdown configuration
+# Timeout after 10 seconds instead of default 90 seconds
+TimeoutStopSec=10
+# Mixed mode: send SIGTERM to main process, SIGKILL to remaining
+KillMode=mixed
+# Explicit signal for graceful shutdown
+KillSignal=SIGTERM
+
 Restart=always
 RestartSec=10
 StandardOutput=append:$LOG_DIR/agent.log
