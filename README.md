@@ -1559,6 +1559,43 @@ npm install
 lsof -i :3000
 ```
 
+#### 5. Phantom Pending Changes / Orphan Config Versions
+
+**Symptom:** Apply Management shows pending changes that can't be applied or rejected, or shows entities from wrong cluster.
+
+**Root Cause:** Orphan config versions - versions that reference entities from different clusters or deleted entities (entity ID reuse bug).
+
+**Solution (Automatic):** 
+- **Modern versions (v1.1.0+):** Orphan versions are automatically detected and cleaned when you:
+  - Open Apply Management page (orphans filtered out from display)
+  - Click "Apply Changes" (orphans deleted before apply)
+  - Click "Reject All" (orphans deleted before reject)
+
+**Manual Cleanup (if needed):**
+```sql
+-- Connect to database
+kubectl exec -it <postgres-pod> -- psql -U haproxy_user -d haproxy_openmanager
+
+-- Find orphan versions (example for cluster_id=2)
+SELECT cv.id, cv.version_name, cv.cluster_id,
+       CASE 
+         WHEN cv.version_name ~ 'backend-[0-9]+-' 
+         THEN (SELECT cluster_id FROM backends WHERE id = SUBSTRING(cv.version_name FROM 'backend-([0-9]+)-')::int)
+         ELSE NULL
+       END as entity_cluster
+FROM config_versions cv
+WHERE cv.cluster_id = 2 AND cv.status = 'PENDING';
+
+-- Delete orphan versions (where entity_cluster != 2 or NULL)
+DELETE FROM config_versions 
+WHERE id IN (SELECT id FROM ...);
+```
+
+**Prevention:**
+- Always delete backends/frontends in the correct cluster
+- Use Apply Changes workflow (don't skip)
+- Keep backend/frontend names unique across clusters
+
 ### Debug Mode
 
 Enable debug logging:

@@ -47,8 +47,25 @@ const ApplyManagement = () => {
   const { startProgress, updateProgress, updateEntityCounts, completeProgress, isProgressActive } = useProgress();
   const [entitySyncStates, setEntitySyncStates] = useState({});
 
+  // Initial load on component mount
   useEffect(() => {
     if (selectedCluster) {
+      fetchPendingChanges();
+      fetchConfigVersions();
+      fetchAgentSync();
+    }
+  }, []); // Run once on mount
+
+  // Cluster change handler
+  useEffect(() => {
+    if (selectedCluster) {
+      // CRITICAL: Clear all state immediately when cluster changes to prevent cross-cluster contamination
+      setPendingChanges({ frontends: [], backends: [], waf_rules: [], ssl_certificates: [], total_count: 0 });
+      setConfigVersions([]);
+      setAgentSync(null);
+      setEntitySyncStates({});
+      
+      // Then fetch new data
       fetchPendingChanges();
       fetchConfigVersions();
       fetchAgentSync();
@@ -58,15 +75,16 @@ const ApplyManagement = () => {
       setAgentSync(null);
       setEntitySyncStates({});
     }
-  }, [selectedCluster]);
+  }, [selectedCluster?.id]); // Use selectedCluster.id to prevent re-render on object change
 
   // Fetch entity sync states when pending changes are loaded
+  // CRITICAL: Only fetch for the CURRENT cluster to prevent 404 errors on old entity IDs
   useEffect(() => {
     if (selectedCluster && (pendingChanges.frontends.length > 0 || pendingChanges.backends.length > 0 || 
         pendingChanges.waf_rules.length > 0 || pendingChanges.ssl_certificates.length > 0)) {
       fetchEntitySyncStates();
     }
-  }, [selectedCluster, pendingChanges]);
+  }, [selectedCluster?.id, pendingChanges]);
 
   // Auto-refresh agent sync status every 10 seconds
   useEffect(() => {
@@ -122,9 +140,32 @@ const ApplyManagement = () => {
         }).catch(() => ({ data: [] }))
       ]);
 
+      // DEBUG: Log raw backend data
+      console.log('🔍 APPLY MANAGEMENT DEBUG - Backend Data:');
+      console.log('Total backends from API:', backendsRes.data.backends?.length || 0);
+      
+      // Check specific backends
+      const targetBackends = ['Apmserver', 'Elasticsearch', 'Kibana'];
+      const foundTargets = (backendsRes.data.backends || []).filter(b => targetBackends.includes(b.name));
+      foundTargets.forEach(b => {
+        console.log(`🔍 Backend: ${b.name} (id=${b.id})`, {
+          cluster_id: b.cluster_id,
+          last_config_status: b.last_config_status,
+          has_pending_config: b.has_pending_config,
+          is_active: b.is_active
+        });
+      });
+      
       // Filter pending changes
       const frontends = (frontendsRes.data.frontends || []).filter(f => f.has_pending_config);
       const backends = (backendsRes.data.backends || []).filter(b => b.has_pending_config);
+      
+      // DEBUG: Log filtered backends
+      console.log('🔍 Filtered pending backends:', backends.length);
+      backends.filter(b => targetBackends.includes(b.name)).forEach(b => {
+        console.log(`🔍 PENDING Backend: ${b.name} (id=${b.id}) - has_pending_config=${b.has_pending_config}`);
+      });
+      
       const waf_rules = (wafRes.data.rules || []).filter(w => w.has_pending_config);
       const ssl_certificates = (sslRes.data.ssl_certificates || sslRes.data || []).filter(s => s.has_pending_config);
 

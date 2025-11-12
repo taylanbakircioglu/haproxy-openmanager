@@ -331,20 +331,36 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
                     
                     # Get all PENDING versions in these clusters
                     pending_versions = await conn.fetch("""
-                        SELECT version_name FROM config_versions 
+                        SELECT version_name, cluster_id FROM config_versions 
                         WHERE cluster_id = ANY($1) AND status = 'PENDING'
                     """, cluster_ids)
                     
                     # Extract backend IDs from version names
+                    # CRITICAL: Validate that backend actually belongs to version's cluster (prevent orphan versions)
                     for version in pending_versions:
                         version_name = version['version_name']
+                        version_cluster_id = version['cluster_id']
                         
                         # Backend changes: backend-{id}-{action}-{timestamp}
                         if version_name.startswith('backend-'):
                             parts = version_name.split('-')
                             if len(parts) >= 2 and parts[1].isdigit():
                                 backend_id = int(parts[1])
-                                pending_backend_ids.add(backend_id)
+                                
+                                # CRITICAL: Verify backend actually belongs to this cluster (prevent ID reuse false positives)
+                                backend_cluster_check = await conn.fetchval("""
+                                    SELECT cluster_id FROM backends WHERE id = $1
+                                """, backend_id)
+                                
+                                # Only add to pending_backend_ids if backend exists in the version's cluster
+                                # Handle NULL cluster_id (legacy data): NULL == NULL should match
+                                if backend_cluster_check == version_cluster_id:
+                                    pending_backend_ids.add(backend_id)
+                                elif backend_cluster_check is None and version_cluster_id is None:
+                                    # Both NULL - legacy backend with legacy version
+                                    pending_backend_ids.add(backend_id)
+                                else:
+                                    logger.warning(f"ORPHAN VERSION: {version_name} in cluster {version_cluster_id} references backend {backend_id} from cluster {backend_cluster_check}")
                         
                         # Server changes: server-{server_id}-{action}-{timestamp}
                         elif version_name.startswith('server-'):
@@ -352,14 +368,17 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
                             if len(parts) >= 2 and parts[1].isdigit():
                                 server_id = int(parts[1])
                                 # Find which backend this server belongs to
+                                # CRITICAL: Also validate server belongs to version's cluster
                                 backend_row = await conn.fetchrow("""
-                                    SELECT b.id as backend_id 
+                                    SELECT b.id as backend_id, bs.cluster_id as server_cluster_id
                                     FROM backend_servers bs 
-                                    JOIN backends b ON bs.backend_name = b.name 
+                                    JOIN backends b ON bs.backend_name = b.name AND b.cluster_id = bs.cluster_id
                                     WHERE bs.id = $1
                                 """, server_id)
-                                if backend_row:
+                                if backend_row and backend_row['server_cluster_id'] == version_cluster_id:
                                     pending_backend_ids.add(backend_row['backend_id'])
+                                elif backend_row:
+                                    logger.warning(f"ORPHAN VERSION: {version_name} in cluster {version_cluster_id} references server {server_id} from cluster {backend_row['server_cluster_id']}")
                     
                     logger.info(f"BACKEND API: Found {len(pending_backend_ids)} backends with pending changes: {pending_backend_ids}")
                 except Exception as e:
@@ -371,12 +390,14 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
             # Check if backend has pending changes via:
             # 1. Config versions (pending_backend_ids) - version name parsing
             # 2. Entity's own last_config_status (for bulk import and other operations)
-            # 3. Backend is inactive (soft delete)
+            # 3. Backend is inactive (soft delete) - BUT NOT if REJECTED
             has_config_version = backend["id"] in pending_backend_ids
             has_pending_status = backend.get("last_config_status") == "PENDING"
             is_inactive = not backend.get("is_active", True)
+            is_rejected = backend.get("last_config_status") == "REJECTED"
             
-            backend["has_pending_config"] = has_config_version or has_pending_status or is_inactive
+            # CRITICAL: Exclude REJECTED entities from pending (already rejected, no action needed)
+            backend["has_pending_config"] = (has_config_version or has_pending_status or is_inactive) and not is_rejected
             
             # Enhanced debug logging
             if backend['name'] == 'backend7' or has_config_version or has_pending_status:
@@ -892,27 +913,53 @@ async def delete_backend(backend_id: int, authorization: str = Header(None)):
         cluster_id = backend["cluster_id"]
         
         # 1. Soft delete all servers belonging to this backend (mark inactive)
-        await conn.execute("""
-            UPDATE backend_servers 
-            SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
-            WHERE backend_name = $1
-        """, backend_name)
+        # CRITICAL: Include cluster_id to prevent affecting other clusters with same backend name
+        # Handle NULL cluster_id (legacy data) - must use IS NULL check
+        if cluster_id is not None:
+            await conn.execute("""
+                UPDATE backend_servers 
+                SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+                WHERE backend_name = $1 AND cluster_id = $2
+            """, backend_name, cluster_id)
+        else:
+            await conn.execute("""
+                UPDATE backend_servers 
+                SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+                WHERE backend_name = $1 AND cluster_id IS NULL
+            """, backend_name)
         
         # 2. Update frontends that use this backend (set default_backend to NULL)
-        await conn.execute("""
-            UPDATE frontends 
-            SET default_backend = NULL, last_config_status = 'PENDING', updated_at = CURRENT_TIMESTAMP
-            WHERE default_backend = $1
-        """, backend_name)
+        # CRITICAL: Include cluster_id to prevent affecting other clusters
+        # Handle NULL cluster_id (legacy data)
+        if cluster_id is not None:
+            await conn.execute("""
+                UPDATE frontends 
+                SET default_backend = NULL, last_config_status = 'PENDING', updated_at = CURRENT_TIMESTAMP
+                WHERE default_backend = $1 AND cluster_id = $2
+            """, backend_name, cluster_id)
+        else:
+            await conn.execute("""
+                UPDATE frontends 
+                SET default_backend = NULL, last_config_status = 'PENDING', updated_at = CURRENT_TIMESTAMP
+                WHERE default_backend = $1 AND cluster_id IS NULL
+            """, backend_name)
         
         # 2b. CRITICAL FIX: Remove use_backend rules referencing deleted backend from frontends
         # Frontend may have ACL rules like "use_backend Apmserver if Apmserver"
         # These must be removed to prevent HAProxy validation errors
-        frontends_with_acl_refs = await conn.fetch("""
-            SELECT id, name, use_backend_rules, acl_rules 
-            FROM frontends 
-            WHERE cluster_id = $1 AND is_active = TRUE
-        """, cluster_id)
+        # Handle NULL cluster_id (legacy data)
+        if cluster_id is not None:
+            frontends_with_acl_refs = await conn.fetch("""
+                SELECT id, name, use_backend_rules, acl_rules 
+                FROM frontends 
+                WHERE cluster_id = $1 AND is_active = TRUE
+            """, cluster_id)
+        else:
+            frontends_with_acl_refs = await conn.fetch("""
+                SELECT id, name, use_backend_rules, acl_rules 
+                FROM frontends 
+                WHERE cluster_id IS NULL AND is_active = TRUE
+            """)
         
         for frontend in frontends_with_acl_refs:
             # Parse use_backend_rules (JSONB array)

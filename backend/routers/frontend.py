@@ -239,19 +239,33 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                 try:
                     # Check for frontend-specific pending changes using entity ID in version name
                     # Exclude WAF changes as they don't require Frontend page Apply
+                    # CRITICAL: Validate frontend actually belongs to version's cluster (prevent orphan versions)
                     pending_configs = await conn.fetch("""
                         SELECT DISTINCT 
                             CASE 
                                 WHEN version_name ~ 'frontend-[0-9]+-' THEN 
                                     SUBSTRING(version_name FROM 'frontend-([0-9]+)-')::int
                                 ELSE NULL
-                            END as frontend_id
+                            END as frontend_id,
+                            cluster_id as version_cluster_id
                         FROM config_versions 
                         WHERE cluster_id = ANY($1) AND status = 'PENDING'
                         AND version_name ~ 'frontend-[0-9]+-'
                         AND version_name NOT LIKE 'waf-%'
                     """, cluster_ids)
-                    pending_frontend_ids = {pc["frontend_id"] for pc in pending_configs if pc["frontend_id"]}
+                    
+                    # Validate each frontend_id belongs to version's cluster (orphan detection)
+                    for pc in pending_configs:
+                        if pc["frontend_id"]:
+                            frontend_cluster = await conn.fetchval("""
+                                SELECT cluster_id FROM frontends WHERE id = $1
+                            """, pc["frontend_id"])
+                            
+                            # Only add if frontend exists in the version's cluster
+                            if frontend_cluster == pc["version_cluster_id"]:
+                                pending_frontend_ids.add(pc["frontend_id"])
+                            else:
+                                logger.warning(f"ORPHAN VERSION: frontend-{pc['frontend_id']}-* in cluster {pc['version_cluster_id']} references frontend from cluster {frontend_cluster}")
                 except Exception as e:
                     logger.warning(f"FRONTEND API: Failed to check pending configs: {e}")
                     pending_frontend_ids = set()
@@ -314,9 +328,12 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                     "updated_at": f["updated_at"].isoformat().replace('+00:00', 'Z') if f["updated_at"] else None,
                     "cluster_id": f.get("cluster_id"),
                     "has_pending_config": (
-                        f["id"] in pending_frontend_ids or 
-                        f.get("last_config_status") == "PENDING" or 
-                        not f.get("is_active", True)
+                        (
+                            f["id"] in pending_frontend_ids or 
+                            f.get("last_config_status") == "PENDING" or 
+                            not f.get("is_active", True)
+                        ) and 
+                        f.get("last_config_status") != "REJECTED"  # Exclude REJECTED entities
                     )
                 } for f in frontends
             ]

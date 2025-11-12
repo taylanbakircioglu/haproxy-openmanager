@@ -1019,7 +1019,23 @@ async def apply_pending_changes(
     apply_request: dict = None,
     authorization: str = Header(None)
 ):
-    """Apply all pending configuration changes for a cluster"""
+    """
+    Apply all pending configuration changes for a cluster
+    
+    This endpoint:
+    - Consolidates all PENDING config versions into one APPLIED version
+    - Marks all pending entities (frontends, backends, servers, SSL, WAF) as APPLIED
+    - Automatically detects and removes orphan config versions before apply
+    - Notifies agents to pull new configuration
+    
+    Orphan Version Auto-Cleanup:
+    - Orphan versions are config versions that reference entities from different clusters
+    - Can occur due to entity ID reuse after hard delete
+    - Automatically detected and cleaned during apply process
+    - Example: backend-73-delete-xxx in cluster 2, but backend 73 is in cluster 1
+    
+    Requires: apply.execute permission
+    """
     try:
         # Verify user authentication
         from auth_middleware import get_current_user_from_token, check_user_permission
@@ -1046,13 +1062,71 @@ async def apply_pending_changes(
             WHERE cluster_id = $1 AND status = 'PENDING'
             ORDER BY created_at ASC
         """, cluster_id)
+        
+        # CRITICAL FIX: Detect and clean orphan config versions before apply
+        # Orphan versions reference entities that don't belong to this cluster (ID reuse bug)
+        orphan_version_ids = []
+        import re
+        for v in pending_versions:
+            is_orphan = False
+            
+            # Check if backend version references a backend NOT in this cluster
+            m_be = re.search(r'^backend-(\d+)-', v['version_name'])
+            if m_be:
+                be_id = int(m_be.group(1))
+                backend_exists = await conn.fetchrow("""
+                    SELECT id, cluster_id FROM backends WHERE id = $1
+                """, be_id)
+                
+                # If backend doesn't exist, version is orphan (entity was hard deleted)
+                if backend_exists is None:
+                    is_orphan = True
+                    logger.warning(f"ORPHAN VERSION: {v['version_name']} references non-existent backend {be_id}")
+                # If backend exists but cluster_id is NULL, preserve version (legacy data)
+                elif backend_exists['cluster_id'] is None:
+                    logger.debug(f"Backend {be_id} has NULL cluster_id (legacy), preserving version")
+                    is_orphan = False
+                # If backend belongs to different cluster, version is orphan
+                elif backend_exists['cluster_id'] != cluster_id:
+                    is_orphan = True
+                    logger.warning(f"ORPHAN VERSION: {v['version_name']} references backend {be_id} from cluster {backend_exists['cluster_id']}, but version is in cluster {cluster_id}")
+            
+            # Check if frontend version references a frontend NOT in this cluster
+            m_fe = re.search(r'^frontend-(\d+)-', v['version_name'])
+            if m_fe:
+                fe_id = int(m_fe.group(1))
+                frontend_exists = await conn.fetchrow("""
+                    SELECT id, cluster_id FROM frontends WHERE id = $1
+                """, fe_id)
+                
+                # If frontend doesn't exist, version is orphan (entity was hard deleted)
+                if frontend_exists is None:
+                    is_orphan = True
+                    logger.warning(f"ORPHAN VERSION: {v['version_name']} references non-existent frontend {fe_id}")
+                # If frontend exists but cluster_id is NULL, preserve version (legacy data)
+                elif frontend_exists['cluster_id'] is None:
+                    logger.debug(f"Frontend {fe_id} has NULL cluster_id (legacy), preserving version")
+                    is_orphan = False
+                # If frontend belongs to different cluster, version is orphan
+                elif frontend_exists['cluster_id'] != cluster_id:
+                    is_orphan = True
+                    logger.warning(f"ORPHAN VERSION: {v['version_name']} references frontend {fe_id} from cluster {frontend_exists['cluster_id']}, but version is in cluster {cluster_id}")
+            
+            if is_orphan:
+                orphan_version_ids.append(v['id'])
+        
+        # Delete orphan versions immediately (they're invalid and prevent apply)
+        if orphan_version_ids:
+            await conn.execute("""
+                DELETE FROM config_versions WHERE id = ANY($1)
+            """, orphan_version_ids)
+            logger.info(f"APPLY: Deleted {len(orphan_version_ids)} orphan config versions")
+            
+            # Remove orphans from pending_versions list
+            pending_versions = [v for v in pending_versions if v['id'] not in orphan_version_ids]
 
         # If UI-side entity lists are empty but versions exist (e.g., restore-*), proceed anyway
         if not pending_versions:
-            return {"message": "No pending changes to apply", "applied_count": 0}
-        
-        if not pending_versions:
-            await close_database_connection(conn)
             return {"message": "No pending changes to apply", "applied_count": 0}
         
         # GLOBAL SSL HANDLING: Check if any pending versions contain global SSL updates
@@ -1927,7 +2001,7 @@ async def get_config_version_diff(cluster_id: int, version_id: int, authorizatio
             # Get SSL certificate info with actual certificate content
             ssl_cert = await conn.fetchrow("""
                 SELECT id, name, primary_domain, created_at, certificate_content, 
-                       private_key_content, chain_content,
+                       private_key_content, chain_content, usage_type,
                        CASE 
                            WHEN NOT EXISTS (SELECT 1 FROM ssl_certificate_clusters WHERE ssl_certificate_id = id) THEN 'Global'
                            ELSE 'Cluster-specific'
@@ -1958,7 +2032,8 @@ async def get_config_version_diff(cluster_id: int, version_id: int, authorizatio
                         f"# SSL Certificate File: {ssl_cert['name']}.pem",
                         f"# This file will be deployed to: /etc/ssl/haproxy/{ssl_cert['name']}.pem",
                         f"# Domain: {ssl_cert['primary_domain']}",
-                        f"# Type: {ssl_cert['ssl_type']}",
+                        f"# Scope: {ssl_cert['ssl_type']}",
+                        f"# Usage: {ssl_cert.get('usage_type', 'frontend').upper()}",
                         "",
                         "# Certificate Content:",
                     ]
@@ -4036,7 +4111,28 @@ backend web_servers
 
 @router.delete("/{cluster_id}/pending-changes")
 async def reject_all_pending_changes(cluster_id: int, authorization: str = Header(None)):
-    """Reject all pending configuration changes for a cluster"""
+    """
+    Reject all pending configuration changes for a cluster
+    
+    This endpoint:
+    - Marks all PENDING config versions as REJECTED
+    - Updates entity status (frontends, backends, servers) to REJECTED
+    - Automatically detects and removes orphan config versions
+    - Prevents orphan versions from cluttering the system
+    
+    Orphan Version Auto-Cleanup:
+    - Detects config versions referencing entities from different clusters
+    - Removes versions referencing deleted/non-existent entities
+    - Multi-cluster isolation: Only updates entities in the target cluster
+    - Example: Rejects backend-73-* only if backend 73 belongs to this cluster
+    
+    Use Case:
+    - Discard unwanted configuration changes
+    - Clean up phantom pending changes
+    - Remove orphan versions without manual database intervention
+    
+    Requires: User authentication (admin or user with cluster access)
+    """
     try:
         from auth_middleware import get_current_user_from_token
         current_user = await get_current_user_from_token(authorization)
@@ -4054,6 +4150,99 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
             SELECT id, version_name FROM config_versions 
             WHERE cluster_id = $1 AND status = 'PENDING'
         """, cluster_id)
+        
+        # CRITICAL FIX: Detect and clean orphan config versions
+        # Orphan versions reference entities that don't belong to this cluster (ID reuse bug)
+        orphan_version_ids = []
+        import re
+        for v in pending_versions:
+            is_orphan = False
+            
+            # Check if backend version references a backend NOT in this cluster
+            m_be = re.search(r'^backend-(\d+)-', v['version_name'])
+            if m_be:
+                be_id = int(m_be.group(1))
+                backend_exists = await conn.fetchrow("""
+                    SELECT id, cluster_id FROM backends WHERE id = $1
+                """, be_id)
+                
+                # If backend doesn't exist, version is orphan (entity was hard deleted)
+                if backend_exists is None:
+                    is_orphan = True
+                    logger.warning(f"ORPHAN VERSION (reject): {v['version_name']} references non-existent backend {be_id}")
+                # If backend exists but cluster_id is NULL, preserve version (legacy data)
+                elif backend_exists['cluster_id'] is None:
+                    logger.debug(f"Backend {be_id} has NULL cluster_id (legacy), preserving version")
+                    is_orphan = False
+                # If backend belongs to different cluster, version is orphan
+                elif backend_exists['cluster_id'] != cluster_id:
+                    is_orphan = True
+                    logger.warning(f"ORPHAN VERSION (reject): {v['version_name']} references backend {be_id} from cluster {backend_exists['cluster_id']}, but version is in cluster {cluster_id}")
+            
+            # Check if frontend version references a frontend NOT in this cluster
+            m_fe = re.search(r'^frontend-(\d+)-', v['version_name'])
+            if m_fe:
+                fe_id = int(m_fe.group(1))
+                frontend_exists = await conn.fetchrow("""
+                    SELECT id, cluster_id FROM frontends WHERE id = $1
+                """, fe_id)
+                
+                # If frontend doesn't exist, version is orphan (entity was hard deleted)
+                if frontend_exists is None:
+                    is_orphan = True
+                    logger.warning(f"ORPHAN VERSION (reject): {v['version_name']} references non-existent frontend {fe_id}")
+                # If frontend exists but cluster_id is NULL, preserve version (legacy data)
+                elif frontend_exists['cluster_id'] is None:
+                    logger.debug(f"Frontend {fe_id} has NULL cluster_id (legacy), preserving version")
+                    is_orphan = False
+                # If frontend belongs to different cluster, version is orphan
+                elif frontend_exists['cluster_id'] != cluster_id:
+                    is_orphan = True
+                    logger.warning(f"ORPHAN VERSION (reject): {v['version_name']} references frontend {fe_id} from cluster {frontend_exists['cluster_id']}, but version is in cluster {cluster_id}")
+            
+            if is_orphan:
+                orphan_version_ids.append(v['id'])
+        
+        # Delete orphan versions immediately (they're invalid)
+        # CRITICAL: Also clean entity status for orphan-referenced entities in THIS cluster
+        if orphan_version_ids:
+            # Extract entity IDs from orphan versions to clean their status
+            orphan_be_ids = []
+            orphan_fe_ids = []
+            for v in [ver for ver in pending_versions if ver['id'] in orphan_version_ids]:
+                m_be = re.search(r'^backend-(\d+)-', v['version_name'])
+                if m_be:
+                    orphan_be_ids.append(int(m_be.group(1)))
+                m_fe = re.search(r'^frontend-(\d+)-', v['version_name'])
+                if m_fe:
+                    orphan_fe_ids.append(int(m_fe.group(1)))
+            
+            # Clean entity status ONLY for entities in THIS cluster with PENDING status
+            # This prevents orphan versions from leaving entity status stuck as PENDING
+            if orphan_be_ids:
+                await conn.execute("""
+                    UPDATE backends 
+                    SET last_config_status = 'APPLIED' 
+                    WHERE id = ANY($1) AND cluster_id = $2 AND last_config_status = 'PENDING'
+                """, orphan_be_ids, cluster_id)
+                logger.info(f"REJECT: Cleaned PENDING status for {len(orphan_be_ids)} backends affected by orphan versions")
+            
+            if orphan_fe_ids:
+                await conn.execute("""
+                    UPDATE frontends 
+                    SET last_config_status = 'APPLIED' 
+                    WHERE id = ANY($1) AND cluster_id = $2 AND last_config_status = 'PENDING'
+                """, orphan_fe_ids, cluster_id)
+                logger.info(f"REJECT: Cleaned PENDING status for {len(orphan_fe_ids)} frontends affected by orphan versions")
+            
+            # Now delete orphan versions
+            await conn.execute("""
+                DELETE FROM config_versions WHERE id = ANY($1)
+            """, orphan_version_ids)
+            logger.info(f"REJECT: Deleted {len(orphan_version_ids)} orphan config versions")
+            
+            # Remove orphans from pending_versions list
+            pending_versions = [v for v in pending_versions if v['id'] not in orphan_version_ids]
         
         if not pending_versions:
             await close_database_connection(conn)
@@ -4081,6 +4270,7 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
             pass
 
         # Reflect REJECTED for frontends, backends, and servers referenced
+        # CRITICAL FIX: Only update entities that actually belong to this cluster (prevent orphan versions)
         try:
             fe_ids = []
             be_ids = []
@@ -4098,16 +4288,62 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                 if m3:
                     srv_ids.append(int(m3.group(1)))
             
+            # CRITICAL: Only update entities that belong to THIS cluster (multi-cluster isolation)
             if fe_ids:
-                await conn.execute("UPDATE frontends SET last_config_status = 'REJECTED' WHERE id = ANY($1)", fe_ids)
+                await conn.execute("""
+                    UPDATE frontends SET last_config_status = 'REJECTED' 
+                    WHERE id = ANY($1) AND cluster_id = $2
+                """, fe_ids, cluster_id)
             if be_ids:
-                await conn.execute("UPDATE backends SET last_config_status = 'REJECTED' WHERE id = ANY($1)", be_ids)
+                await conn.execute("""
+                    UPDATE backends SET last_config_status = 'REJECTED' 
+                    WHERE id = ANY($1) AND cluster_id = $2
+                """, be_ids, cluster_id)
             if srv_ids:
-                await conn.execute("UPDATE backend_servers SET last_config_status = 'REJECTED' WHERE id = ANY($1)", srv_ids)
+                await conn.execute("""
+                    UPDATE backend_servers SET last_config_status = 'REJECTED' 
+                    WHERE id = ANY($1) AND cluster_id = $2
+                """, srv_ids, cluster_id)
                 logger.info(f"REJECT: Marked {len(srv_ids)} servers as REJECTED")
         except Exception as e:
             logger.warning(f"Failed to update entity statuses during reject: {e}")
             pass
+        
+        # FINAL CLEANUP: Remove orphan entity statuses without corresponding config versions
+        # This handles edge cases where entities have PENDING status but no PENDING version exists
+        # CRITICAL: Only clean if NO pending versions exist at all (prevents bulk import issues)
+        try:
+            # Check if there are ANY pending versions left
+            any_pending_versions = await conn.fetchval("""
+                SELECT EXISTS(
+                    SELECT 1 FROM config_versions 
+                    WHERE cluster_id = $1 AND status = 'PENDING'
+                )
+            """, cluster_id)
+            
+            # Only run orphan cleanup if NO pending versions exist
+            # This prevents cleaning entities from bulk-import or other non-ID-specific versions
+            if not any_pending_versions:
+                # Clean all PENDING backends (safe because no versions exist)
+                cleaned_be = await conn.execute("""
+                    UPDATE backends 
+                    SET last_config_status = 'APPLIED'
+                    WHERE cluster_id = $1 AND last_config_status = 'PENDING'
+                """, cluster_id)
+                
+                # Clean all PENDING frontends
+                cleaned_fe = await conn.execute("""
+                    UPDATE frontends 
+                    SET last_config_status = 'APPLIED'
+                    WHERE cluster_id = $1 AND last_config_status = 'PENDING'
+                """, cluster_id)
+                
+                logger.info(f"REJECT: Final orphan cleanup - cleaned {cleaned_be} backends, {cleaned_fe} frontends (no pending versions)")
+            else:
+                logger.debug("REJECT: Skipping final cleanup (pending versions still exist - may include bulk-import)")
+                
+        except Exception as cleanup_error:
+            logger.warning(f"Final orphan entity cleanup failed (non-critical): {cleanup_error}")
         
         await close_database_connection(conn)
         
