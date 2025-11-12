@@ -979,69 +979,73 @@ backend web-backend
                               <div style={{ paddingLeft: 24 }}>
                                 <Text strong>Frontend Configuration Details:</Text>
                                 <Descriptions size="small" bordered column={1} style={{ marginTop: 8 }}>
-                                  {frontend.options && frontend._changes?.options && (
-                                    <FieldChange
-                                      label="Frontend Options"
-                                      oldValue={frontend._changes.options.old}
-                                      newValue={frontend.options}
-                                      span={1}
-                                      isMultiline={true}
-                                    />
+                                  {frontend.options && (
+                                    frontend._changes?.options ? (
+                                      <FieldChange
+                                        label="Frontend Options"
+                                        oldValue={frontend._changes.options.old}
+                                        newValue={frontend.options}
+                                        span={1}
+                                        isMultiline={true}
+                                      />
+                                    ) : (
+                                      <Descriptions.Item label="Frontend Options">
+                                        <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                          {frontend.options}
+                                        </Text>
+                                      </Descriptions.Item>
+                                    )
                                   )}
-                                  {frontend.options && !frontend._changes?.options && (
-                                    <Descriptions.Item label="Frontend Options">
-                                      <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                        {frontend.options}
-                                      </Text>
-                                    </Descriptions.Item>
+                                  {frontend.request_headers && (
+                                    frontend._changes?.request_headers ? (
+                                      <FieldChange
+                                        label="Request Headers"
+                                        oldValue={frontend._changes.request_headers.old}
+                                        newValue={frontend.request_headers}
+                                        span={1}
+                                        isMultiline={true}
+                                      />
+                                    ) : (
+                                      <Descriptions.Item label="Request Headers">
+                                        <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                          {frontend.request_headers}
+                                        </Text>
+                                      </Descriptions.Item>
+                                    )
                                   )}
-                                  {frontend.request_headers && frontend._changes?.request_headers && (
-                                    <FieldChange
-                                      label="Request Headers"
-                                      oldValue={frontend._changes.request_headers.old}
-                                      newValue={frontend.request_headers}
-                                      span={1}
-                                      isMultiline={true}
-                                    />
+                                  {frontend.response_headers && (
+                                    frontend._changes?.response_headers ? (
+                                      <FieldChange
+                                        label="Response Headers"
+                                        oldValue={frontend._changes.response_headers.old}
+                                        newValue={frontend.response_headers}
+                                        span={1}
+                                        isMultiline={true}
+                                      />
+                                    ) : (
+                                      <Descriptions.Item label="Response Headers">
+                                        <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                          {frontend.response_headers}
+                                        </Text>
+                                      </Descriptions.Item>
+                                    )
                                   )}
-                                  {frontend.request_headers && !frontend._changes?.request_headers && (
-                                    <Descriptions.Item label="Request Headers">
-                                      <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                        {frontend.request_headers}
-                                      </Text>
-                                    </Descriptions.Item>
-                                  )}
-                                  {frontend.response_headers && frontend._changes?.response_headers && (
-                                    <FieldChange
-                                      label="Response Headers"
-                                      oldValue={frontend._changes.response_headers.old}
-                                      newValue={frontend.response_headers}
-                                      span={1}
-                                      isMultiline={true}
-                                    />
-                                  )}
-                                  {frontend.response_headers && !frontend._changes?.response_headers && (
-                                    <Descriptions.Item label="Response Headers">
-                                      <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                        {frontend.response_headers}
-                                      </Text>
-                                    </Descriptions.Item>
-                                  )}
-                                  {frontend.tcp_request_rules && frontend._changes?.tcp_request_rules && (
-                                    <FieldChange
-                                      label="TCP Request Rules"
-                                      oldValue={frontend._changes.tcp_request_rules.old}
-                                      newValue={frontend.tcp_request_rules}
-                                      span={1}
-                                      isMultiline={true}
-                                    />
-                                  )}
-                                  {frontend.tcp_request_rules && !frontend._changes?.tcp_request_rules && (
-                                    <Descriptions.Item label="TCP Request Rules">
-                                      <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                        {frontend.tcp_request_rules}
-                                      </Text>
-                                    </Descriptions.Item>
+                                  {frontend.tcp_request_rules && (
+                                    frontend._changes?.tcp_request_rules ? (
+                                      <FieldChange
+                                        label="TCP Request Rules"
+                                        oldValue={frontend._changes.tcp_request_rules.old}
+                                        newValue={frontend.tcp_request_rules}
+                                        span={1}
+                                        isMultiline={true}
+                                      />
+                                    ) : (
+                                      <Descriptions.Item label="TCP Request Rules">
+                                        <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                          {frontend.tcp_request_rules}
+                                        </Text>
+                                      </Descriptions.Item>
+                                    )
                                   )}
                                   {frontend.acl_rules && frontend.acl_rules.length > 0 && (
                                     <Descriptions.Item label={`ACL Rules (${frontend.acl_rules.length})`}>
@@ -1118,53 +1122,83 @@ backend web-backend
                                           <Text code>{backend.cookie_options}</Text>
                                         </Descriptions.Item>
                                       )}
-                                      {backend.options && backend._changes?.options && (
-                                        <FieldChange
-                                          label="Backend Options"
-                                          oldValue={backend._changes.options.old}
-                                          newValue={backend.options}
-                                          span={2}
-                                          isMultiline={true}
-                                        />
+                                      {(() => {
+                                        // DEBUG: Detailed logging for troubleshooting
+                                        console.group(`🔍 Backend Options Debug: ${backend.name}`);
+                                        console.log('backend.options:', backend.options);
+                                        console.log('backend.options type:', typeof backend.options);
+                                        console.log('backend.options length:', backend.options?.length);
+                                        console.log('backend._changes:', backend._changes);
+                                        console.log('backend._changes?.options:', backend._changes?.options);
+                                        console.log('Render decision:', backend._changes?.options ? 'FieldChange' : 'Descriptions.Item with NEW badge');
+                                        console.groupEnd();
+                                        
+                                        // Render logic
+                                        if (!backend.options) return null;
+                                        
+                                        if (backend._changes?.options) {
+                                          return (
+                                            <FieldChange
+                                              label="Backend Options"
+                                              oldValue={backend._changes.options.old}
+                                              newValue={backend.options}
+                                              span={2}
+                                              isMultiline={true}
+                                            />
+                                          );
+                                        } else {
+                                          return (
+                                            <Descriptions.Item 
+                                              label={
+                                                <span>
+                                                  Backend Options
+                                                  <Tag color="green" style={{ marginLeft: 8, fontSize: '10px' }}>
+                                                    NEW
+                                                  </Tag>
+                                                </span>
+                                              } 
+                                              span={2}
+                                            >
+                                              <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px', color: '#52c41a', fontWeight: 500 }}>
+                                                {backend.options}
+                                              </Text>
+                                            </Descriptions.Item>
+                                          );
+                                        }
+                                      })()}
+                                      {backend.request_headers && (
+                                        backend._changes?.request_headers ? (
+                                          <FieldChange
+                                            label="Request Headers"
+                                            oldValue={backend._changes.request_headers.old}
+                                            newValue={backend.request_headers}
+                                            span={2}
+                                            isMultiline={true}
+                                          />
+                                        ) : (
+                                          <Descriptions.Item label="Request Headers" span={2}>
+                                            <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                              {backend.request_headers}
+                                            </Text>
+                                          </Descriptions.Item>
+                                        )
                                       )}
-                                      {backend.options && !backend._changes?.options && (
-                                        <Descriptions.Item label="Backend Options" span={2}>
-                                          <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                            {backend.options}
-                                          </Text>
-                                        </Descriptions.Item>
-                                      )}
-                                      {backend.request_headers && backend._changes?.request_headers && (
-                                        <FieldChange
-                                          label="Request Headers"
-                                          oldValue={backend._changes.request_headers.old}
-                                          newValue={backend.request_headers}
-                                          span={2}
-                                          isMultiline={true}
-                                        />
-                                      )}
-                                      {backend.request_headers && !backend._changes?.request_headers && (
-                                        <Descriptions.Item label="Request Headers" span={2}>
-                                          <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                            {backend.request_headers}
-                                          </Text>
-                                        </Descriptions.Item>
-                                      )}
-                                      {backend.response_headers && backend._changes?.response_headers && (
-                                        <FieldChange
-                                          label="Response Headers"
-                                          oldValue={backend._changes.response_headers.old}
-                                          newValue={backend.response_headers}
-                                          span={2}
-                                          isMultiline={true}
-                                        />
-                                      )}
-                                      {backend.response_headers && !backend._changes?.response_headers && (
-                                        <Descriptions.Item label="Response Headers" span={2}>
-                                          <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                            {backend.response_headers}
-                                          </Text>
-                                        </Descriptions.Item>
+                                      {backend.response_headers && (
+                                        backend._changes?.response_headers ? (
+                                          <FieldChange
+                                            label="Response Headers"
+                                            oldValue={backend._changes.response_headers.old}
+                                            newValue={backend.response_headers}
+                                            span={2}
+                                            isMultiline={true}
+                                          />
+                                        ) : (
+                                          <Descriptions.Item label="Response Headers" span={2}>
+                                            <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                              {backend.response_headers}
+                                            </Text>
+                                          </Descriptions.Item>
+                                        )
                                       )}
                                     </Descriptions>
                                   </div>
