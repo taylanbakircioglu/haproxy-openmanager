@@ -13,6 +13,33 @@ from services.haproxy_config import generate_haproxy_config_for_cluster
 router = APIRouter(prefix="/api/frontends", tags=["frontends"])
 logger = logging.getLogger(__name__)
 
+def filter_httpchk_from_options(options: Optional[str]) -> Optional[str]:
+    """
+    Filter out 'option httpchk' directives from options field.
+    These are not applicable to frontends (health checks are for backends).
+    
+    Args:
+        options: Multi-line string containing HAProxy option directives
+        
+    Returns:
+        Filtered options string without 'option httpchk' lines, or None if empty
+    """
+    if not options:
+        return options
+    
+    # Split by newline, filter out httpchk lines, rejoin
+    filtered_lines = [
+        line for line in options.split('\n')
+        if line.strip() and 'httpchk' not in line.lower()
+    ]
+    
+    # Return None if no lines remain after filtering
+    if not filtered_lines:
+        return None
+        
+    return '\n'.join(filtered_lines)
+
+
 async def validate_user_cluster_access(user_id: int, cluster_id: int, conn):
     """Validate that user has access to the specified cluster"""
     # Check if cluster exists
@@ -376,6 +403,11 @@ async def create_frontend(frontend: FrontendConfig, request: Request, authorizat
         # Convert ssl_certificate_ids to JSONB for database
         ssl_cert_ids_json = json.dumps(frontend.ssl_certificate_ids) if frontend.ssl_certificate_ids else '[]'
         
+        # Filter out 'option httpchk' from options field (not applicable to frontends)
+        filtered_options = filter_httpchk_from_options(frontend.options)
+        if filtered_options != frontend.options and frontend.options:
+            logger.info(f"Frontend '{frontend.name}': Filtered 'option httpchk' from options field. Health checks are for backends.")
+        
         # Insert new frontend with all form fields
         frontend_id = await conn.fetchval("""
             INSERT INTO frontends (
@@ -391,7 +423,7 @@ async def create_frontend(frontend: FrontendConfig, request: Request, authorizat
             frontend.default_backend, frontend.mode, frontend.ssl_enabled,
             frontend.ssl_certificate_id, ssl_cert_ids_json, frontend.ssl_port, frontend.ssl_cert_path, frontend.ssl_cert, frontend.ssl_verify,
             json.dumps(frontend.acl_rules or []), json.dumps(frontend.redirect_rules or []), json.dumps(frontend.use_backend_rules or []),
-            frontend.request_headers, frontend.response_headers, frontend.options, frontend.tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
+            frontend.request_headers, frontend.response_headers, filtered_options, frontend.tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
             frontend.rate_limit, frontend.compression, frontend.log_separate, frontend.monitor_uri,
             frontend.cluster_id, frontend.maxconn)
         
@@ -623,6 +655,11 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
         # ENTERPRISE DUAL-MODE: Save ssl_certificate_ids (NEW) and ssl_certificate_id (OLD - backward compat)
         ssl_cert_ids_json = json.dumps(frontend.ssl_certificate_ids) if frontend.ssl_certificate_ids else '[]'
         
+        # Filter out 'option httpchk' from options field (not applicable to frontends)
+        filtered_options = filter_httpchk_from_options(frontend.options)
+        if filtered_options != frontend.options and frontend.options:
+            logger.info(f"Frontend '{frontend.name}': Filtered 'option httpchk' from options field. Health checks are for backends.")
+        
         # Update frontend with all form fields (using preserved SSL values if needed)
         await conn.execute("""
             UPDATE frontends SET 
@@ -638,7 +675,7 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
             frontend.default_backend, frontend.mode, ssl_enabled,
             ssl_certificate_id, ssl_cert_ids_json, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
             json.dumps(frontend.acl_rules or []), json.dumps(frontend.redirect_rules or []), json.dumps(frontend.use_backend_rules or []),
-            frontend.request_headers, frontend.response_headers, frontend.options, frontend.tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
+            frontend.request_headers, frontend.response_headers, filtered_options, frontend.tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
             frontend.rate_limit, frontend.compression, frontend.log_separate, frontend.monitor_uri,
             frontend.cluster_id, frontend.maxconn, frontend_id)
             

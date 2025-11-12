@@ -13,6 +13,33 @@ from services.haproxy_config import generate_haproxy_config_for_cluster
 router = APIRouter(prefix="/api/backends", tags=["backends", "servers"])
 logger = logging.getLogger(__name__)
 
+def filter_httpchk_from_options(options: Optional[str]) -> Optional[str]:
+    """
+    Filter out 'option httpchk' directives from options field.
+    These should be configured via the health_check_uri field instead to avoid duplication.
+    
+    Args:
+        options: Multi-line string containing HAProxy option directives
+        
+    Returns:
+        Filtered options string without 'option httpchk' lines, or None if empty
+    """
+    if not options:
+        return options
+    
+    # Split by newline, filter out httpchk lines, rejoin
+    filtered_lines = [
+        line for line in options.split('\n')
+        if line.strip() and 'httpchk' not in line.lower()
+    ]
+    
+    # Return None if no lines remain after filtering
+    if not filtered_lines:
+        return None
+        
+    return '\n'.join(filtered_lines)
+
+
 async def validate_user_cluster_access(user_id: int, cluster_id: int, conn):
     """Validate that user has access to the specified cluster"""
     # Check if cluster exists
@@ -308,6 +335,17 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
                 "balance_method": backend["balance_method"],
                 "mode": backend["mode"],
                 "health_check_uri": backend.get("health_check_uri"),
+                "health_check_interval": backend.get("health_check_interval"),
+                "health_check_expected_status": backend.get("health_check_expected_status"),
+                "fullconn": backend.get("fullconn"),
+                "cookie_name": backend.get("cookie_name"),
+                "cookie_options": backend.get("cookie_options"),
+                "default_server_inter": backend.get("default_server_inter"),
+                "default_server_fall": backend.get("default_server_fall"),
+                "default_server_rise": backend.get("default_server_rise"),
+                "request_headers": backend.get("request_headers"),
+                "response_headers": backend.get("response_headers"),
+                "options": backend.get("options"),
                 "timeout_connect": backend.get("timeout_connect"),
                 "timeout_server": backend.get("timeout_server"),
                 "timeout_queue": backend.get("timeout_queue"),
@@ -441,6 +479,11 @@ async def create_backend(backend: BackendConfig, authorization: str = Header(Non
             await close_database_connection(conn)
             raise HTTPException(status_code=400, detail=f"Backend '{backend.name}' already exists")
         
+        # Filter out 'option httpchk' from options field (should use health_check_uri instead)
+        filtered_options = filter_httpchk_from_options(backend.options)
+        if filtered_options != backend.options and backend.options:
+            logger.info(f"Backend '{backend.name}': Filtered 'option httpchk' from options field. Use Health Check URI field instead.")
+        
         # Insert new backend
         backend_id = await conn.fetchval("""
             INSERT INTO backends (name, balance_method, mode, health_check_uri, health_check_interval, 
@@ -453,7 +496,7 @@ async def create_backend(backend: BackendConfig, authorization: str = Header(Non
             backend.health_check_uri, backend.health_check_interval,
             backend.health_check_expected_status, backend.fullconn, backend.cookie_name, backend.cookie_options,
             backend.default_server_inter, backend.default_server_fall, backend.default_server_rise,
-            backend.request_headers, backend.response_headers, backend.options,
+            backend.request_headers, backend.response_headers, filtered_options,
             backend.timeout_connect, backend.timeout_server, backend.timeout_queue, backend.cluster_id)
         
         # If cluster_id provided, create new config version for agents
@@ -741,6 +784,13 @@ async def update_backend(backend_id: int, backend_update: BackendConfigUpdate, r
         old_backend_name = existing_backend['name']
         new_backend_name = update_data.get('name', old_backend_name)
         backend_name_changed = old_backend_name != new_backend_name
+        
+        # Filter out 'option httpchk' from options field if present (should use health_check_uri instead)
+        if 'options' in update_data and update_data['options']:
+            filtered_options = filter_httpchk_from_options(update_data['options'])
+            if filtered_options != update_data['options']:
+                logger.info(f"Backend '{old_backend_name}': Filtered 'option httpchk' from options field. Use Health Check URI field instead.")
+                update_data['options'] = filtered_options
 
         for field, value in update_data.items():
             if field in ['name', 'balance_method', 'mode', 'health_check_uri', 'health_check_interval', 

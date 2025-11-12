@@ -484,9 +484,11 @@ const BackendServers = () => {
   const handleEditBackend = (backend) => {
     setEditingBackend(backend);
     
-    // Debug: Check if options field exists in backend object
+    // Debug: Check if multi-line text fields exist in backend object
     console.log('🔍 BACKEND EDIT DEBUG: Raw backend data:', backend);
     console.log('🔍 BACKEND EDIT DEBUG: Options field:', backend.options);
+    console.log('🔍 BACKEND EDIT DEBUG: Request headers:', backend.request_headers);
+    console.log('🔍 BACKEND EDIT DEBUG: Response headers:', backend.response_headers);
     
     backendForm.setFieldsValue({
       ...backend,
@@ -494,8 +496,10 @@ const BackendServers = () => {
       timeout_connect: backend.timeout_connect || 10000,
       timeout_server: backend.timeout_server || 60000,
       timeout_queue: backend.timeout_queue || 60000,
-      // Explicitly set options to handle null/undefined cases
-      options: backend.options || ''
+      // Explicitly set multi-line text fields to handle null/undefined cases
+      options: backend.options || '',
+      request_headers: backend.request_headers || '',
+      response_headers: backend.response_headers || ''
     });
     setBackendModalVisible(true);
   };
@@ -1792,10 +1796,22 @@ const BackendServers = () => {
                 name="options"
                 label="Backend Options"
                 tooltip="HAProxy backend options (one per line). Examples: option http-keep-alive, option forwardfor, option redispatch"
+                help={
+                  backendForm.getFieldValue('options') && 
+                  backendForm.getFieldValue('options').toLowerCase().includes('httpchk') ? (
+                    <span style={{ color: '#faad14' }}>
+                      ⚠️ Do not use "option httpchk" here. Use the "Health Check URI" field above instead to avoid duplication.
+                    </span>
+                  ) : null
+                }
               >
                 <Input.TextArea 
                   rows={4} 
-                  placeholder="e.g., option http-keep-alive&#10;option forwardfor&#10;option redispatch" 
+                  placeholder="e.g., option http-keep-alive&#10;option forwardfor&#10;option redispatch"
+                  onChange={(e) => {
+                    // Force re-render to show/hide warning
+                    backendForm.setFieldsValue({ options: e.target.value });
+                  }}
                 />
               </Form.Item>
             </Col>

@@ -583,7 +583,9 @@ const FrontendManagement = () => {
       ssl_certificate_ids: sslCertIds,
       acl_rules: formattedAclRules,
       redirect_rules: formattedRedirectRules,
-      use_backend_rules: formattedUseBackendRules
+      use_backend_rules: formattedUseBackendRules,
+      // Explicitly set options field to handle null/undefined case (NEW field)
+      options: frontend.options || ''
     });
     
     // Update SSL field visibility after setting values
@@ -1649,6 +1651,14 @@ http-response del-header Server`}
                     label="Frontend Options"
                     extra="HAProxy frontend options (one per line)"
                     tooltip="Examples: option httplog, option forwardfor, option dontlognull, option http-keep-alive"
+                    help={
+                      form.getFieldValue('options') && 
+                      form.getFieldValue('options').toLowerCase().includes('httpchk') ? (
+                        <span style={{ color: '#faad14' }}>
+                          ⚠️ "option httpchk" is not applicable to frontends. Health checks are configured in backend definitions.
+                        </span>
+                      ) : null
+                    }
                   >
                     <TextArea
                       rows={4}
@@ -1657,6 +1667,10 @@ option httplog
 option forwardfor
 option dontlognull
 option http-keep-alive`}
+                      onChange={(e) => {
+                        // Force re-render to show/hide warning
+                        form.setFieldsValue({ options: e.target.value });
+                      }}
                     />
                   </Form.Item>
                 </Col>

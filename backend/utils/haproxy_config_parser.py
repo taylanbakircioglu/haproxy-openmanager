@@ -310,7 +310,8 @@ class HAProxyConfigParser:
                     frontend.maxconn = int(maxconn_match.group(1))
                 
                 # Parse options (httplog, forwardfor, etc.) - NEW for frontend support
-                if line.startswith('option '):
+                # Note: option httpchk is NOT applicable to frontends (health checks are for backends)
+                if line.startswith('option ') and 'httpchk' not in line:
                     # Validate option directive - check for known HAProxy options
                     option_match = re.match(r'^option\s+(\S+)', line, re.IGNORECASE)
                     if option_match:
@@ -318,7 +319,7 @@ class HAProxyConfigParser:
                         # List of valid HAProxy frontend options
                         valid_options = [
                             'httplog', 'tcplog', 'dontlognull', 'http-keep-alive', 'http-server-close',
-                            'forwardfor', 'redispatch', 'http-use-proxy-header', 'httpchk', 'tcp-check',
+                            'forwardfor', 'redispatch', 'http-use-proxy-header', 'tcp-check',
                             'contstats', 'http-pretend-keepalive', 'logasap', 'nolinger', 'persist',
                             'prefer-last-server', 'splice-auto', 'splice-request', 'splice-response',
                             'transparent', 'abortonclose', 'allbackups', 'checkcache', 'clitcpka',
@@ -337,6 +338,13 @@ class HAProxyConfigParser:
                         # Collect option for frontend.options field
                         options_list.append(line.strip())
                     continue  # Skip options - don't add to request_headers
+                elif line.startswith('option ') and 'httpchk' in line:
+                    # Warn user that httpchk is not applicable to frontends
+                    self.warnings.append(
+                        f"Frontend '{name}': 'option httpchk' is not applicable to frontends and will be skipped. "
+                        "Health checks are configured in backend definitions."
+                    )
+                    continue
                 
                 # Parse HTTP request headers
                 if line.startswith('http-request '):
