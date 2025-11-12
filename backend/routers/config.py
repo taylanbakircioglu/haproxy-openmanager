@@ -970,6 +970,7 @@ async def parse_bulk_config(
         
         # BULK IMPORT MVP: Check existing entities for UPSERT detection
         # Mark each entity as new or update for UI display
+        # CRITICAL: Only mark as UPDATE if there are actual field changes
         new_frontends = 0
         update_frontends = 0
         new_backends = 0
@@ -978,16 +979,52 @@ async def parse_bulk_config(
         
         for frontend in frontends_data:
             existing = await conn.fetchrow("""
-                SELECT id, is_active FROM frontends 
+                SELECT * FROM frontends 
                 WHERE name = $1 AND cluster_id = $2
             """, frontend["name"], request.cluster_id)
             
             if existing:
+                # Check if any field has actually changed
+                has_changes = False
+                
+                # Compare all fields that can be updated
+                if frontend.get("bind_address") and frontend["bind_address"] != existing["bind_address"]:
+                    has_changes = True
+                if frontend.get("bind_port") and frontend["bind_port"] != existing["bind_port"]:
+                    has_changes = True
+                if frontend.get("default_backend") and frontend["default_backend"] != existing["default_backend"]:
+                    has_changes = True
+                if frontend.get("mode") and frontend["mode"] != existing["mode"]:
+                    has_changes = True
+                if frontend.get("ssl_enabled") is not None and frontend["ssl_enabled"] != existing["ssl_enabled"]:
+                    has_changes = True
+                if frontend.get("ssl_port") and frontend["ssl_port"] != existing["ssl_port"]:
+                    has_changes = True
+                if frontend.get("timeout_client") and frontend["timeout_client"] != existing["timeout_client"]:
+                    has_changes = True
+                if frontend.get("maxconn") and frontend["maxconn"] != existing["maxconn"]:
+                    has_changes = True
+                if frontend.get("request_headers") and frontend["request_headers"] != existing["request_headers"]:
+                    has_changes = True
+                if frontend.get("response_headers") and frontend["response_headers"] != existing["response_headers"]:
+                    has_changes = True
+                if frontend.get("options") and frontend["options"] != existing.get("options"):
+                    has_changes = True
+                if frontend.get("tcp_request_rules") and frontend["tcp_request_rules"] != existing["tcp_request_rules"]:
+                    has_changes = True
+                # Note: acl_rules and use_backend_rules are not stored in frontends table, they're managed separately
+                
+                # Check if entity is inactive (reactivation counts as change)
+                if not existing['is_active']:
+                    has_changes = True
+                
                 frontend["_isNew"] = False
-                frontend["_isUpdate"] = True
+                frontend["_isUpdate"] = has_changes  # Only true if actual changes detected
                 frontend["_existingId"] = existing['id']
                 frontend["_isActive"] = existing['is_active']
-                update_frontends += 1
+                
+                if has_changes:
+                    update_frontends += 1
             else:
                 frontend["_isNew"] = True
                 frontend["_isUpdate"] = False
@@ -995,16 +1032,60 @@ async def parse_bulk_config(
         
         for backend in backends_data:
             existing = await conn.fetchrow("""
-                SELECT id, is_active FROM backends 
+                SELECT * FROM backends 
                 WHERE name = $1 AND cluster_id = $2
             """, backend["name"], request.cluster_id)
             
             if existing:
+                # Check if any field has actually changed (same logic as bulk-create)
+                has_changes = False
+                
+                if backend.get("balance_method") and backend["balance_method"] != existing["balance_method"]:
+                    has_changes = True
+                if backend.get("mode") and backend["mode"] != existing["mode"]:
+                    has_changes = True
+                if backend.get("health_check_uri") and backend["health_check_uri"] != existing["health_check_uri"]:
+                    has_changes = True
+                if backend.get("health_check_interval") and backend["health_check_interval"] != existing["health_check_interval"]:
+                    has_changes = True
+                if backend.get("health_check_expected_status") is not None and backend["health_check_expected_status"] != existing["health_check_expected_status"]:
+                    has_changes = True
+                if backend.get("fullconn") and backend["fullconn"] != existing["fullconn"]:
+                    has_changes = True
+                if backend.get("timeout_connect") and backend["timeout_connect"] != existing["timeout_connect"]:
+                    has_changes = True
+                if backend.get("timeout_server") and backend["timeout_server"] != existing["timeout_server"]:
+                    has_changes = True
+                if backend.get("timeout_queue") and backend["timeout_queue"] != existing["timeout_queue"]:
+                    has_changes = True
+                if backend.get("cookie_name") and backend["cookie_name"] != existing["cookie_name"]:
+                    has_changes = True
+                if backend.get("cookie_options") and backend["cookie_options"] != existing["cookie_options"]:
+                    has_changes = True
+                if backend.get("default_server_inter") and backend["default_server_inter"] != existing["default_server_inter"]:
+                    has_changes = True
+                if backend.get("default_server_fall") and backend["default_server_fall"] != existing["default_server_fall"]:
+                    has_changes = True
+                if backend.get("default_server_rise") and backend["default_server_rise"] != existing["default_server_rise"]:
+                    has_changes = True
+                if backend.get("request_headers") and backend["request_headers"] != existing["request_headers"]:
+                    has_changes = True
+                if backend.get("response_headers") and backend["response_headers"] != existing["response_headers"]:
+                    has_changes = True
+                if backend.get("options") and backend["options"] != existing.get("options"):
+                    has_changes = True
+                
+                # Check if entity is inactive (reactivation counts as change)
+                if not existing['is_active']:
+                    has_changes = True
+                
                 backend["_isNew"] = False
-                backend["_isUpdate"] = True
+                backend["_isUpdate"] = has_changes  # Only true if actual changes detected
                 backend["_existingId"] = existing['id']
                 backend["_isActive"] = existing['is_active']
-                update_backends += 1
+                
+                if has_changes:
+                    update_backends += 1
                 
                 # Check servers for this backend
                 for server in backend.get("servers", []):

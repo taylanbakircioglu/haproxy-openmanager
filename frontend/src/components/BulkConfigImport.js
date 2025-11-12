@@ -251,7 +251,11 @@ backend web-backend
             </Tooltip>
           );
         } else {
-          return <Tag color="default">-</Tag>;
+          return (
+            <Tooltip title="Frontend already exists with identical configuration - no changes will be made">
+              <Tag color="default">NO CHANGES</Tag>
+            </Tooltip>
+          );
         }
       }
     },
@@ -328,7 +332,11 @@ backend web-backend
             </Tooltip>
           );
         } else {
-          return <Tag color="default">-</Tag>;
+          return (
+            <Tooltip title="Backend already exists with identical configuration - no changes will be made">
+              <Tag color="default">NO CHANGES</Tag>
+            </Tooltip>
+          );
         }
       }
     },
