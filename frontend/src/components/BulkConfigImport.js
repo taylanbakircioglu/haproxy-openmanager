@@ -980,72 +980,208 @@ backend web-backend
                                 <Text strong>Frontend Configuration Details:</Text>
                                 <Descriptions size="small" bordered column={1} style={{ marginTop: 8 }}>
                                   {frontend.options && (
-                                    frontend._changes?.options ? (
-                                      <FieldChange
-                                        label="Frontend Options"
-                                        oldValue={frontend._changes.options.old}
-                                        newValue={frontend.options}
-                                        span={1}
-                                        isMultiline={true}
-                                      />
-                                    ) : (
-                                      <Descriptions.Item label="Frontend Options">
-                                        <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                    <Descriptions.Item 
+                                      label={
+                                        <span>
+                                          Frontend Options
+                                          {frontend._changes?.options && (
+                                            <Tag color="green" style={{ marginLeft: 8, fontSize: '10px' }}>
+                                              {frontend._changes.options.old ? 'CHANGED' : 'NEW'}
+                                            </Tag>
+                                          )}
+                                        </span>
+                                      }
+                                    >
+                                      {frontend._changes?.options && frontend._changes.options.old && (
+                                        <div style={{ 
+                                          marginBottom: 8, 
+                                          padding: '4px 8px', 
+                                          backgroundColor: '#fff1f0',
+                                          borderLeft: '3px solid #ff4d4f',
+                                          borderRadius: 2
+                                        }}>
+                                          <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
+                                          <br />
+                                          <Text delete code style={{ 
+                                            whiteSpace: 'pre-wrap', 
+                                            fontSize: '11px',
+                                            color: '#999' 
+                                          }}>
+                                            {frontend._changes.options.old}
+                                          </Text>
+                                        </div>
+                                      )}
+                                      <div style={frontend._changes?.options ? { 
+                                        padding: '4px 8px', 
+                                        backgroundColor: '#f6ffed',
+                                        borderLeft: '3px solid #52c41a',
+                                        borderRadius: 2
+                                      } : {}}>
+                                        {frontend._changes?.options && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
+                                        {frontend._changes?.options && <br />}
+                                        <Text code style={{ 
+                                          whiteSpace: 'pre-wrap', 
+                                          fontSize: '11px',
+                                          color: frontend._changes?.options ? '#52c41a' : 'inherit',
+                                          fontWeight: frontend._changes?.options ? 500 : 'normal'
+                                        }}>
                                           {frontend.options}
                                         </Text>
-                                      </Descriptions.Item>
-                                    )
+                                      </div>
+                                    </Descriptions.Item>
                                   )}
                                   {frontend.request_headers && (
-                                    frontend._changes?.request_headers ? (
-                                      <FieldChange
-                                        label="Request Headers"
-                                        oldValue={frontend._changes.request_headers.old}
-                                        newValue={frontend.request_headers}
-                                        span={1}
-                                        isMultiline={true}
-                                      />
-                                    ) : (
-                                      <Descriptions.Item label="Request Headers">
-                                        <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                    <Descriptions.Item 
+                                      label={
+                                        <span>
+                                          Request Headers
+                                          {frontend._changes?.request_headers && (
+                                            <Tag color="orange" style={{ marginLeft: 8, fontSize: '10px' }}>
+                                              CHANGED
+                                            </Tag>
+                                          )}
+                                        </span>
+                                      }
+                                    >
+                                      {frontend._changes?.request_headers && frontend._changes.request_headers.old && (
+                                        <div style={{ 
+                                          marginBottom: 8, 
+                                          padding: '4px 8px', 
+                                          backgroundColor: '#fff1f0',
+                                          borderLeft: '3px solid #ff4d4f',
+                                          borderRadius: 2
+                                        }}>
+                                          <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
+                                          <br />
+                                          <Text delete code style={{ 
+                                            whiteSpace: 'pre-wrap', 
+                                            fontSize: '11px',
+                                            color: '#999' 
+                                          }}>
+                                            {frontend._changes.request_headers.old}
+                                          </Text>
+                                        </div>
+                                      )}
+                                      <div style={frontend._changes?.request_headers ? { 
+                                        padding: '4px 8px', 
+                                        backgroundColor: '#f6ffed',
+                                        borderLeft: '3px solid #52c41a',
+                                        borderRadius: 2
+                                      } : {}}>
+                                        {frontend._changes?.request_headers && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
+                                        {frontend._changes?.request_headers && <br />}
+                                        <Text code style={{ 
+                                          whiteSpace: 'pre-wrap', 
+                                          fontSize: '11px',
+                                          color: frontend._changes?.request_headers ? '#52c41a' : 'inherit',
+                                          fontWeight: frontend._changes?.request_headers ? 500 : 'normal'
+                                        }}>
                                           {frontend.request_headers}
                                         </Text>
-                                      </Descriptions.Item>
-                                    )
+                                      </div>
+                                    </Descriptions.Item>
                                   )}
                                   {frontend.response_headers && (
-                                    frontend._changes?.response_headers ? (
-                                      <FieldChange
-                                        label="Response Headers"
-                                        oldValue={frontend._changes.response_headers.old}
-                                        newValue={frontend.response_headers}
-                                        span={1}
-                                        isMultiline={true}
-                                      />
-                                    ) : (
-                                      <Descriptions.Item label="Response Headers">
-                                        <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                    <Descriptions.Item 
+                                      label={
+                                        <span>
+                                          Response Headers
+                                          {frontend._changes?.response_headers && (
+                                            <Tag color="orange" style={{ marginLeft: 8, fontSize: '10px' }}>
+                                              CHANGED
+                                            </Tag>
+                                          )}
+                                        </span>
+                                      }
+                                    >
+                                      {frontend._changes?.response_headers && frontend._changes.response_headers.old && (
+                                        <div style={{ 
+                                          marginBottom: 8, 
+                                          padding: '4px 8px', 
+                                          backgroundColor: '#fff1f0',
+                                          borderLeft: '3px solid #ff4d4f',
+                                          borderRadius: 2
+                                        }}>
+                                          <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
+                                          <br />
+                                          <Text delete code style={{ 
+                                            whiteSpace: 'pre-wrap', 
+                                            fontSize: '11px',
+                                            color: '#999' 
+                                          }}>
+                                            {frontend._changes.response_headers.old}
+                                          </Text>
+                                        </div>
+                                      )}
+                                      <div style={frontend._changes?.response_headers ? { 
+                                        padding: '4px 8px', 
+                                        backgroundColor: '#f6ffed',
+                                        borderLeft: '3px solid #52c41a',
+                                        borderRadius: 2
+                                      } : {}}>
+                                        {frontend._changes?.response_headers && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
+                                        {frontend._changes?.response_headers && <br />}
+                                        <Text code style={{ 
+                                          whiteSpace: 'pre-wrap', 
+                                          fontSize: '11px',
+                                          color: frontend._changes?.response_headers ? '#52c41a' : 'inherit',
+                                          fontWeight: frontend._changes?.response_headers ? 500 : 'normal'
+                                        }}>
                                           {frontend.response_headers}
                                         </Text>
-                                      </Descriptions.Item>
-                                    )
+                                      </div>
+                                    </Descriptions.Item>
                                   )}
                                   {frontend.tcp_request_rules && (
-                                    frontend._changes?.tcp_request_rules ? (
-                                      <FieldChange
-                                        label="TCP Request Rules"
-                                        oldValue={frontend._changes.tcp_request_rules.old}
-                                        newValue={frontend.tcp_request_rules}
-                                        span={1}
-                                        isMultiline={true}
-                                      />
-                                    ) : (
-                                      <Descriptions.Item label="TCP Request Rules">
-                                        <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                    <Descriptions.Item 
+                                      label={
+                                        <span>
+                                          TCP Request Rules
+                                          {frontend._changes?.tcp_request_rules && (
+                                            <Tag color="orange" style={{ marginLeft: 8, fontSize: '10px' }}>
+                                              CHANGED
+                                            </Tag>
+                                          )}
+                                        </span>
+                                      }
+                                    >
+                                      {frontend._changes?.tcp_request_rules && frontend._changes.tcp_request_rules.old && (
+                                        <div style={{ 
+                                          marginBottom: 8, 
+                                          padding: '4px 8px', 
+                                          backgroundColor: '#fff1f0',
+                                          borderLeft: '3px solid #ff4d4f',
+                                          borderRadius: 2
+                                        }}>
+                                          <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
+                                          <br />
+                                          <Text delete code style={{ 
+                                            whiteSpace: 'pre-wrap', 
+                                            fontSize: '11px',
+                                            color: '#999' 
+                                          }}>
+                                            {frontend._changes.tcp_request_rules.old}
+                                          </Text>
+                                        </div>
+                                      )}
+                                      <div style={frontend._changes?.tcp_request_rules ? { 
+                                        padding: '4px 8px', 
+                                        backgroundColor: '#f6ffed',
+                                        borderLeft: '3px solid #52c41a',
+                                        borderRadius: 2
+                                      } : {}}>
+                                        {frontend._changes?.tcp_request_rules && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
+                                        {frontend._changes?.tcp_request_rules && <br />}
+                                        <Text code style={{ 
+                                          whiteSpace: 'pre-wrap', 
+                                          fontSize: '11px',
+                                          color: frontend._changes?.tcp_request_rules ? '#52c41a' : 'inherit',
+                                          fontWeight: frontend._changes?.tcp_request_rules ? 500 : 'normal'
+                                        }}>
                                           {frontend.tcp_request_rules}
                                         </Text>
-                                      </Descriptions.Item>
-                                    )
+                                      </div>
+                                    </Descriptions.Item>
                                   )}
                                   {frontend.acl_rules && frontend.acl_rules.length > 0 && (
                                     <Descriptions.Item label={`ACL Rules (${frontend.acl_rules.length})`}>
@@ -1122,83 +1258,161 @@ backend web-backend
                                           <Text code>{backend.cookie_options}</Text>
                                         </Descriptions.Item>
                                       )}
-                                      {(() => {
-                                        // DEBUG: Detailed logging for troubleshooting
-                                        console.group(`🔍 Backend Options Debug: ${backend.name}`);
-                                        console.log('backend.options:', backend.options);
-                                        console.log('backend.options type:', typeof backend.options);
-                                        console.log('backend.options length:', backend.options?.length);
-                                        console.log('backend._changes:', backend._changes);
-                                        console.log('backend._changes?.options:', backend._changes?.options);
-                                        console.log('Render decision:', backend._changes?.options ? 'FieldChange' : 'Descriptions.Item with NEW badge');
-                                        console.groupEnd();
-                                        
-                                        // Render logic
-                                        if (!backend.options) return null;
-                                        
-                                        if (backend._changes?.options) {
-                                          return (
-                                            <FieldChange
-                                              label="Backend Options"
-                                              oldValue={backend._changes.options.old}
-                                              newValue={backend.options}
-                                              span={2}
-                                              isMultiline={true}
-                                            />
-                                          );
-                                        } else {
-                                          return (
-                                            <Descriptions.Item 
-                                              label={
-                                                <span>
-                                                  Backend Options
-                                                  <Tag color="green" style={{ marginLeft: 8, fontSize: '10px' }}>
-                                                    NEW
-                                                  </Tag>
-                                                </span>
-                                              } 
-                                              span={2}
-                                            >
-                                              <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px', color: '#52c41a', fontWeight: 500 }}>
-                                                {backend.options}
+                                      {backend.options && (
+                                        <Descriptions.Item 
+                                          label={
+                                            <span>
+                                              Backend Options
+                                              {backend._changes?.options && (
+                                                <Tag color="green" style={{ marginLeft: 8, fontSize: '10px' }}>
+                                                  {backend._changes.options.old ? 'CHANGED' : 'NEW'}
+                                                </Tag>
+                                              )}
+                                            </span>
+                                          } 
+                                          span={2}
+                                        >
+                                          {backend._changes?.options && backend._changes.options.old && (
+                                            <div style={{ 
+                                              marginBottom: 8, 
+                                              padding: '4px 8px', 
+                                              backgroundColor: '#fff1f0',
+                                              borderLeft: '3px solid #ff4d4f',
+                                              borderRadius: 2
+                                            }}>
+                                              <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
+                                              <br />
+                                              <Text delete code style={{ 
+                                                whiteSpace: 'pre-wrap', 
+                                                fontSize: '11px',
+                                                color: '#999' 
+                                              }}>
+                                                {backend._changes.options.old}
                                               </Text>
-                                            </Descriptions.Item>
-                                          );
-                                        }
-                                      })()}
+                                            </div>
+                                          )}
+                                          <div style={backend._changes?.options ? { 
+                                            padding: '4px 8px', 
+                                            backgroundColor: '#f6ffed',
+                                            borderLeft: '3px solid #52c41a',
+                                            borderRadius: 2
+                                          } : {}}>
+                                            {backend._changes?.options && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
+                                            {backend._changes?.options && <br />}
+                                            <Text code style={{ 
+                                              whiteSpace: 'pre-wrap', 
+                                              fontSize: '11px',
+                                              color: backend._changes?.options ? '#52c41a' : 'inherit',
+                                              fontWeight: backend._changes?.options ? 500 : 'normal'
+                                            }}>
+                                              {backend.options}
+                                            </Text>
+                                          </div>
+                                        </Descriptions.Item>
+                                      )}
                                       {backend.request_headers && (
-                                        backend._changes?.request_headers ? (
-                                          <FieldChange
-                                            label="Request Headers"
-                                            oldValue={backend._changes.request_headers.old}
-                                            newValue={backend.request_headers}
-                                            span={2}
-                                            isMultiline={true}
-                                          />
-                                        ) : (
-                                          <Descriptions.Item label="Request Headers" span={2}>
-                                            <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                        <Descriptions.Item 
+                                          label={
+                                            <span>
+                                              Request Headers
+                                              {backend._changes?.request_headers && (
+                                                <Tag color="orange" style={{ marginLeft: 8, fontSize: '10px' }}>
+                                                  CHANGED
+                                                </Tag>
+                                              )}
+                                            </span>
+                                          } 
+                                          span={2}
+                                        >
+                                          {backend._changes?.request_headers && backend._changes.request_headers.old && (
+                                            <div style={{ 
+                                              marginBottom: 8, 
+                                              padding: '4px 8px', 
+                                              backgroundColor: '#fff1f0',
+                                              borderLeft: '3px solid #ff4d4f',
+                                              borderRadius: 2
+                                            }}>
+                                              <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
+                                              <br />
+                                              <Text delete code style={{ 
+                                                whiteSpace: 'pre-wrap', 
+                                                fontSize: '11px',
+                                                color: '#999' 
+                                              }}>
+                                                {backend._changes.request_headers.old}
+                                              </Text>
+                                            </div>
+                                          )}
+                                          <div style={backend._changes?.request_headers ? { 
+                                            padding: '4px 8px', 
+                                            backgroundColor: '#f6ffed',
+                                            borderLeft: '3px solid #52c41a',
+                                            borderRadius: 2
+                                          } : {}}>
+                                            {backend._changes?.request_headers && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
+                                            {backend._changes?.request_headers && <br />}
+                                            <Text code style={{ 
+                                              whiteSpace: 'pre-wrap', 
+                                              fontSize: '11px',
+                                              color: backend._changes?.request_headers ? '#52c41a' : 'inherit',
+                                              fontWeight: backend._changes?.request_headers ? 500 : 'normal'
+                                            }}>
                                               {backend.request_headers}
                                             </Text>
-                                          </Descriptions.Item>
-                                        )
+                                          </div>
+                                        </Descriptions.Item>
                                       )}
                                       {backend.response_headers && (
-                                        backend._changes?.response_headers ? (
-                                          <FieldChange
-                                            label="Response Headers"
-                                            oldValue={backend._changes.response_headers.old}
-                                            newValue={backend.response_headers}
-                                            span={2}
-                                            isMultiline={true}
-                                          />
-                                        ) : (
-                                          <Descriptions.Item label="Response Headers" span={2}>
-                                            <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+                                        <Descriptions.Item 
+                                          label={
+                                            <span>
+                                              Response Headers
+                                              {backend._changes?.response_headers && (
+                                                <Tag color="orange" style={{ marginLeft: 8, fontSize: '10px' }}>
+                                                  CHANGED
+                                                </Tag>
+                                              )}
+                                            </span>
+                                          } 
+                                          span={2}
+                                        >
+                                          {backend._changes?.response_headers && backend._changes.response_headers.old && (
+                                            <div style={{ 
+                                              marginBottom: 8, 
+                                              padding: '4px 8px', 
+                                              backgroundColor: '#fff1f0',
+                                              borderLeft: '3px solid #ff4d4f',
+                                              borderRadius: 2
+                                            }}>
+                                              <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
+                                              <br />
+                                              <Text delete code style={{ 
+                                                whiteSpace: 'pre-wrap', 
+                                                fontSize: '11px',
+                                                color: '#999' 
+                                              }}>
+                                                {backend._changes.response_headers.old}
+                                              </Text>
+                                            </div>
+                                          )}
+                                          <div style={backend._changes?.response_headers ? { 
+                                            padding: '4px 8px', 
+                                            backgroundColor: '#f6ffed',
+                                            borderLeft: '3px solid #52c41a',
+                                            borderRadius: 2
+                                          } : {}}>
+                                            {backend._changes?.response_headers && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
+                                            {backend._changes?.response_headers && <br />}
+                                            <Text code style={{ 
+                                              whiteSpace: 'pre-wrap', 
+                                              fontSize: '11px',
+                                              color: backend._changes?.response_headers ? '#52c41a' : 'inherit',
+                                              fontWeight: backend._changes?.response_headers ? 500 : 'normal'
+                                            }}>
                                               {backend.response_headers}
                                             </Text>
-                                          </Descriptions.Item>
-                                        )
+                                          </div>
+                                        </Descriptions.Item>
                                       )}
                                     </Descriptions>
                                   </div>
