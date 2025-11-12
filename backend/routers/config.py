@@ -9,6 +9,7 @@ from typing import Dict, List, Any, Optional
 import logging
 import os
 import re
+import json
 
 from utils.haproxy_validator import validate_haproxy_config, get_validation_summary
 from utils.config_templates import (
@@ -996,10 +997,11 @@ async def parse_bulk_config(
                     has_changes = True
                 if frontend.get("mode") and frontend["mode"] != existing["mode"]:
                     has_changes = True
-                if frontend.get("ssl_enabled") is not None and frontend["ssl_enabled"] != existing["ssl_enabled"]:
-                    has_changes = True
-                if frontend.get("ssl_port") and frontend["ssl_port"] != existing["ssl_port"]:
-                    has_changes = True
+                # MVP DECISION: SSL settings are NOT compared for change detection
+                # Bulk import preserves manual SSL configuration (ssl_enabled, ssl_certificate_ids, ssl_port)
+                # This aligns with bulk-create endpoint behavior (line 1588-1589)
+                # If SSL changes are detected in parse, they will be ignored in bulk-create anyway
+                # So we don't mark frontend as UPDATE for SSL-only changes
                 if frontend.get("timeout_client") and frontend["timeout_client"] != existing["timeout_client"]:
                     has_changes = True
                 if frontend.get("maxconn") and frontend["maxconn"] != existing["maxconn"]:
@@ -1012,6 +1014,19 @@ async def parse_bulk_config(
                     has_changes = True
                 if frontend.get("tcp_request_rules") and frontend["tcp_request_rules"] != existing["tcp_request_rules"]:
                     has_changes = True
+                
+                # Additional frontend fields (timeout_http_request, rate_limit, compression, log_separate, monitor_uri)
+                if frontend.get("timeout_http_request") and frontend["timeout_http_request"] != existing.get("timeout_http_request"):
+                    has_changes = True
+                if frontend.get("rate_limit") and frontend["rate_limit"] != existing.get("rate_limit"):
+                    has_changes = True
+                if "compression" in frontend and frontend["compression"] != existing.get("compression", False):
+                    has_changes = True
+                if "log_separate" in frontend and frontend["log_separate"] != existing.get("log_separate", False):
+                    has_changes = True
+                if frontend.get("monitor_uri") and frontend["monitor_uri"] != existing.get("monitor_uri"):
+                    has_changes = True
+                
                 # Note: acl_rules and use_backend_rules are not stored in frontends table, they're managed separately
                 
                 # Check if entity is inactive (reactivation counts as change)
