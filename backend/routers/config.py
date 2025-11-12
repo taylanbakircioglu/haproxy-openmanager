@@ -824,6 +824,7 @@ async def parse_bulk_config(
                 # Parser already changed verify to 'none' if ca-file was removed
                 # We need to restore it to 'required' if we find matching SSL
                 ssl_verify = server.ssl_verify
+                original_verify_was_required = False  # Track if original config had verify required
                 
                 # Check if this server originally had ca-file by looking for matching SSL name
                 # We'll parse it from the original config line if needed
@@ -832,6 +833,11 @@ async def parse_bulk_config(
                     if f"Server '{server.server_name}'" in warning and "ca-file" in warning:
                         # Extract SSL path from warning
                         ca_file_match = re.search(r"ca-file '([^']+)'", warning)
+                        
+                        # Check if original config had 'verify required'
+                        if "verify required" in warning.lower():
+                            original_verify_was_required = True
+                        
                         if ca_file_match:
                             ca_file_path = ca_file_match.group(1)
                             ssl_filename = os.path.basename(ca_file_path)
@@ -847,7 +853,12 @@ async def parse_bulk_config(
                                     'ssl_id': ssl_certificate_id
                                 })
                                 logger.info(f"BULK IMPORT SSL AUTO-ASSIGN: Server '{backend.name}/{server.server_name}' matched SSL '{ssl_name}' (ID: {ssl_certificate_id})")
-                                break
+                            else:
+                                # SSL certificate not found in database, but preserve original verify intent
+                                if original_verify_was_required:
+                                    ssl_verify = 'required'
+                                    logger.warning(f"BULK IMPORT SSL: Server '{backend.name}/{server.server_name}' has 'verify required' but SSL certificate '{ssl_name}' not found in database. Preserving 'required' for manual SSL assignment.")
+                            break
                 
                 # Get SSL certificate name for UI display
                 ssl_certificate_name = None

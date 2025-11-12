@@ -483,12 +483,19 @@ const BackendServers = () => {
 
   const handleEditBackend = (backend) => {
     setEditingBackend(backend);
+    
+    // Debug: Check if options field exists in backend object
+    console.log('🔍 BACKEND EDIT DEBUG: Raw backend data:', backend);
+    console.log('🔍 BACKEND EDIT DEBUG: Options field:', backend.options);
+    
     backendForm.setFieldsValue({
       ...backend,
       health_check_interval: backend.health_check_interval || 2000,
       timeout_connect: backend.timeout_connect || 10000,
       timeout_server: backend.timeout_server || 60000,
-      timeout_queue: backend.timeout_queue || 60000
+      timeout_queue: backend.timeout_queue || 60000,
+      // Explicitly set options to handle null/undefined cases
+      options: backend.options || ''
     });
     setBackendModalVisible(true);
   };

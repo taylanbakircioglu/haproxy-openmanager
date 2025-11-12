@@ -240,12 +240,16 @@ backend web-backend
     {
       title: 'Status',
       key: 'status',
-      width: 100,
+      width: 120,
       render: (_, record) => {
         if (record._isNew) {
-          return <Tag color="green">New</Tag>;
+          return <Tag color="green">NEW</Tag>;
         } else if (record._isUpdate) {
-          return <Tooltip title="Existing entity - will be checked for changes on confirm"><Tag color="blue">Existing</Tag></Tooltip>;
+          return (
+            <Tooltip title="Existing frontend - values will be compared and updated fields will be saved">
+              <Tag color="orange">UPDATE</Tag>
+            </Tooltip>
+          );
         } else {
           return <Tag color="default">-</Tag>;
         }
@@ -313,12 +317,16 @@ backend web-backend
     {
       title: 'Status',
       key: 'status',
-      width: 100,
+      width: 120,
       render: (_, record) => {
         if (record._isNew) {
-          return <Tag color="green">New</Tag>;
+          return <Tag color="green">NEW</Tag>;
         } else if (record._isUpdate) {
-          return <Tooltip title="Existing entity - will be checked for changes on confirm"><Tag color="blue">Existing</Tag></Tooltip>;
+          return (
+            <Tooltip title="Existing backend - values will be compared and updated fields will be saved">
+              <Tag color="orange">UPDATE</Tag>
+            </Tooltip>
+          );
         } else {
           return <Tag color="default">-</Tag>;
         }
