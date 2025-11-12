@@ -985,18 +985,23 @@ async def parse_bulk_config(
             """, frontend["name"], request.cluster_id)
             
             if existing:
-                # Check if any field has actually changed
+                # Check if any field has actually changed AND track which fields changed
                 has_changes = False
+                changes = {}  # Track field-level changes for UI highlighting
                 
                 # Compare all fields that can be updated
                 if frontend.get("bind_address") and frontend["bind_address"] != existing["bind_address"]:
                     has_changes = True
+                    changes["bind_address"] = {"old": existing["bind_address"], "new": frontend["bind_address"]}
                 if frontend.get("bind_port") and frontend["bind_port"] != existing["bind_port"]:
                     has_changes = True
+                    changes["bind_port"] = {"old": existing["bind_port"], "new": frontend["bind_port"]}
                 if frontend.get("default_backend") and frontend["default_backend"] != existing["default_backend"]:
                     has_changes = True
+                    changes["default_backend"] = {"old": existing["default_backend"], "new": frontend["default_backend"]}
                 if frontend.get("mode") and frontend["mode"] != existing["mode"]:
                     has_changes = True
+                    changes["mode"] = {"old": existing["mode"], "new": frontend["mode"]}
                 # MVP DECISION: SSL settings are NOT compared for change detection
                 # Bulk import preserves manual SSL configuration (ssl_enabled, ssl_certificate_ids, ssl_port)
                 # This aligns with bulk-create endpoint behavior (line 1588-1589)
@@ -1004,39 +1009,52 @@ async def parse_bulk_config(
                 # So we don't mark frontend as UPDATE for SSL-only changes
                 if frontend.get("timeout_client") and frontend["timeout_client"] != existing["timeout_client"]:
                     has_changes = True
+                    changes["timeout_client"] = {"old": existing["timeout_client"], "new": frontend["timeout_client"]}
                 if frontend.get("maxconn") and frontend["maxconn"] != existing["maxconn"]:
                     has_changes = True
+                    changes["maxconn"] = {"old": existing["maxconn"], "new": frontend["maxconn"]}
                 if frontend.get("request_headers") and frontend["request_headers"] != existing["request_headers"]:
                     has_changes = True
+                    changes["request_headers"] = {"old": existing["request_headers"], "new": frontend["request_headers"]}
                 if frontend.get("response_headers") and frontend["response_headers"] != existing["response_headers"]:
                     has_changes = True
+                    changes["response_headers"] = {"old": existing["response_headers"], "new": frontend["response_headers"]}
                 if frontend.get("options") and frontend["options"] != existing.get("options"):
                     has_changes = True
+                    changes["options"] = {"old": existing.get("options"), "new": frontend["options"]}
                 if frontend.get("tcp_request_rules") and frontend["tcp_request_rules"] != existing["tcp_request_rules"]:
                     has_changes = True
+                    changes["tcp_request_rules"] = {"old": existing["tcp_request_rules"], "new": frontend["tcp_request_rules"]}
                 
                 # Additional frontend fields (timeout_http_request, rate_limit, compression, log_separate, monitor_uri)
                 if frontend.get("timeout_http_request") and frontend["timeout_http_request"] != existing.get("timeout_http_request"):
                     has_changes = True
+                    changes["timeout_http_request"] = {"old": existing.get("timeout_http_request"), "new": frontend["timeout_http_request"]}
                 if frontend.get("rate_limit") and frontend["rate_limit"] != existing.get("rate_limit"):
                     has_changes = True
+                    changes["rate_limit"] = {"old": existing.get("rate_limit"), "new": frontend["rate_limit"]}
                 if "compression" in frontend and frontend["compression"] != existing.get("compression", False):
                     has_changes = True
+                    changes["compression"] = {"old": existing.get("compression", False), "new": frontend["compression"]}
                 if "log_separate" in frontend and frontend["log_separate"] != existing.get("log_separate", False):
                     has_changes = True
+                    changes["log_separate"] = {"old": existing.get("log_separate", False), "new": frontend["log_separate"]}
                 if frontend.get("monitor_uri") and frontend["monitor_uri"] != existing.get("monitor_uri"):
                     has_changes = True
+                    changes["monitor_uri"] = {"old": existing.get("monitor_uri"), "new": frontend["monitor_uri"]}
                 
                 # Note: acl_rules and use_backend_rules are not stored in frontends table, they're managed separately
                 
                 # Check if entity is inactive (reactivation counts as change)
                 if not existing['is_active']:
                     has_changes = True
+                    changes["is_active"] = {"old": False, "new": True}
                 
                 frontend["_isNew"] = False
                 frontend["_isUpdate"] = has_changes  # Only true if actual changes detected
                 frontend["_existingId"] = existing['id']
                 frontend["_isActive"] = existing['is_active']
+                frontend["_changes"] = changes if changes else None  # Field-level changes for UI
                 
                 if has_changes:
                     update_frontends += 1
@@ -1052,52 +1070,72 @@ async def parse_bulk_config(
             """, backend["name"], request.cluster_id)
             
             if existing:
-                # Check if any field has actually changed (same logic as bulk-create)
+                # Check if any field has actually changed AND track which fields changed
                 has_changes = False
+                changes = {}  # Track field-level changes for UI highlighting
                 
                 if backend.get("balance_method") and backend["balance_method"] != existing["balance_method"]:
                     has_changes = True
+                    changes["balance_method"] = {"old": existing["balance_method"], "new": backend["balance_method"]}
                 if backend.get("mode") and backend["mode"] != existing["mode"]:
                     has_changes = True
+                    changes["mode"] = {"old": existing["mode"], "new": backend["mode"]}
                 if backend.get("health_check_uri") and backend["health_check_uri"] != existing["health_check_uri"]:
                     has_changes = True
+                    changes["health_check_uri"] = {"old": existing["health_check_uri"], "new": backend["health_check_uri"]}
                 if backend.get("health_check_interval") and backend["health_check_interval"] != existing["health_check_interval"]:
                     has_changes = True
+                    changes["health_check_interval"] = {"old": existing["health_check_interval"], "new": backend["health_check_interval"]}
                 if backend.get("health_check_expected_status") is not None and backend["health_check_expected_status"] != existing["health_check_expected_status"]:
                     has_changes = True
+                    changes["health_check_expected_status"] = {"old": existing["health_check_expected_status"], "new": backend["health_check_expected_status"]}
                 if backend.get("fullconn") and backend["fullconn"] != existing["fullconn"]:
                     has_changes = True
+                    changes["fullconn"] = {"old": existing["fullconn"], "new": backend["fullconn"]}
                 if backend.get("timeout_connect") and backend["timeout_connect"] != existing["timeout_connect"]:
                     has_changes = True
+                    changes["timeout_connect"] = {"old": existing["timeout_connect"], "new": backend["timeout_connect"]}
                 if backend.get("timeout_server") and backend["timeout_server"] != existing["timeout_server"]:
                     has_changes = True
+                    changes["timeout_server"] = {"old": existing["timeout_server"], "new": backend["timeout_server"]}
                 if backend.get("timeout_queue") and backend["timeout_queue"] != existing["timeout_queue"]:
                     has_changes = True
+                    changes["timeout_queue"] = {"old": existing["timeout_queue"], "new": backend["timeout_queue"]}
                 if backend.get("cookie_name") and backend["cookie_name"] != existing["cookie_name"]:
                     has_changes = True
+                    changes["cookie_name"] = {"old": existing["cookie_name"], "new": backend["cookie_name"]}
                 if backend.get("cookie_options") and backend["cookie_options"] != existing["cookie_options"]:
                     has_changes = True
+                    changes["cookie_options"] = {"old": existing["cookie_options"], "new": backend["cookie_options"]}
                 if backend.get("default_server_inter") and backend["default_server_inter"] != existing["default_server_inter"]:
                     has_changes = True
+                    changes["default_server_inter"] = {"old": existing["default_server_inter"], "new": backend["default_server_inter"]}
                 if backend.get("default_server_fall") and backend["default_server_fall"] != existing["default_server_fall"]:
                     has_changes = True
+                    changes["default_server_fall"] = {"old": existing["default_server_fall"], "new": backend["default_server_fall"]}
                 if backend.get("default_server_rise") and backend["default_server_rise"] != existing["default_server_rise"]:
                     has_changes = True
+                    changes["default_server_rise"] = {"old": existing["default_server_rise"], "new": backend["default_server_rise"]}
                 if backend.get("request_headers") and backend["request_headers"] != existing["request_headers"]:
                     has_changes = True
+                    changes["request_headers"] = {"old": existing["request_headers"], "new": backend["request_headers"]}
                 if backend.get("response_headers") and backend["response_headers"] != existing["response_headers"]:
                     has_changes = True
+                    changes["response_headers"] = {"old": existing["response_headers"], "new": backend["response_headers"]}
                 if backend.get("options") and backend["options"] != existing.get("options"):
                     has_changes = True
+                    changes["options"] = {"old": existing.get("options"), "new": backend["options"]}
                 
                 # Check if entity is inactive (reactivation counts as change)
                 if not existing['is_active']:
                     has_changes = True
+                    changes["is_active"] = {"old": False, "new": True}
                 
                 backend["_isNew"] = False
                 backend["_isUpdate"] = has_changes  # Only true if actual changes detected
                 backend["_existingId"] = existing['id']
                 backend["_isActive"] = existing['is_active']
+                backend["_changes"] = changes if changes else None  # Field-level changes for UI
                 
                 if has_changes:
                     update_backends += 1

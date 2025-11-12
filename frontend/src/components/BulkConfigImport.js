@@ -31,6 +31,66 @@ const { TextArea } = Input;
 const { Title, Text, Paragraph } = Typography;
 const { Panel } = Collapse;
 
+// Helper component to display field changes (old vs new)
+const FieldChange = ({ label, oldValue, newValue, span = 2, isMultiline = false }) => {
+  const hasChange = oldValue !== newValue;
+  const isNew = !oldValue && newValue;
+  
+  return (
+    <Descriptions.Item 
+      label={
+        <span>
+          {label}
+          {hasChange && (
+            <Tag color={isNew ? "green" : "orange"} style={{ marginLeft: 8, fontSize: '10px' }}>
+              {isNew ? "NEW" : "CHANGED"}
+            </Tag>
+          )}
+        </span>
+      } 
+      span={span}
+    >
+      <div style={{ position: 'relative' }}>
+        {hasChange && oldValue && (
+          <div style={{ 
+            marginBottom: 8, 
+            padding: '4px 8px', 
+            backgroundColor: '#fff1f0',
+            borderLeft: '3px solid #ff4d4f',
+            borderRadius: 2
+          }}>
+            <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
+            <br />
+            <Text delete code={!isMultiline} style={{ 
+              whiteSpace: isMultiline ? 'pre-wrap' : 'normal', 
+              fontSize: '11px',
+              color: '#999' 
+            }}>
+              {oldValue || 'null'}
+            </Text>
+          </div>
+        )}
+        <div style={hasChange ? { 
+          padding: '4px 8px', 
+          backgroundColor: '#f6ffed',
+          borderLeft: '3px solid #52c41a',
+          borderRadius: 2
+        } : {}}>
+          {hasChange && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
+          {hasChange && <br />}
+          <Text code={!isMultiline} strong={hasChange} style={{ 
+            whiteSpace: isMultiline ? 'pre-wrap' : 'normal', 
+            fontSize: '11px',
+            color: hasChange ? '#52c41a' : 'inherit'
+          }}>
+            {newValue}
+          </Text>
+        </div>
+      </div>
+    </Descriptions.Item>
+  );
+};
+
 const BulkConfigImport = () => {
   const { selectedCluster } = useContext(ClusterContext);
   const [configContent, setConfigContent] = useState('');
@@ -917,32 +977,40 @@ backend web-backend
                                 <Text strong>Frontend Configuration Details:</Text>
                                 <Descriptions size="small" bordered column={1} style={{ marginTop: 8 }}>
                                   {frontend.options && (
-                                    <Descriptions.Item label="Frontend Options">
-                                      <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                        {frontend.options}
-                                      </Text>
-                                    </Descriptions.Item>
+                                    <FieldChange
+                                      label="Frontend Options"
+                                      oldValue={frontend._changes?.options?.old}
+                                      newValue={frontend.options}
+                                      span={1}
+                                      isMultiline={true}
+                                    />
                                   )}
                                   {frontend.request_headers && (
-                                    <Descriptions.Item label="Request Headers">
-                                      <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                        {frontend.request_headers}
-                                      </Text>
-                                    </Descriptions.Item>
+                                    <FieldChange
+                                      label="Request Headers"
+                                      oldValue={frontend._changes?.request_headers?.old}
+                                      newValue={frontend.request_headers}
+                                      span={1}
+                                      isMultiline={true}
+                                    />
                                   )}
                                   {frontend.response_headers && (
-                                    <Descriptions.Item label="Response Headers">
-                                      <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                        {frontend.response_headers}
-                                      </Text>
-                                    </Descriptions.Item>
+                                    <FieldChange
+                                      label="Response Headers"
+                                      oldValue={frontend._changes?.response_headers?.old}
+                                      newValue={frontend.response_headers}
+                                      span={1}
+                                      isMultiline={true}
+                                    />
                                   )}
                                   {frontend.tcp_request_rules && (
-                                    <Descriptions.Item label="TCP Request Rules">
-                                      <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                        {frontend.tcp_request_rules}
-                                      </Text>
-                                    </Descriptions.Item>
+                                    <FieldChange
+                                      label="TCP Request Rules"
+                                      oldValue={frontend._changes?.tcp_request_rules?.old}
+                                      newValue={frontend.tcp_request_rules}
+                                      span={1}
+                                      isMultiline={true}
+                                    />
                                   )}
                                   {frontend.acl_rules && frontend.acl_rules.length > 0 && (
                                     <Descriptions.Item label={`ACL Rules (${frontend.acl_rules.length})`}>
@@ -1020,25 +1088,31 @@ backend web-backend
                                         </Descriptions.Item>
                                       )}
                                       {backend.options && (
-                                        <Descriptions.Item label="Backend Options" span={2}>
-                                          <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                            {backend.options}
-                                          </Text>
-                                        </Descriptions.Item>
+                                        <FieldChange
+                                          label="Backend Options"
+                                          oldValue={backend._changes?.options?.old}
+                                          newValue={backend.options}
+                                          span={2}
+                                          isMultiline={true}
+                                        />
                                       )}
                                       {backend.request_headers && (
-                                        <Descriptions.Item label="Request Headers" span={2}>
-                                          <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                            {backend.request_headers}
-                                          </Text>
-                                        </Descriptions.Item>
+                                        <FieldChange
+                                          label="Request Headers"
+                                          oldValue={backend._changes?.request_headers?.old}
+                                          newValue={backend.request_headers}
+                                          span={2}
+                                          isMultiline={true}
+                                        />
                                       )}
                                       {backend.response_headers && (
-                                        <Descriptions.Item label="Response Headers" span={2}>
-                                          <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
-                                            {backend.response_headers}
-                                          </Text>
-                                        </Descriptions.Item>
+                                        <FieldChange
+                                          label="Response Headers"
+                                          oldValue={backend._changes?.response_headers?.old}
+                                          newValue={backend.response_headers}
+                                          span={2}
+                                          isMultiline={true}
+                                        />
                                       )}
                                     </Descriptions>
                                   </div>
