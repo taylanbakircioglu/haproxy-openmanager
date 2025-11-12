@@ -38,6 +38,7 @@ class BackendConfig(BaseModel):
     timeout_connect: Optional[int] = 10000
     timeout_server: Optional[int] = 60000
     timeout_queue: Optional[int] = 60000
+    options: Optional[str] = None
     servers: List[ServerConfig] = []
 
     @validator('health_check_interval', 'timeout_connect', 'timeout_server', 'timeout_queue', 'fullconn')
@@ -70,6 +71,7 @@ class BackendConfigUpdate(BaseModel):
     timeout_connect: Optional[int] = None
     timeout_server: Optional[int] = None
     timeout_queue: Optional[int] = None
+    options: Optional[str] = None
     servers: Optional[List[ServerConfig]] = None
 
     @validator('health_check_interval', 'timeout_connect', 'timeout_server', 'timeout_queue', 'fullconn')

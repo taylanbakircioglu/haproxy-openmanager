@@ -1645,6 +1645,26 @@ http-response del-header Server`}
               <Row gutter={16}>
                 <Col span={24}>
                   <Form.Item
+                    name="options"
+                    label="Frontend Options"
+                    extra="HAProxy frontend options (one per line)"
+                    tooltip="Examples: option httplog, option forwardfor, option dontlognull, option http-keep-alive"
+                  >
+                    <TextArea
+                      rows={4}
+                      placeholder={`Examples:
+option httplog
+option forwardfor
+option dontlognull
+option http-keep-alive`}
+                    />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Row gutter={16}>
+                <Col span={24}>
+                  <Form.Item
                     name="tcp_request_rules"
                     label="TCP Request Rules (TCP Mode Only)"
                     extra="TCP-level request inspection and filtering rules"

@@ -23,6 +23,7 @@ class FrontendConfig(BaseModel):
     use_backend_rules: Any = []  # Changed from Optional[str] to Any for list support
     request_headers: Optional[str] = None
     response_headers: Optional[str] = None
+    options: Optional[str] = None
     tcp_request_rules: Optional[str] = None
     timeout_client: Optional[int] = None
     timeout_http_request: Optional[int] = None

@@ -1779,6 +1779,21 @@ const BackendServers = () => {
             </Col>
           </Row>
 
+          <Row gutter={16}>
+            <Col span={24}>
+              <Form.Item
+                name="options"
+                label="Backend Options"
+                tooltip="HAProxy backend options (one per line). Examples: option http-keep-alive, option forwardfor, option redispatch"
+              >
+                <Input.TextArea 
+                  rows={4} 
+                  placeholder="e.g., option http-keep-alive&#10;option forwardfor&#10;option redispatch" 
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+
           <Form.Item style={{ marginBottom: 0, textAlign: 'right' }}>
             <Space>
               <Button onClick={() => setBackendModalVisible(false)}>

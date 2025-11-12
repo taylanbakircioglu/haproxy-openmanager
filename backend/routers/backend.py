@@ -184,7 +184,7 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
                     SELECT id, name, balance_method, mode, health_check_uri, 
                            health_check_interval, health_check_expected_status, fullconn,
                            cookie_name, cookie_options, default_server_inter, default_server_fall, default_server_rise,
-                           request_headers, response_headers,
+                           request_headers, response_headers, options,
                            is_active, created_at, updated_at, cluster_id, last_config_status,
                            timeout_connect, timeout_server, timeout_queue
                     FROM backends WHERE cluster_id = $1 ORDER BY name
@@ -194,7 +194,7 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
                     SELECT id, name, balance_method, mode, health_check_uri, 
                            health_check_interval, health_check_expected_status, fullconn,
                            cookie_name, cookie_options, default_server_inter, default_server_fall, default_server_rise,
-                           request_headers, response_headers,
+                           request_headers, response_headers, options,
                            is_active, created_at, updated_at, cluster_id, last_config_status,
                            timeout_connect, timeout_server, timeout_queue
                     FROM backends WHERE cluster_id = $1 AND is_active = TRUE ORDER BY name
@@ -205,7 +205,7 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
                     SELECT id, name, balance_method, mode, health_check_uri, 
                            health_check_interval, health_check_expected_status, fullconn,
                            cookie_name, cookie_options, default_server_inter, default_server_fall, default_server_rise,
-                           request_headers, response_headers,
+                           request_headers, response_headers, options,
                            is_active, created_at, updated_at, cluster_id, last_config_status,
                            timeout_connect, timeout_server, timeout_queue
                     FROM backends ORDER BY name
@@ -215,7 +215,7 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
                     SELECT id, name, balance_method, mode, health_check_uri, 
                            health_check_interval, health_check_expected_status, fullconn,
                            cookie_name, cookie_options, default_server_inter, default_server_fall, default_server_rise,
-                           request_headers, response_headers,
+                           request_headers, response_headers, options,
                            is_active, created_at, updated_at, cluster_id, last_config_status,
                            timeout_connect, timeout_server, timeout_queue
                     FROM backends WHERE is_active = TRUE ORDER BY name
@@ -446,14 +446,14 @@ async def create_backend(backend: BackendConfig, authorization: str = Header(Non
             INSERT INTO backends (name, balance_method, mode, health_check_uri, health_check_interval, 
                                 health_check_expected_status, fullconn, cookie_name, cookie_options,
                                 default_server_inter, default_server_fall, default_server_rise,
-                                request_headers, response_headers,
+                                request_headers, response_headers, options,
                                 timeout_connect, timeout_server, timeout_queue, cluster_id) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING id
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id
         """, backend.name, backend.balance_method, backend.mode, 
             backend.health_check_uri, backend.health_check_interval,
             backend.health_check_expected_status, backend.fullconn, backend.cookie_name, backend.cookie_options,
             backend.default_server_inter, backend.default_server_fall, backend.default_server_rise,
-            backend.request_headers, backend.response_headers,
+            backend.request_headers, backend.response_headers, backend.options,
             backend.timeout_connect, backend.timeout_server, backend.timeout_queue, backend.cluster_id)
         
         # If cluster_id provided, create new config version for agents
@@ -746,7 +746,7 @@ async def update_backend(backend_id: int, backend_update: BackendConfigUpdate, r
             if field in ['name', 'balance_method', 'mode', 'health_check_uri', 'health_check_interval', 
                          'health_check_expected_status', 'fullconn', 'cookie_name', 'cookie_options',
                          'default_server_inter', 'default_server_fall', 'default_server_rise',
-                         'request_headers', 'response_headers', 'timeout_connect', 'timeout_server', 'timeout_queue']:
+                         'request_headers', 'response_headers', 'options', 'timeout_connect', 'timeout_server', 'timeout_queue']:
                 update_fields.append(f"{field} = ${param_idx}")
                 update_values.append(value)
                 param_idx += 1

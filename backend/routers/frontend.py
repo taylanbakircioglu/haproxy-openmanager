@@ -145,7 +145,7 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                     SELECT id, name, bind_address, bind_port, default_backend, mode, 
                            ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
                            acl_rules, redirect_rules, use_backend_rules,
-                           request_headers, response_headers, tcp_request_rules,
+                           request_headers, response_headers, options, tcp_request_rules,
                            timeout_client, timeout_http_request,
                            rate_limit, compression, log_separate, monitor_uri,
                            maxconn, is_active, created_at, updated_at, cluster_id, last_config_status
@@ -160,7 +160,7 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                     SELECT id, name, bind_address, bind_port, default_backend, mode, 
                            ssl_enabled, ssl_cert_path, ssl_cert, ssl_verify,
                            acl_rules, redirect_rules, use_backend_rules,
-                           request_headers, response_headers, tcp_request_rules,
+                           request_headers, response_headers, options, tcp_request_rules,
                            timeout_client, timeout_http_request,
                            rate_limit, compression, log_separate, monitor_uri,
                            maxconn, is_active, created_at, updated_at, cluster_id, last_config_status
@@ -188,7 +188,7 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                         SELECT id, name, bind_address, bind_port, default_backend, mode,
                                ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
                                acl_rules, redirect_rules, use_backend_rules,
-                               request_headers, response_headers, tcp_request_rules,
+                               request_headers, response_headers, options, tcp_request_rules,
                                timeout_client, timeout_http_request,
                                rate_limit, compression, log_separate, monitor_uri,
                                maxconn, is_active, created_at, updated_at, cluster_id, last_config_status
@@ -199,7 +199,7 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                         SELECT id, name, bind_address, bind_port, default_backend, mode,
                                ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
                                acl_rules, redirect_rules, use_backend_rules,
-                               request_headers, response_headers, tcp_request_rules,
+                               request_headers, response_headers, options, tcp_request_rules,
                                timeout_client, timeout_http_request,
                                rate_limit, compression, log_separate, monitor_uri,
                                maxconn, is_active, created_at, updated_at, cluster_id, last_config_status
@@ -213,7 +213,7 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                         SELECT id, name, bind_address, bind_port, default_backend, mode,
                                ssl_enabled, ssl_cert_path, ssl_cert, ssl_verify,
                                acl_rules, redirect_rules, use_backend_rules,
-                               request_headers, response_headers, tcp_request_rules,
+                               request_headers, response_headers, options, tcp_request_rules,
                                timeout_client, timeout_http_request,
                                rate_limit, compression, log_separate, monitor_uri,
                                maxconn, is_active, created_at, updated_at, cluster_id, last_config_status
@@ -224,7 +224,7 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                         SELECT id, name, bind_address, bind_port, default_backend, mode,
                                ssl_enabled, ssl_cert_path, ssl_cert, ssl_verify,
                                acl_rules, redirect_rules, use_backend_rules,
-                               request_headers, response_headers, tcp_request_rules,
+                               request_headers, response_headers, options, tcp_request_rules,
                                timeout_client, timeout_http_request,
                                rate_limit, compression, log_separate, monitor_uri,
                                maxconn, is_active, created_at, updated_at, cluster_id, last_config_status
@@ -382,16 +382,16 @@ async def create_frontend(frontend: FrontendConfig, request: Request, authorizat
                 name, bind_address, bind_port, default_backend, mode, 
                 ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
                 acl_rules, redirect_rules, use_backend_rules,
-                request_headers, response_headers, tcp_request_rules, timeout_client, timeout_http_request,
+                request_headers, response_headers, options, tcp_request_rules, timeout_client, timeout_http_request,
                 rate_limit, compression, log_separate, monitor_uri,
                 cluster_id, maxconn, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, CURRENT_TIMESTAMP) 
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, CURRENT_TIMESTAMP) 
             RETURNING id
         """, frontend.name, frontend.bind_address, frontend.bind_port, 
             frontend.default_backend, frontend.mode, frontend.ssl_enabled,
             frontend.ssl_certificate_id, ssl_cert_ids_json, frontend.ssl_port, frontend.ssl_cert_path, frontend.ssl_cert, frontend.ssl_verify,
             json.dumps(frontend.acl_rules or []), json.dumps(frontend.redirect_rules or []), json.dumps(frontend.use_backend_rules or []),
-            frontend.request_headers, frontend.response_headers, frontend.tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
+            frontend.request_headers, frontend.response_headers, frontend.options, frontend.tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
             frontend.rate_limit, frontend.compression, frontend.log_separate, frontend.monitor_uri,
             frontend.cluster_id, frontend.maxconn)
         
@@ -630,15 +630,15 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
                 default_backend = $4, mode = $5, ssl_enabled = $6,
                 ssl_certificate_id = $7, ssl_certificate_ids = $8, ssl_port = $9, ssl_cert_path = $10, ssl_cert = $11, ssl_verify = $12,
                 acl_rules = $13, redirect_rules = $14, use_backend_rules = $15,
-                request_headers = $16, response_headers = $17, tcp_request_rules = $18, timeout_client = $19, timeout_http_request = $20,
-                rate_limit = $21, compression = $22, log_separate = $23, monitor_uri = $24,
-                cluster_id = $25, maxconn = $26, updated_at = CURRENT_TIMESTAMP
-            WHERE id = $27
+                request_headers = $16, response_headers = $17, options = $18, tcp_request_rules = $19, timeout_client = $20, timeout_http_request = $21,
+                rate_limit = $22, compression = $23, log_separate = $24, monitor_uri = $25,
+                cluster_id = $26, maxconn = $27, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $28
         """, frontend.name, frontend.bind_address, frontend.bind_port, 
             frontend.default_backend, frontend.mode, ssl_enabled,
             ssl_certificate_id, ssl_cert_ids_json, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
             json.dumps(frontend.acl_rules or []), json.dumps(frontend.redirect_rules or []), json.dumps(frontend.use_backend_rules or []),
-            frontend.request_headers, frontend.response_headers, frontend.tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
+            frontend.request_headers, frontend.response_headers, frontend.options, frontend.tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
             frontend.rate_limit, frontend.compression, frontend.log_separate, frontend.monitor_uri,
             frontend.cluster_id, frontend.maxconn, frontend_id)
             

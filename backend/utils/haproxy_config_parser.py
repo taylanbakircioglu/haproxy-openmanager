@@ -47,6 +47,7 @@ class ParsedBackend:
     default_server_rise: Optional[int] = None  # Default rise value for all servers
     request_headers: Optional[str] = None  # HTTP request headers (backend level)
     response_headers: Optional[str] = None  # HTTP response headers (backend level)
+    options: Optional[str] = None  # HAProxy backend options (option http-keep-alive, option forwardfor, etc.)
     timeout_connect: Optional[int] = 10000
     timeout_server: Optional[int] = 60000
     timeout_queue: Optional[int] = 60000
@@ -83,6 +84,7 @@ class ParsedFrontend:
     redirect_rules: Optional[list] = None
     request_headers: Optional[str] = None
     response_headers: Optional[str] = None
+    options: Optional[str] = None  # HAProxy frontend options (option httplog, option forwardfor, etc.)
     tcp_request_rules: Optional[str] = None  # TCP request directives (for TCP mode)
 
 
@@ -228,9 +230,10 @@ class HAProxyConfigParser:
             frontend = ParsedFrontend(name=name)
             ssl_cert_found = False
             
-            # Collect HTTP headers, ACL rules, use_backend rules, and TCP rules
+            # Collect HTTP headers, ACL rules, use_backend rules, TCP rules, and options
             request_headers_list = []
             response_headers_list = []
+            options_list = []
             acl_rules_list = []
             use_backend_rules_list = []
             tcp_request_rules_list = []
@@ -305,6 +308,35 @@ class HAProxyConfigParser:
                 maxconn_match = re.match(r'^maxconn\s+(\d+)', line, re.IGNORECASE)
                 if maxconn_match:
                     frontend.maxconn = int(maxconn_match.group(1))
+                
+                # Parse options (httplog, forwardfor, etc.) - NEW for frontend support
+                if line.startswith('option '):
+                    # Validate option directive - check for known HAProxy options
+                    option_match = re.match(r'^option\s+(\S+)', line, re.IGNORECASE)
+                    if option_match:
+                        option_name = option_match.group(1)
+                        # List of valid HAProxy frontend options
+                        valid_options = [
+                            'httplog', 'tcplog', 'dontlognull', 'http-keep-alive', 'http-server-close',
+                            'forwardfor', 'redispatch', 'http-use-proxy-header', 'httpchk', 'tcp-check',
+                            'contstats', 'http-pretend-keepalive', 'logasap', 'nolinger', 'persist',
+                            'prefer-last-server', 'splice-auto', 'splice-request', 'splice-response',
+                            'transparent', 'abortonclose', 'allbackups', 'checkcache', 'clitcpka',
+                            'srvtcpka', 'http-no-delay', 'socket-stats', 'tcp-smart-accept',
+                            'tcp-smart-connect', 'independant-streams', 'log-separate-errors',
+                            'log-health-checks', 'accept-invalid-http-request', 'accept-invalid-http-response'
+                        ]
+                        
+                        if option_name not in valid_options:
+                            # Unknown/invalid option - add warning but still collect it
+                            self.warnings.append(
+                                f"Frontend '{name}': Unknown or invalid option '{option_name}' detected. "
+                                "Please verify this directive is supported by your HAProxy version."
+                            )
+                        
+                        # Collect option for frontend.options field
+                        options_list.append(line.strip())
+                    continue  # Skip options - don't add to request_headers
                 
                 # Parse HTTP request headers
                 if line.startswith('http-request '):
@@ -394,12 +426,16 @@ class HAProxyConfigParser:
                 if line.startswith('tcp-request '):
                     tcp_request_rules_list.append(line)
             
-            # Combine collected headers and rules
+            # Combine collected headers, rules, and options
             if request_headers_list:
                 frontend.request_headers = '\n'.join(request_headers_list)
             
             if response_headers_list:
                 frontend.response_headers = '\n'.join(response_headers_list)
+            
+            # NEW: Assign collected options to frontend
+            if options_list:
+                frontend.options = '\n'.join(options_list)
             
             if acl_rules_list:
                 frontend.acl_rules = acl_rules_list
@@ -422,9 +458,10 @@ class HAProxyConfigParser:
         try:
             backend = ParsedBackend(name=name, servers=[])
             
-            # Collect HTTP headers
+            # Collect HTTP headers and options
             request_headers_list = []
             response_headers_list = []
+            options_list = []
 
             for line in lines:
                 # Parse mode
@@ -495,9 +532,7 @@ class HAProxyConfigParser:
                 
                 # Parse options (http-keep-alive, tcp-check, etc.)
                 # Note: option httpchk is handled separately above
-                # CRITICAL FIX: Do NOT add option directives to request_headers
-                # Options are separate HAProxy config directives, not HTTP headers
-                # They are skipped during bulk import as they need special handling
+                # NEW: Collect options for backend.options field
                 if line.startswith('option ') and 'httpchk' not in line:
                     # Validate option directive - check for known HAProxy options
                     option_match = re.match(r'^option\s+(\S+)', line, re.IGNORECASE)
@@ -516,19 +551,15 @@ class HAProxyConfigParser:
                         ]
                         
                         if option_name not in valid_options:
-                            # Unknown/invalid option - add warning and skip
+                            # Unknown/invalid option - add warning but still collect it
                             self.warnings.append(
-                                f"Backend '{name}': Unknown or invalid option '{option_name}' detected and skipped. "
+                                f"Backend '{name}': Unknown or invalid option '{option_name}' detected. "
                                 "Please verify this directive is supported by your HAProxy version."
                             )
-                        else:
-                            # Valid option but skip it - bulk import doesn't support custom options yet
-                            self.warnings.append(
-                                f"Backend '{name}': HAProxy option '{option_name}' detected and skipped. "
-                                f"Custom HAProxy options are not supported in bulk import. "
-                                f"Configure options manually after import if needed."
-                            )
-                    continue  # Always skip options - don't add to request_headers
+                        
+                        # Collect option for backend.options field
+                        options_list.append(line.strip())
+                    continue  # Skip options - don't add to request_headers
                 
                 # Parse HTTP request headers
                 if line.startswith('http-request '):
@@ -607,6 +638,10 @@ class HAProxyConfigParser:
                     
                     logger.warning(f"Backend '{name}': Excluded {len(portless_servers)} portless servers (TCP mode requires ports)")
 
+            # Assign collected options to backend (NEW)
+            if options_list:
+                backend.options = '\n'.join(options_list)
+            
             # DNS HOSTNAME DETECTION: Warn if servers use hostnames instead of IPs
             if backend.servers:
                 hostname_servers = []

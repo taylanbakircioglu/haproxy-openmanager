@@ -282,6 +282,14 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             if frontend.get('monitor_uri'):
                 config_lines.append(f"    monitor-uri {frontend['monitor_uri']}")
             
+            # Frontend Options (NEW: option httplog, option forwardfor, etc.)
+            if frontend.get('options'):
+                for line in frontend['options'].split('\n'):
+                    if line.strip():
+                        # Lines are complete HAProxy option directives
+                        # Examples: "option httplog", "option forwardfor", "option dontlognull"
+                        config_lines.append(f"    {line.strip()}")
+            
             # Request Headers (includes options, http-request directives - already formatted)
             if frontend.get('request_headers'):
                 for line in frontend['request_headers'].split('\n'):
@@ -458,6 +466,14 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 if backend.get('default_server_rise'):
                     default_server_line += f" rise {backend['default_server_rise']}"
                 config_lines.append(default_server_line)
+            
+            # Backend Options (NEW: option http-keep-alive, option forwardfor, etc.)
+            if backend.get('options'):
+                for line in backend['options'].split('\n'):
+                    if line.strip():
+                        # Lines are complete HAProxy option directives
+                        # Examples: "option http-keep-alive", "option forwardfor", "option httpchk"
+                        config_lines.append(f"    {line.strip()}")
             
             # Backend Request Headers (new field - includes options, http-request directives)
             if backend.get('request_headers'):

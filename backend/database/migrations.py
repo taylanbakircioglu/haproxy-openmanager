@@ -1555,6 +1555,8 @@ async def run_all_migrations():
     await add_cluster_id_to_agent_config_requests()
     await fix_users_unique_constraints_for_soft_delete()
     await add_ssl_certificate_id_to_backend_servers()
+    await add_options_to_backends()
+    await add_options_to_frontends()
     
     logger.info("Database migrations completed successfully.")
 
@@ -2754,3 +2756,71 @@ async def fix_users_unique_constraints_for_soft_delete():
     finally:
         if conn:
             await close_database_connection(conn)
+
+async def add_options_to_backends():
+    """Add options column to backends table for HAProxy backend options (option http-keep-alive, etc.)"""
+    conn = None
+    try:
+        conn = await get_database_connection()
+        
+        # Check if options column already exists
+        column_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'backends' 
+                AND column_name = 'options'
+            )
+        """)
+        
+        if not column_exists:
+            # Add options column as TEXT (multi-line HAProxy options)
+            await conn.execute("""
+                ALTER TABLE backends 
+                ADD COLUMN options TEXT
+            """)
+            
+            logger.info("✅ Added options column to backends table for HAProxy backend options")
+        else:
+            logger.info("ℹ️  options column already exists in backends table")
+        
+        await close_database_connection(conn)
+        
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"❌ Error adding options to backends: {e}")
+        # Don't raise - we'll try to proceed
+
+async def add_options_to_frontends():
+    """Add options column to frontends table for HAProxy frontend options (option httplog, option forwardfor, etc.)"""
+    conn = None
+    try:
+        conn = await get_database_connection()
+        
+        # Check if options column already exists
+        column_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'frontends' 
+                AND column_name = 'options'
+            )
+        """)
+        
+        if not column_exists:
+            # Add options column as TEXT (multi-line HAProxy options)
+            await conn.execute("""
+                ALTER TABLE frontends 
+                ADD COLUMN options TEXT
+            """)
+            
+            logger.info("✅ Added options column to frontends table for HAProxy frontend options")
+        else:
+            logger.info("ℹ️  options column already exists in frontends table")
+        
+        await close_database_connection(conn)
+        
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"❌ Error adding options to frontends: {e}")
+        # Don't raise - we'll try to proceed

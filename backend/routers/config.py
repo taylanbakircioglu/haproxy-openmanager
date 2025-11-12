@@ -804,6 +804,7 @@ async def parse_bulk_config(
                 "maxconn": frontend.maxconn,
                 "request_headers": frontend.request_headers,
                 "response_headers": frontend.response_headers,
+                "options": frontend.options,
                 "tcp_request_rules": frontend.tcp_request_rules,
                 "acl_rules": frontend.acl_rules,
                 "use_backend_rules": frontend.use_backend_rules
@@ -890,6 +891,7 @@ async def parse_bulk_config(
                 "default_server_rise": backend.default_server_rise,
                 "request_headers": backend.request_headers,
                 "response_headers": backend.response_headers,
+                "options": backend.options,
                 "timeout_connect": backend.timeout_connect,
                 "timeout_server": backend.timeout_server,
                 "timeout_queue": backend.timeout_queue,
@@ -1280,6 +1282,12 @@ async def bulk_create_entities(
                         update_values.append(backend_data["response_headers"])
                         param_index += 1
                     
+                    # NEW: Options field support (option http-keep-alive, etc.)
+                    if backend_data.get("options") and backend_data["options"] != existing_full.get("options"):
+                        update_fields.append(f"options = ${param_index}")
+                        update_values.append(backend_data["options"])
+                        param_index += 1
+                    
                     # NOTE: maxconn field exists in database but is not used in normal backend UPDATE
                     # Preserving consistency with existing backend UPDATE endpoint (backend.py)
                     # maxconn field intentionally excluded from bulk import UPDATE
@@ -1331,9 +1339,9 @@ async def bulk_create_entities(
                             health_check_interval, health_check_expected_status, fullconn,
                             cookie_name, cookie_options, default_server_inter, 
                             default_server_fall, default_server_rise, request_headers, 
-                            response_headers, timeout_connect, timeout_server, timeout_queue, cluster_id
+                            response_headers, options, timeout_connect, timeout_server, timeout_queue, cluster_id
                         ) 
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) 
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) 
                         RETURNING id
                     """, 
                         backend_data["name"],
@@ -1350,6 +1358,7 @@ async def bulk_create_entities(
                         backend_data.get("default_server_rise"),
                         backend_data.get("request_headers"),
                         backend_data.get("response_headers"),
+                        backend_data.get("options"),
                         backend_data.get("timeout_connect", 10000),
                         backend_data.get("timeout_server", 60000),
                         backend_data.get("timeout_queue", 60000),
@@ -1494,6 +1503,12 @@ async def bulk_create_entities(
                         update_values.append(frontend_data["tcp_request_rules"])
                         param_index += 1
                     
+                    # NEW: Options field support (option httplog, option forwardfor, etc.)
+                    if frontend_data.get("options") and frontend_data["options"] != existing_full.get("options"):
+                        update_fields.append(f"options = ${param_index}")
+                        update_values.append(frontend_data["options"])
+                        param_index += 1
+                    
                     if frontend_data.get("timeout_http_request") and frontend_data["timeout_http_request"] != existing_full["timeout_http_request"]:
                         update_fields.append(f"timeout_http_request = ${param_index}")
                         update_values.append(frontend_data["timeout_http_request"])
@@ -1561,11 +1576,11 @@ async def bulk_create_entities(
                             ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, 
                             ssl_cert_path, ssl_cert, ssl_verify,
                             timeout_client, timeout_http_request, maxconn,
-                            request_headers, response_headers, tcp_request_rules,
+                            request_headers, response_headers, tcp_request_rules, options,
                             rate_limit, compression, log_separate, monitor_uri,
                             cluster_id, acl_rules, use_backend_rules, redirect_rules, updated_at
                         ) 
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, CURRENT_TIMESTAMP) 
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, CURRENT_TIMESTAMP) 
                         RETURNING id
                     """, 
                         frontend_data["name"],
@@ -1586,6 +1601,7 @@ async def bulk_create_entities(
                         frontend_data.get("request_headers"),
                         frontend_data.get("response_headers"),
                         frontend_data.get("tcp_request_rules"),
+                        frontend_data.get("options"),
                         frontend_data.get("rate_limit"),
                         frontend_data.get("compression", False),
                         frontend_data.get("log_separate", False),
