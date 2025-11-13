@@ -4200,9 +4200,9 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail=f"Cluster {cluster_id} not found")
         
-        # Get all pending config versions for this cluster
+        # Get all pending config versions for this cluster (CRITICAL: Include metadata for rollback!)
         pending_versions = await conn.fetch("""
-            SELECT id, version_name FROM config_versions 
+            SELECT id, version_name, metadata FROM config_versions 
             WHERE cluster_id = $1 AND status = 'PENDING'
         """, cluster_id)
         
