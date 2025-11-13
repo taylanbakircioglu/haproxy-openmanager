@@ -287,8 +287,9 @@ async def _rollback_update(
                     tcp_request_rules = $19, timeout_client = $20, timeout_http_request = $21,
                     rate_limit = $22, compression = $23, log_separate = $24,
                     monitor_uri = $25, maxconn = $26,
-                    last_config_status = $27, updated_at = $28
-                WHERE id = $29
+                    last_config_status = $27, 
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $28
             """,
                 old_values.get('name'),
                 old_values.get('bind_address'),
@@ -317,7 +318,6 @@ async def _rollback_update(
                 old_values.get('monitor_uri'),
                 old_values.get('maxconn'),
                 old_values.get('last_config_status'),
-                old_values.get('updated_at'),
                 entity_id
             )
             
@@ -344,8 +344,8 @@ async def _rollback_update(
                     default_server_inter = $17, default_server_fall = $18,
                     default_server_rise = $19, request_headers = $20,
                     response_headers = $21, options = $22,
-                    updated_at = $23
-                WHERE id = $24
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $23
             """,
                 old_values.get('name'),
                 old_values.get('balance_method'),
@@ -369,7 +369,6 @@ async def _rollback_update(
                 old_values.get('request_headers'),
                 old_values.get('response_headers'),
                 old_values.get('options'),
-                old_values.get('updated_at'),
                 entity_id
             )
             logger.info(f"ROLLBACK UPDATE: Backend {entity_id} restored to previous state")
@@ -383,8 +382,8 @@ async def _rollback_update(
                     name = $1, rule_type = $2, config = $3, action = $4,
                     priority = $5, description = $6, enabled = $7,
                     cluster_id = $8, last_config_status = $9, is_active = $10,
-                    updated_at = $11
-                WHERE id = $12
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $11
             """,
                 old_values.get('name'),
                 old_values.get('rule_type'),
@@ -396,7 +395,6 @@ async def _rollback_update(
                 old_values.get('cluster_id'),
                 old_values.get('last_config_status'),
                 old_values.get('is_active'),
-                old_values.get('updated_at'),
                 entity_id
             )
             logger.info(f"ROLLBACK UPDATE: WAF rule {entity_id} restored to previous state")
@@ -405,22 +403,23 @@ async def _rollback_update(
         elif entity_type == "ssl_certificate":
             # SSL certificate'i eski değerlerine geri yükle
             # SCHEMA: ssl_certificates (ALL FIELDS from migrations.py line 2120-2140)
+            # CRITICAL: expiry_date is a business field (datetime), don't restore from str, skip it
             await conn.execute("""
                 UPDATE ssl_certificates SET
                     name = $1, primary_domain = $2, certificate_content = $3,
                     private_key_content = $4, chain_content = $5,
-                    expiry_date = $6, issuer = $7, status = $8,
-                    fingerprint = $9, days_until_expiry = $10, all_domains = $11,
-                    cluster_id = $12, last_config_status = $13, usage_type = $14,
-                    is_active = $15, updated_at = $16
-                WHERE id = $17
+                    issuer = $6, status = $7,
+                    fingerprint = $8, days_until_expiry = $9, all_domains = $10,
+                    cluster_id = $11, last_config_status = $12, usage_type = $13,
+                    is_active = $14, 
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $15
             """,
                 old_values.get('name'),
                 old_values.get('primary_domain'),
                 old_values.get('certificate_content'),
                 old_values.get('private_key_content'),
                 old_values.get('chain_content'),
-                old_values.get('expiry_date'),
                 old_values.get('issuer'),
                 old_values.get('status'),
                 old_values.get('fingerprint'),
@@ -430,7 +429,6 @@ async def _rollback_update(
                 old_values.get('last_config_status'),
                 old_values.get('usage_type'),
                 old_values.get('is_active'),
-                old_values.get('updated_at'),
                 entity_id
             )
             logger.info(f"ROLLBACK UPDATE: SSL certificate {entity_id} restored to previous state")
@@ -448,9 +446,9 @@ async def _rollback_update(
                     ssl_certificate_id = $13, cookie_value = $14,
                     inter = $15, fall = $16, rise = $17,
                     cluster_id = $18, is_active = $19, last_config_status = $20,
-                    haproxy_status = $21, haproxy_status_updated_at = $22,
-                    updated_at = $23
-                WHERE id = $24
+                    haproxy_status = $21,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $22
             """,
                 old_values.get('backend_id'),
                 old_values.get('backend_name'),
@@ -473,8 +471,6 @@ async def _rollback_update(
                 old_values.get('is_active'),
                 old_values.get('last_config_status'),
                 old_values.get('haproxy_status'),
-                old_values.get('haproxy_status_updated_at'),
-                old_values.get('updated_at'),
                 entity_id
             )
             logger.info(f"ROLLBACK UPDATE: Server {entity_id} restored to previous state")
