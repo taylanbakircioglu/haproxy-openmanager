@@ -1311,12 +1311,16 @@ async def bulk_create_entities(
             import time
             import json
             from services.haproxy_config import generate_haproxy_config_for_cluster
+            from utils.entity_snapshot import save_entity_snapshot
             
             # Track updated entities for user feedback
             updated_entities = {
                 "frontends": [],
                 "backends": []
             }
+            
+            # PHASE 4: Track all entity snapshots for bulk rollback
+            bulk_snapshots = []
             
             # BULK IMPORT MVP: Process backends with UPSERT (merge strategy)
             # Create or update backends first (frontends may reference them)
@@ -1469,6 +1473,18 @@ async def bulk_create_entities(
                     
                     # Execute UPDATE only if there are actual field changes
                     if update_fields:
+                        # PHASE 4: Create snapshot BEFORE update
+                        snapshot = await save_entity_snapshot(
+                            conn=conn,
+                            entity_type="backend",
+                            entity_id=backend_id,
+                            old_values=existing_full,
+                            new_values=backend_data,
+                            operation="UPDATE"
+                        )
+                        if snapshot:
+                            bulk_snapshots.append(snapshot)
+                        
                         update_query = f"""
                             UPDATE backends 
                             SET {', '.join(update_fields)}, updated_at = CURRENT_TIMESTAMP
@@ -1537,6 +1553,17 @@ async def bulk_create_entities(
                         "id": backend_id,
                         "name": backend_data["name"]
                     })
+                    
+                    # PHASE 4: Create snapshot for CREATE operation (for rollback = deletion)
+                    snapshot = await save_entity_snapshot(
+                        conn=conn,
+                        entity_type="backend",
+                        entity_id=backend_id,
+                        old_values={},  # No old values for CREATE
+                        operation="CREATE"
+                    )
+                    if snapshot:
+                        bulk_snapshots.append(snapshot)
                 
                 # SERVERS: Process servers for both CREATE and UPDATE modes
                 # MVP: Only add new servers, preserve existing ones (no deletion)
@@ -1584,6 +1611,17 @@ async def bulk_create_entities(
                             "backend": backend_data["name"]
                         })
                         backend_has_new_servers = True
+                        
+                        # PHASE 4: Create snapshot for new server (CREATE operation)
+                        snapshot = await save_entity_snapshot(
+                            conn=conn,
+                            entity_type="server",
+                            entity_id=server_id,
+                            old_values={},  # No old values for CREATE
+                            operation="CREATE"
+                        )
+                        if snapshot:
+                            bulk_snapshots.append(snapshot)
                     
                     # If backend wasn't updated but has new servers, add to updated_entities
                     # This ensures backend gets marked as PENDING for Apply Management
@@ -1807,19 +1845,46 @@ async def bulk_create_entities(
                         "id": frontend_id,
                         "name": frontend_data["name"]
                     })
+                    
+                    # PHASE 4: Create snapshot for CREATE operation (for rollback = deletion)
+                    snapshot = await save_entity_snapshot(
+                        conn=conn,
+                        entity_type="frontend",
+                        entity_id=frontend_id,
+                        old_values={},  # No old values for CREATE
+                        operation="CREATE"
+                    )
+                    if snapshot:
+                        bulk_snapshots.append(snapshot)
             
             # Generate config version for the cluster
             config_content = await generate_haproxy_config_for_cluster(request.cluster_id)
             config_hash = hashlib.sha256(config_content.encode()).hexdigest()
             version_name = f"bulk-import-{int(time.time())}"
             
-            # Create PENDING config version
+            # PHASE 4: Get pre-apply snapshot for diff viewer
+            old_config = await conn.fetchval("""
+                SELECT config_content FROM config_versions 
+                WHERE cluster_id = $1 AND status = 'APPLIED' AND is_active = TRUE
+                ORDER BY created_at DESC LIMIT 1
+            """, request.cluster_id)
+            
+            # PHASE 4: Create metadata with bulk snapshots
+            metadata = {
+                "pre_apply_snapshot": old_config or "",  # For diff viewer
+                "bulk_snapshots": bulk_snapshots,  # For bulk rollback
+                "operation": "BULK_IMPORT",
+                "entity_count": len(bulk_snapshots)
+            }
+            
+            # Create PENDING config version with metadata
             config_version_id = await conn.fetchval("""
                 INSERT INTO config_versions 
-                (cluster_id, version_name, config_content, checksum, created_by, is_active, status)
-                VALUES ($1, $2, $3, $4, $5, FALSE, 'PENDING')
+                (cluster_id, version_name, config_content, checksum, created_by, is_active, status, metadata)
+                VALUES ($1, $2, $3, $4, $5, FALSE, 'PENDING', $6)
                 RETURNING id
-            """, request.cluster_id, version_name, config_content, config_hash, current_user['id'])
+            """, request.cluster_id, version_name, config_content, config_hash, current_user['id'],
+                 json.dumps(metadata) if metadata else None)
             
             # CRITICAL: Mark ALL affected entities as PENDING (both created AND updated)
             # This ensures Apply Management shows all changes

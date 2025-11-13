@@ -2472,7 +2472,7 @@ async def preview_restore_config_version(
             )
         
         # Parse the config to restore
-        logger.info(f"📋 RESTORE PREVIEW: Parsing config for version {version_to_restore['version_name']}")
+        logger.info(f"RESTORE PREVIEW: Parsing config for version {version_to_restore['version_name']}")
         parse_result = parse_haproxy_config(version_to_restore['config_content'])
         
         if parse_result.errors:
@@ -2676,7 +2676,7 @@ async def preview_restore_config_version(
         
         # CRITICAL: Compare backend servers for restore preview
         # Fetch current servers for each backend
-        logger.info(f"📋 RESTORE PREVIEW: Comparing backend servers")
+        logger.info(f"RESTORE PREVIEW: Comparing backend servers")
         for be_name in current_be_dict.keys():
             current_servers = await conn.fetch("""
                 SELECT server_name, server_address, server_port, weight, maxconn,
@@ -2760,7 +2760,7 @@ async def preview_restore_config_version(
         # CRITICAL: Compare WAF rules for restore preview (including config parameters)
         # WAF rules are stored as comments in config: "# WAF Rule: rule_name"
         # Parse WAF rules with their config parameters
-        logger.info(f"📋 RESTORE PREVIEW: Comparing WAF rules with config")
+        logger.info(f"RESTORE PREVIEW: Comparing WAF rules with config")
         import re
         import json
         config_lines = version_to_restore['config_content'].split('\n')
@@ -2810,7 +2810,7 @@ async def preview_restore_config_version(
                             break
             i += 1
         
-        logger.info(f"📋 RESTORE PREVIEW: Parsed {len(waf_configs)} WAF rules with config")
+        logger.info(f"RESTORE PREVIEW: Parsed {len(waf_configs)} WAF rules with config")
         
         # Get current WAF rules for this cluster (include config field)
         current_waf_rules = await conn.fetch("""
@@ -2867,7 +2867,7 @@ async def preview_restore_config_version(
                             "changes": changes
                         })
                         restore_plan["summary"]["updates"] += 1
-                        logger.info(f"📋 RESTORE PREVIEW: WAF rule '{waf_name}' config changed: {', '.join(changes)}")
+                        logger.info(f"RESTORE PREVIEW: WAF rule '{waf_name}' config changed: {', '.join(changes)}")
             # Note: If WAF rule in config but not in DB, it can't be activated
         
         # WAF rules to deactivate (currently active but not in restore config)
@@ -2890,7 +2890,7 @@ async def preview_restore_config_version(
         
         await close_database_connection(conn)
         
-        logger.info(f"📋 RESTORE PREVIEW: Generated plan with {restore_plan['summary']['total_changes']} total changes "
+        logger.info(f"RESTORE PREVIEW: Generated plan with {restore_plan['summary']['total_changes']} total changes "
                    f"({restore_plan['summary']['waf_activations']} WAF activations, "
                    f"{restore_plan['summary']['waf_deactivations']} WAF deactivations)")
         
@@ -2952,6 +2952,10 @@ async def confirm_restore_config_version(
                 detail=f"Cannot parse configuration: {', '.join(parse_result.errors)}"
             )
         
+        # PHASE 5: Initialize bulk snapshot tracker for restore operation
+        from utils.entity_snapshot import save_entity_snapshot
+        bulk_snapshots = []
+        
         async with conn.transaction():
             # Get current state
             current_frontends = await conn.fetch(
@@ -2973,16 +2977,11 @@ async def confirm_restore_config_version(
             parsed_be_dict = {be.name: be for be in parse_result.backends}
             
             # CRITICAL: Fetch detailed current state BEFORE database sync
-            # This captures the PRE-RESTORE state for accurate field comparison
+            # PHASE 5: Use SELECT * to get ALL fields for snapshot (not just parsed fields)
             current_fe_details = {}
             for fe_name, fe_id in current_fe_dict.items():
                 fe_record = await conn.fetchrow("""
-                    SELECT id, name, bind_address, bind_port, mode, default_backend,
-                           ssl_enabled, ssl_port, ssl_certificate_id, ssl_cert_path, ssl_cert, ssl_verify,
-                           maxconn, timeout_client, timeout_http_request, rate_limit,
-                           compression, log_separate, monitor_uri,
-                           acl_rules, redirect_rules, use_backend_rules, request_headers, response_headers
-                    FROM frontends
+                    SELECT * FROM frontends
                     WHERE id = $1 AND cluster_id = $2
                 """, fe_id, cluster_id)
                 if fe_record:
@@ -2991,11 +2990,9 @@ async def confirm_restore_config_version(
             current_be_details = {}
             current_be_servers = {}  # Track servers for each backend
             for be_name, be_id in current_be_dict.items():
+                # PHASE 5: Use SELECT * to get ALL fields for snapshot
                 be_record = await conn.fetchrow("""
-                    SELECT id, name, balance_method, mode,
-                           health_check_uri, health_check_interval,
-                           timeout_connect, timeout_server, timeout_queue
-                    FROM backends
+                    SELECT * FROM backends
                     WHERE id = $1 AND cluster_id = $2
                 """, be_id, cluster_id)
                 if be_record:
@@ -3018,7 +3015,7 @@ async def confirm_restore_config_version(
             """, cluster_id)
             current_waf_dict = {waf['name']: dict(waf) for waf in current_waf_rules}
             
-            logger.info(f"📸 SNAPSHOT: Captured pre-restore state - {len(current_fe_details)} frontends, {len(current_be_details)} backends, {len(current_waf_dict)} WAF rules")
+            logger.info(f"SNAPSHOT: Captured pre-restore state - {len(current_fe_details)} frontends, {len(current_be_details)} backends, {len(current_waf_dict)} WAF rules")
             
             # Track changes
             changes_summary = {
@@ -3036,9 +3033,33 @@ async def confirm_restore_config_version(
             IGNORED_FRONTENDS = ['stats']  # Built-in stats frontend
             for parsed_fe in parse_result.frontends:
                 if parsed_fe.name in IGNORED_FRONTENDS:
-                    logger.info(f"⏭️ RESTORE: Skipping built-in frontend '{parsed_fe.name}'")
+                    logger.info(f"RESTORE: Skipping built-in frontend '{parsed_fe.name}'")
                     continue
                 if parsed_fe.name in current_fe_dict:
+                    # PHASE 5: Create snapshot BEFORE update (restore operation)
+                    fe_id = current_fe_dict[parsed_fe.name]
+                    old_frontend = current_fe_details.get(parsed_fe.name)
+                    if old_frontend:
+                        snapshot = await save_entity_snapshot(
+                            conn=conn,
+                            entity_type="frontend",
+                            entity_id=fe_id,
+                            old_values=old_frontend,  # Full record with ALL fields
+                            new_values={
+                                "bind_address": parsed_fe.bind_address,
+                                "bind_port": parsed_fe.bind_port,
+                                "default_backend": parsed_fe.default_backend,
+                                "mode": parsed_fe.mode,
+                                "ssl_enabled": parsed_fe.ssl_enabled,
+                                "ssl_port": parsed_fe.ssl_port,
+                                "maxconn": parsed_fe.maxconn,
+                                "timeout_client": parsed_fe.timeout_client
+                            },
+                            operation="UPDATE_RESTORE"
+                        )
+                        if snapshot:
+                            bulk_snapshots.append(snapshot)
+                    
                     # UPDATE existing frontend (ALL 8 parsed fields)
                     # CRITICAL FIX: Include maxconn and timeout_client so UI shows restored values
                     await conn.execute("""
@@ -3052,10 +3073,10 @@ async def confirm_restore_config_version(
                         parsed_fe.bind_address, parsed_fe.bind_port, parsed_fe.default_backend,
                         parsed_fe.mode, parsed_fe.ssl_enabled, parsed_fe.ssl_port,
                         parsed_fe.maxconn, parsed_fe.timeout_client,
-                        current_fe_dict[parsed_fe.name], cluster_id
+                        fe_id, cluster_id
                     )
                     changes_summary["frontends_updated"] += 1
-                    logger.info(f"✏️ RESTORE: Updated frontend '{parsed_fe.name}' (SSL: {parsed_fe.ssl_enabled}, maxconn: {parsed_fe.maxconn})")
+                    logger.info(f"RESTORE: Updated frontend '{parsed_fe.name}' (SSL: {parsed_fe.ssl_enabled}, maxconn: {parsed_fe.maxconn})")
                 else:
                     # CREATE new frontend (ALL 8 parsed fields)
                     # CRITICAL FIX: Include maxconn and timeout_client so UI shows restored values
@@ -3072,7 +3093,7 @@ async def confirm_restore_config_version(
                         cluster_id
                     )
                     changes_summary["frontends_created"] += 1
-                    logger.info(f"➕ RESTORE: Created frontend '{parsed_fe.name}' (SSL: {parsed_fe.ssl_enabled}, maxconn: {parsed_fe.maxconn})")
+                    logger.info(f"RESTORE: Created frontend '{parsed_fe.name}' (SSL: {parsed_fe.ssl_enabled}, maxconn: {parsed_fe.maxconn})")
             
             # Delete frontends not in restored config
             for fe_name, fe_id in current_fe_dict.items():
@@ -3082,11 +3103,34 @@ async def confirm_restore_config_version(
                         fe_id
                     )
                     changes_summary["frontends_deleted"] += 1
-                    logger.info(f"🗑️ RESTORE: Deleted frontend '{fe_name}'")
+                    logger.info(f"RESTORE: Deleted frontend '{fe_name}'")
             
             # Sync Backends
             for parsed_be in parse_result.backends:
                 if parsed_be.name in current_be_dict:
+                    # PHASE 5: Create snapshot BEFORE update (restore operation)
+                    be_id = current_be_dict[parsed_be.name]
+                    old_backend = current_be_details.get(parsed_be.name)
+                    if old_backend:
+                        snapshot = await save_entity_snapshot(
+                            conn=conn,
+                            entity_type="backend",
+                            entity_id=be_id,
+                            old_values=old_backend,  # Full record with ALL fields
+                            new_values={
+                                "balance_method": parsed_be.balance_method,
+                                "mode": parsed_be.mode,
+                                "health_check_uri": parsed_be.health_check_uri,
+                                "health_check_interval": parsed_be.health_check_interval,
+                                "timeout_connect": parsed_be.timeout_connect,
+                                "timeout_server": parsed_be.timeout_server,
+                                "timeout_queue": parsed_be.timeout_queue
+                            },
+                            operation="UPDATE_RESTORE"
+                        )
+                        if snapshot:
+                            bulk_snapshots.append(snapshot)
+                    
                     # UPDATE existing backend
                     await conn.execute("""
                         UPDATE backends 
@@ -3099,7 +3143,7 @@ async def confirm_restore_config_version(
                         parsed_be.balance_method, parsed_be.mode,
                         parsed_be.health_check_uri, parsed_be.health_check_interval,
                         parsed_be.timeout_connect, parsed_be.timeout_server, parsed_be.timeout_queue,
-                        current_be_dict[parsed_be.name], cluster_id
+                        be_id, cluster_id
                     )
                     
                     # Delete old servers for this backend
@@ -3124,7 +3168,7 @@ async def confirm_restore_config_version(
                             )
                     
                     changes_summary["backends_updated"] += 1
-                    logger.info(f"✏️ RESTORE: Updated backend '{parsed_be.name}' with {len(parsed_be.servers) if parsed_be.servers else 0} servers")
+                    logger.info(f"RESTORE: Updated backend '{parsed_be.name}' with {len(parsed_be.servers) if parsed_be.servers else 0} servers")
                 else:
                     # CREATE new backend
                     await conn.execute("""
@@ -3156,7 +3200,7 @@ async def confirm_restore_config_version(
                             )
                     
                     changes_summary["backends_created"] += 1
-                    logger.info(f"➕ RESTORE: Created backend '{parsed_be.name}' with {len(parsed_be.servers) if parsed_be.servers else 0} servers")
+                    logger.info(f"RESTORE: Created backend '{parsed_be.name}' with {len(parsed_be.servers) if parsed_be.servers else 0} servers")
             
             # Delete backends not in restored config
             for be_name, be_id in current_be_dict.items():
@@ -3170,7 +3214,7 @@ async def confirm_restore_config_version(
                         be_name, cluster_id
                     )
                     changes_summary["backends_deleted"] += 1
-                    logger.info(f"🗑️ RESTORE: Deleted backend '{be_name}'")
+                    logger.info(f"RESTORE: Deleted backend '{be_name}'")
             
             # Sync WAF Rules (parse from config comments + extract config parameters)
             # WAF rules are stored as comments in config: "# WAF Rule: rule_name"
@@ -3229,7 +3273,7 @@ async def confirm_restore_config_version(
                                 break
                 i += 1
             
-            logger.info(f"📋 RESTORE: Parsed {len(waf_configs)} WAF rules with config from restored config")
+            logger.info(f"RESTORE: Parsed {len(waf_configs)} WAF rules with config from restored config")
             
             # Update WAF rules: Set is_active AND config from parsed config
             for waf_name, parsed_waf in waf_configs.items():
@@ -3283,7 +3327,7 @@ async def confirm_restore_config_version(
             IGNORED_FRONTENDS = ['stats']  # Must match line 2024
             for fe_name, parsed_fe in parsed_fe_dict.items():
                 if fe_name in IGNORED_FRONTENDS:
-                    logger.info(f"⏭️ METADATA: Skipping built-in frontend '{fe_name}' from changed_entities")
+                    logger.info(f"METADATA: Skipping built-in frontend '{fe_name}' from changed_entities")
                     continue
                     
                 if fe_name in current_fe_details:
@@ -3329,7 +3373,7 @@ async def confirm_restore_config_version(
                             })
                             logger.info(f"METADATA: Frontend '{fe_name}' has field changes, adding to changed_entities")
                         else:
-                            logger.info(f"⏭️ METADATA: Frontend '{fe_name}' unchanged, skipping from changed_entities")
+                            logger.info(f"METADATA: Frontend '{fe_name}' unchanged, skipping from changed_entities")
                     except Exception as e:
                         # CRITICAL SAFETY: If comparison fails, add entity (safe fallback)
                         logger.warning(f"METADATA: Error comparing frontend '{fe_name}': {e}, adding to changed_entities (safe fallback)")
@@ -3346,7 +3390,7 @@ async def confirm_restore_config_version(
                         "name": fe_name, 
                         "action": "create"
                     })
-                    logger.info(f"➕ METADATA: Frontend '{fe_name}' is new, adding to changed_entities")
+                    logger.info(f"METADATA: Frontend '{fe_name}' is new, adding to changed_entities")
             
             # Compare backends - only add if fields are different
             for be_name, parsed_be in parsed_be_dict.items():
@@ -3411,7 +3455,7 @@ async def confirm_restore_config_version(
                             })
                             logger.info(f"METADATA: Backend '{be_name}' has changes ({', '.join(change_type)}), adding to changed_entities")
                         else:
-                            logger.info(f"⏭️ METADATA: Backend '{be_name}' unchanged, skipping from changed_entities")
+                            logger.info(f"METADATA: Backend '{be_name}' unchanged, skipping from changed_entities")
                     except Exception as e:
                         # CRITICAL SAFETY: If comparison fails, add entity (safe fallback)
                         logger.warning(f"METADATA: Error comparing backend '{be_name}': {e}, adding to changed_entities (safe fallback)")
@@ -3428,7 +3472,7 @@ async def confirm_restore_config_version(
                         "name": be_name, 
                         "action": "create"
                     })
-                    logger.info(f"➕ METADATA: Backend '{be_name}' is new, adding to changed_entities")
+                    logger.info(f"METADATA: Backend '{be_name}' is new, adding to changed_entities")
             
             # Compare WAF Rules - add if activated/deactivated OR config changed
             # Extract active WAF names from parsed config
@@ -3463,7 +3507,7 @@ async def confirm_restore_config_version(
                             "name": waf_name,
                             "action": "update"
                         })
-                        logger.info(f"✏️ METADATA: WAF rule '{waf_name}' config updated, adding to changed_entities")
+                        logger.info(f"METADATA: WAF rule '{waf_name}' config updated, adding to changed_entities")
                 else:
                     # WAF rule was reactivated (was inactive, now active)
                     changed_entities.append({
@@ -3529,11 +3573,22 @@ async def confirm_restore_config_version(
                 """, unchanged_waf_ids, cluster_id)
                 logger.info(f"SELECTIVE STATUS: Reverted {len(unchanged_waf_ids)} unchanged WAF rules to APPLIED (will not show PENDING in UI)")
             
+            # PHASE 5: Get pre-apply snapshot for diff viewer
+            old_config = await conn.fetchval("""
+                SELECT config_content FROM config_versions 
+                WHERE cluster_id = $1 AND status = 'APPLIED' AND is_active = TRUE
+                ORDER BY created_at DESC LIMIT 1
+            """, cluster_id)
+            
             restore_metadata = {
+                "pre_apply_snapshot": old_config or "",  # For diff viewer
+                "bulk_snapshots": bulk_snapshots,  # For rollback
                 "restore_source": version_to_restore['version_name'],
                 "restore_type": "full_snapshot",
                 "changed_entities": changed_entities,
-                "changes_summary": changes_summary
+                "changes_summary": changes_summary,
+                "operation": "RESTORE",
+                "entity_count": len(bulk_snapshots)
             }
             
             new_version_id = await conn.fetchval("""

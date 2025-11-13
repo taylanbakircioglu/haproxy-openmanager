@@ -1045,10 +1045,10 @@ async def update_ssl_certificate(cert_id: int, certificate: SSLCertificateUpdate
                         'error': str(e)
                     })
         elif not content_updated:
-            logger.info(f"ℹ️ SSL UPDATE: Only metadata updated (no content change), skipping config version creation")
+            logger.info(f"SSL UPDATE: Only metadata updated (no content change), skipping config version creation")
             sync_results = [{'message': 'SSL metadata updated (no content change, no config version needed)'}]
         else:
-            logger.info(f"ℹ️ SSL UPDATE: No affected clusters found")
+            logger.info(f"SSL UPDATE: No affected clusters found")
             sync_results = [{'message': 'SSL updated but no clusters affected'}]
         
         await close_database_connection(conn)
