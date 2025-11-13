@@ -600,10 +600,9 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
         
         conn = await get_database_connection()
         
-        # Check if frontend exists and get current configuration (including request_headers and tcp_request_rules for merge strategy)
+        # Check if frontend exists and get current configuration
         existing = await conn.fetchrow("""
-            SELECT id, name, cluster_id, ssl_enabled, ssl_certificate_id, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
-                   request_headers, tcp_request_rules
+            SELECT id, name, cluster_id, ssl_enabled, ssl_certificate_id, ssl_port, ssl_cert_path, ssl_cert, ssl_verify
             FROM frontends WHERE id = $1
         """, frontend_id)
         if not existing:
@@ -663,15 +662,7 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
         if filtered_options != frontend.options and frontend.options:
             logger.info(f"Frontend '{frontend.name}': Filtered 'option httpchk' from options field. Health checks are for backends.")
         
-        # BUGFIX: Merge strategy for tcp_request_rules (preserve from bulk import)
-        # TCP request rules from bulk import should be preserved during frontend edit
-        merged_tcp_request_rules = frontend.tcp_request_rules
-        if not merged_tcp_request_rules and existing['tcp_request_rules']:
-            # If user didn't modify tcp_request_rules (empty/null), preserve existing
-            merged_tcp_request_rules = existing['tcp_request_rules']
-            logger.info(f"FRONTEND UPDATE: Preserved tcp_request_rules for frontend '{frontend.name}'")
-        
-        # Update frontend with all form fields (using preserved/merged values)
+        # Update frontend with all form fields
         await conn.execute("""
             UPDATE frontends SET 
                 name = $1, bind_address = $2, bind_port = $3, 
@@ -686,7 +677,7 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
             frontend.default_backend, frontend.mode, ssl_enabled,
             ssl_certificate_id, ssl_cert_ids_json, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
             json.dumps(frontend.acl_rules or []), json.dumps(frontend.redirect_rules or []), json.dumps(frontend.use_backend_rules or []),
-            frontend.request_headers, frontend.response_headers, filtered_options, merged_tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
+            frontend.request_headers, frontend.response_headers, filtered_options, frontend.tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
             frontend.rate_limit, frontend.compression, frontend.log_separate, frontend.monitor_uri,
             frontend.cluster_id, frontend.maxconn, frontend_id)
             
