@@ -445,10 +445,12 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             # Place options early as per HAProxy best practice
             if backend.get('options'):
                 for line in backend['options'].split('\n'):
-                    if line.strip():
+                    line_stripped = line.strip()
+                    # Skip empty strings, "[]", or invalid rules
+                    if line_stripped and line_stripped not in ('[]', '{}', 'null', 'None'):
                         # Lines are complete HAProxy option directives
                         # Examples: "option http-keep-alive", "option forwardfor"
-                        config_lines.append(f"    {line.strip()}")
+                        config_lines.append(f"    {line_stripped}")
             
             # 3. Health check configuration
             if backend.get('health_check_uri'):
@@ -470,8 +472,10 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             # 5. Cookie Persistence
             if backend.get('cookie_name'):
                 cookie_line = f"    cookie {backend['cookie_name']}"
-                if backend.get('cookie_options'):
-                    cookie_line += f" {backend['cookie_options']}"
+                cookie_opts = backend.get('cookie_options', '').strip()
+                # Skip empty strings, "[]", or invalid values
+                if cookie_opts and cookie_opts not in ('[]', '{}', 'null', 'None'):
+                    cookie_line += f" {cookie_opts}"
                 config_lines.append(cookie_line)
             
             # 6. Full Connections
@@ -492,16 +496,20 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             # 8. HTTP Request Headers
             if backend.get('request_headers'):
                 for line in backend['request_headers'].split('\n'):
-                    if line.strip():
+                    line_stripped = line.strip()
+                    # Skip empty strings, "[]", or invalid rules
+                    if line_stripped and line_stripped not in ('[]', '{}', 'null', 'None'):
                         # Lines are already complete directives (e.g., "http-request set-header X-Backend test")
-                        config_lines.append(f"    {line.strip()}")
+                        config_lines.append(f"    {line_stripped}")
             
             # 9. HTTP Response Headers
             if backend.get('response_headers'):
                 for line in backend['response_headers'].split('\n'):
-                    if line.strip():
+                    line_stripped = line.strip()
+                    # Skip empty strings, "[]", or invalid rules
+                    if line_stripped and line_stripped not in ('[]', '{}', 'null', 'None'):
                         # Lines are already complete directives (e.g., "http-response add-header X-Powered-By Backend")
-                        config_lines.append(f"    {line.strip()}")
+                        config_lines.append(f"    {line_stripped}")
 
             # Get all servers for this backend (including inactive ones for commenting)
             # CRITICAL FIX: Handle servers with NULL cluster_id (legacy data)
@@ -581,8 +589,10 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     server_line += f" rise {server['rise']}"
                 
                 # Cookie Value (new field)
-                if server.get('cookie_value'):
-                    server_line += f" cookie {server['cookie_value']}"
+                cookie_val = server.get('cookie_value', '').strip() if server.get('cookie_value') else ''
+                # Skip empty strings, "[]", or invalid values
+                if cookie_val and cookie_val not in ('[]', '{}', 'null', 'None'):
+                    server_line += f" cookie {cookie_val}"
                 
                 # Backup Server
                 if server.get('backup_server', False):
@@ -682,11 +692,13 @@ def _generate_waf_config_lines(waf_rule: Dict[str, Any]) -> List[str]:
         
         custom_condition = waf_rule.get('custom_condition') or waf_rule.get('custom_haproxy_condition')
         if custom_condition:
-            lines.append(f"    # Custom IP Filter Condition for {waf_rule['name']}")
             custom_condition = custom_condition.strip()
-            if not custom_condition.startswith(('http-request', 'http-response', 'acl')):
-                custom_condition = f"http-request deny if {custom_condition}"
-            lines.append(f"    {custom_condition}")
+            # Skip empty strings, "[]", or invalid values
+            if custom_condition and custom_condition not in ('[]', '{}', 'null', 'None'):
+                lines.append(f"    # Custom IP Filter Condition for {waf_rule['name']}")
+                if not custom_condition.startswith(('http-request', 'http-response', 'acl')):
+                    custom_condition = f"http-request deny if {custom_condition}"
+                lines.append(f"    {custom_condition}")
     
     elif waf_rule['rule_type'] == 'rate_limit' and waf_rule.get('rate_limit_requests'):
         lines.append(f"    stick-table type ip size 100k expire {waf_rule.get('rate_limit_window', 60)}s store http_req_rate(10s)")
@@ -704,15 +716,17 @@ def _generate_waf_config_lines(waf_rule: Dict[str, Any]) -> List[str]:
         
         custom_condition = waf_rule.get('custom_condition') or waf_rule.get('custom_haproxy_condition')
         if custom_condition:
-            lines.append(f"    # Custom Rate Limit Condition for {waf_rule['name']}")
             custom_condition = custom_condition.strip()
-            
-            if custom_condition and not _is_valid_haproxy_condition(custom_condition):
-                lines.append(f"    # WARNING: Invalid HAProxy condition syntax: {custom_condition}")
-            else:
-                if not custom_condition.startswith(('http-request', 'http-response', 'acl')):
-                    custom_condition = f"http-request deny if {custom_condition}"
-                lines.append(f"    {custom_condition}")
+            # Skip empty strings, "[]", or invalid values
+            if custom_condition and custom_condition not in ('[]', '{}', 'null', 'None'):
+                lines.append(f"    # Custom Rate Limit Condition for {waf_rule['name']}")
+                
+                if not _is_valid_haproxy_condition(custom_condition):
+                    lines.append(f"    # WARNING: Invalid HAProxy condition syntax: {custom_condition}")
+                else:
+                    if not custom_condition.startswith(('http-request', 'http-response', 'acl')):
+                        custom_condition = f"http-request deny if {custom_condition}"
+                    lines.append(f"    {custom_condition}")
     
     elif waf_rule['rule_type'] == 'header_filter' and waf_rule.get('header_name'):
         acl_name = f"waf_{rule_name}_header"
@@ -741,11 +755,13 @@ def _generate_waf_config_lines(waf_rule: Dict[str, Any]) -> List[str]:
         
         custom_condition = waf_rule.get('custom_condition') or waf_rule.get('custom_haproxy_condition')
         if custom_condition:
-            lines.append(f"    # Custom Header Filter Condition for {waf_rule['name']}")
             custom_condition = custom_condition.strip()
-            if not custom_condition.startswith(('http-request', 'http-response', 'acl')):
-                custom_condition = f"http-request deny if {custom_condition}"
-            lines.append(f"    {custom_condition}")
+            # Skip empty strings, "[]", or invalid values
+            if custom_condition and custom_condition not in ('[]', '{}', 'null', 'None'):
+                lines.append(f"    # Custom Header Filter Condition for {waf_rule['name']}")
+                if not custom_condition.startswith(('http-request', 'http-response', 'acl')):
+                    custom_condition = f"http-request deny if {custom_condition}"
+                lines.append(f"    {custom_condition}")
     
     elif waf_rule['rule_type'] == 'request_filter' and (waf_rule.get('path_pattern') or waf_rule.get('http_method')):
         # Handle path pattern filtering
@@ -780,11 +796,13 @@ def _generate_waf_config_lines(waf_rule: Dict[str, Any]) -> List[str]:
         
         custom_condition = waf_rule.get('custom_condition') or waf_rule.get('custom_haproxy_condition')
         if custom_condition:
-            lines.append(f"    # Custom Request Filter Condition for {waf_rule['name']}")
             custom_condition = custom_condition.strip()
-            if not custom_condition.startswith(('http-request', 'http-response', 'acl')):
-                custom_condition = f"http-request deny if {custom_condition}"
-            lines.append(f"    {custom_condition}")
+            # Skip empty strings, "[]", or invalid values
+            if custom_condition and custom_condition not in ('[]', '{}', 'null', 'None'):
+                lines.append(f"    # Custom Request Filter Condition for {waf_rule['name']}")
+                if not custom_condition.startswith(('http-request', 'http-response', 'acl')):
+                    custom_condition = f"http-request deny if {custom_condition}"
+                lines.append(f"    {custom_condition}")
     
     # Legacy path_filter support (for backward compatibility)
     elif waf_rule['rule_type'] == 'path_filter' and waf_rule.get('path_pattern'):
@@ -821,18 +839,20 @@ def _generate_waf_config_lines(waf_rule: Dict[str, Any]) -> List[str]:
         # Handle Custom HAProxy Condition if provided
         custom_condition = waf_rule.get('custom_condition') or waf_rule.get('custom_haproxy_condition')
         if custom_condition:
-            lines.append(f"    # Custom Condition for {waf_rule['name']}")
             custom_condition = custom_condition.strip()
-            
-            # Basic validation for HAProxy condition syntax
-            if custom_condition and not _is_valid_haproxy_condition(custom_condition):
-                lines.append(f"    # WARNING: Invalid HAProxy condition syntax: {custom_condition}")
-                lines.append(f"    # Example valid conditions: {{ req.hdr(user-agent) -m sub bot }}, {{ src -f /etc/haproxy/whitelist.lst }}")
-            else:
-                # Ensure condition starts with proper HAProxy directive
-                if not custom_condition.startswith(('http-request', 'http-response', 'acl')):
-                    custom_condition = f"http-request deny if {custom_condition}"
-                lines.append(f"    {custom_condition}")
+            # Skip empty strings, "[]", or invalid values
+            if custom_condition and custom_condition not in ('[]', '{}', 'null', 'None'):
+                lines.append(f"    # Custom Condition for {waf_rule['name']}")
+                
+                # Basic validation for HAProxy condition syntax
+                if not _is_valid_haproxy_condition(custom_condition):
+                    lines.append(f"    # WARNING: Invalid HAProxy condition syntax: {custom_condition}")
+                    lines.append(f"    # Example valid conditions: {{ req.hdr(user-agent) -m sub bot }}, {{ src -f /etc/haproxy/whitelist.lst }}")
+                else:
+                    # Ensure condition starts with proper HAProxy directive
+                    if not custom_condition.startswith(('http-request', 'http-response', 'acl')):
+                        custom_condition = f"http-request deny if {custom_condition}"
+                    lines.append(f"    {custom_condition}")
             
             log_msg = waf_rule.get('log_message') or waf_rule.get('custom_log_message')
             if log_msg:
@@ -868,11 +888,13 @@ def _generate_waf_config_lines(waf_rule: Dict[str, Any]) -> List[str]:
             
             custom_condition = waf_rule.get('custom_condition') or waf_rule.get('custom_haproxy_condition')
             if custom_condition:
-                lines.append(f"    # Custom Geo Block Condition for {waf_rule['name']}")
                 custom_condition = custom_condition.strip()
-                if not custom_condition.startswith(('http-request', 'http-response', 'acl')):
-                    custom_condition = f"http-request deny if {custom_condition}"
-                lines.append(f"    {custom_condition}")
+                # Skip empty strings, "[]", or invalid values
+                if custom_condition and custom_condition not in ('[]', '{}', 'null', 'None'):
+                    lines.append(f"    # Custom Geo Block Condition for {waf_rule['name']}")
+                    if not custom_condition.startswith(('http-request', 'http-response', 'acl')):
+                        custom_condition = f"http-request deny if {custom_condition}"
+                    lines.append(f"    {custom_condition}")
     
     # Handle custom rule type or unsupported config
     elif waf_rule['rule_type'] == 'custom' and waf_rule.get('custom_condition'):
