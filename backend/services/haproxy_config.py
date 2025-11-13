@@ -248,10 +248,12 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             # Place options early as per HAProxy best practice
             if frontend.get('options'):
                 for line in frontend['options'].split('\n'):
-                    if line.strip():
+                    line_stripped = line.strip()
+                    # Skip empty strings, "[]", or invalid rules
+                    if line_stripped and line_stripped not in ('[]', '{}', 'null', 'None'):
                         # Lines are complete HAProxy option directives
                         # Examples: "option httplog", "option forwardfor", "option dontlognull"
-                        config_lines.append(f"    {line.strip()}")
+                        config_lines.append(f"    {line_stripped}")
             
             # CRITICAL: Validate frontend-backend mode compatibility
             if frontend.get('default_backend'):
@@ -556,8 +558,10 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 # SSL Configuration (new field: ssl_verify and ssl_certificate_id)
                 if server.get('ssl_enabled', False):
                     server_line += " ssl"
-                    if server.get('ssl_verify'):
-                        server_line += f" verify {server['ssl_verify']}"
+                    ssl_verify = server.get('ssl_verify', '').strip() if server.get('ssl_verify') else ''
+                    # Skip empty strings, "[]", or invalid values
+                    if ssl_verify and ssl_verify not in ('[]', '{}', 'null', 'None'):
+                        server_line += f" verify {ssl_verify}"
                     
                     # Add ca-file path if SSL certificate is selected
                     if server.get('ssl_certificate_id'):
@@ -729,16 +733,23 @@ def _generate_waf_config_lines(waf_rule: Dict[str, Any]) -> List[str]:
                     lines.append(f"    {custom_condition}")
     
     elif waf_rule['rule_type'] == 'header_filter' and waf_rule.get('header_name'):
-        acl_name = f"waf_{rule_name}_header"
-        header_condition = waf_rule.get('header_condition', 'equals')
-        header_value = waf_rule.get('header_value', '')
-        
-        if header_condition == 'equals':
-            lines.append(f"    acl {acl_name} hdr({waf_rule['header_name']}) {header_value}")
-        elif header_condition == 'contains':
-            lines.append(f"    acl {acl_name} hdr_sub({waf_rule['header_name']}) {header_value}")
-        elif header_condition == 'regex':
-            lines.append(f"    acl {acl_name} hdr_reg({waf_rule['header_name']}) {header_value}")
+        header_name = waf_rule.get('header_name', '').strip()
+        header_value = waf_rule.get('header_value', '').strip()
+        # Skip if header_name or header_value are invalid
+        if not header_name or header_name in ('[]', '{}', 'null', 'None'):
+            lines.append(f"    # WARNING: Invalid header_name for WAF rule '{waf_rule['name']}' - skipped")
+        elif not header_value or header_value in ('[]', '{}', 'null', 'None'):
+            lines.append(f"    # WARNING: Invalid header_value for WAF rule '{waf_rule['name']}' - skipped")
+        else:
+            acl_name = f"waf_{rule_name}_header"
+            header_condition = waf_rule.get('header_condition', 'equals')
+            
+            if header_condition == 'equals':
+                lines.append(f"    acl {acl_name} hdr({header_name}) {header_value}")
+            elif header_condition == 'contains':
+                lines.append(f"    acl {acl_name} hdr_sub({header_name}) {header_value}")
+            elif header_condition == 'regex':
+                lines.append(f"    acl {acl_name} hdr_reg({header_name}) {header_value}")
         
         # Apply action based on rule configuration
         if action == 'block':
@@ -767,15 +778,25 @@ def _generate_waf_config_lines(waf_rule: Dict[str, Any]) -> List[str]:
         # Handle path pattern filtering
         acl_conditions = []
         if waf_rule.get('path_pattern'):
-            acl_name_path = f"waf_{rule_name}_path"
-            lines.append(f"    acl {acl_name_path} path_reg {waf_rule['path_pattern']}")
-            acl_conditions.append(acl_name_path)
+            path_pattern = waf_rule.get('path_pattern', '').strip()
+            # Skip if path_pattern is invalid
+            if path_pattern and path_pattern not in ('[]', '{}', 'null', 'None'):
+                acl_name_path = f"waf_{rule_name}_path"
+                lines.append(f"    acl {acl_name_path} path_reg {path_pattern}")
+                acl_conditions.append(acl_name_path)
+            else:
+                lines.append(f"    # WARNING: Invalid path_pattern for WAF rule '{waf_rule['name']}' - skipped")
         
         # Handle HTTP method filtering
         if waf_rule.get('http_method') and waf_rule['http_method'] != '':
-            acl_name_method = f"waf_{rule_name}_method"
-            lines.append(f"    acl {acl_name_method} method {waf_rule['http_method']}")
-            acl_conditions.append(acl_name_method)
+            http_method = waf_rule.get('http_method', '').strip()
+            # Skip if http_method is invalid
+            if http_method and http_method not in ('[]', '{}', 'null', 'None'):
+                acl_name_method = f"waf_{rule_name}_method"
+                lines.append(f"    acl {acl_name_method} method {http_method}")
+                acl_conditions.append(acl_name_method)
+            else:
+                lines.append(f"    # WARNING: Invalid http_method for WAF rule '{waf_rule['name']}' - skipped")
         
         # Combine ACL conditions
         if acl_conditions:
@@ -786,8 +807,11 @@ def _generate_waf_config_lines(waf_rule: Dict[str, Any]) -> List[str]:
                 lines.append(f"    http-request deny if {combined_acl}")
             elif action == 'allow':
                 lines.append(f"    http-request allow if {combined_acl}")
-            elif action == 'redirect' and waf_rule.get('redirect_url'):
-                lines.append(f"    http-request redirect location {waf_rule['redirect_url']} if {combined_acl}")
+            elif action == 'redirect':
+                redirect_url = waf_rule.get('redirect_url', '').strip() if waf_rule.get('redirect_url') else ''
+                # Skip empty strings, "[]", or invalid values
+                if redirect_url and redirect_url not in ('[]', '{}', 'null', 'None'):
+                    lines.append(f"    http-request redirect location {redirect_url} if {combined_acl}")
         
         # Handle Custom Log Message and Custom HAProxy Condition for Request Filter
         log_msg = waf_rule.get('log_message') or waf_rule.get('custom_log_message')
@@ -806,16 +830,24 @@ def _generate_waf_config_lines(waf_rule: Dict[str, Any]) -> List[str]:
     
     # Legacy path_filter support (for backward compatibility)
     elif waf_rule['rule_type'] == 'path_filter' and waf_rule.get('path_pattern'):
-        acl_name = f"waf_{rule_name}_path"
-        lines.append(f"    acl {acl_name} path_reg {waf_rule['path_pattern']}")
+        path_pattern = waf_rule.get('path_pattern', '').strip()
+        # Skip if path_pattern is invalid
+        if not path_pattern or path_pattern in ('[]', '{}', 'null', 'None'):
+            lines.append(f"    # WARNING: Invalid path_pattern for WAF rule '{waf_rule['name']}' - skipped")
+        else:
+            acl_name = f"waf_{rule_name}_path"
+            lines.append(f"    acl {acl_name} path_reg {path_pattern}")
         
         # Apply action based on rule configuration
         if action == 'block':
             lines.append(f"    http-request deny if {acl_name}")
         elif action == 'allow':
             lines.append(f"    http-request allow if {acl_name}")
-        elif action == 'redirect' and waf_rule.get('redirect_url'):
-            lines.append(f"    http-request redirect location {waf_rule['redirect_url']} if {acl_name}")
+        elif action == 'redirect':
+            redirect_url = waf_rule.get('redirect_url', '').strip() if waf_rule.get('redirect_url') else ''
+            # Skip empty strings, "[]", or invalid values
+            if redirect_url and redirect_url not in ('[]', '{}', 'null', 'None'):
+                lines.append(f"    http-request redirect location {redirect_url} if {acl_name}")
     
     elif waf_rule['rule_type'] == 'size_limit':
         # Handle Max Request Size limit
