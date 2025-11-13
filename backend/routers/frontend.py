@@ -342,6 +342,8 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                     "use_backend_rules": parse_jsonb_field(f.get("use_backend_rules"), []),
                     "request_headers": f.get("request_headers"),
                     "response_headers": f.get("response_headers"),
+                    "options": f.get("options"),
+                    "tcp_request_rules": f.get("tcp_request_rules"),
                     "timeout_client": f.get("timeout_client"),
                     "timeout_http_request": f.get("timeout_http_request"),
                     "rate_limit": f.get("rate_limit"),
