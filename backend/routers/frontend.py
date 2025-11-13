@@ -752,6 +752,9 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
                     operation="UPDATE"
                 )
                 
+                logger.info(f"FRONTEND UPDATE DEBUG: entity_snapshot_metadata keys={list(entity_snapshot_metadata.keys()) if entity_snapshot_metadata else 'EMPTY'}")
+                logger.info(f"FRONTEND UPDATE DEBUG: entity_snapshot exists={('entity_snapshot' in entity_snapshot_metadata) if entity_snapshot_metadata else False}")
+                
                 # Get pre-apply snapshot (for diff viewer)
                 old_config = await conn.fetchval("""
                     SELECT config_content FROM config_versions 
@@ -764,6 +767,9 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
                     "pre_apply_snapshot": old_config or "",  # For diff viewer
                     **entity_snapshot_metadata  # For rollback
                 }
+                
+                logger.info(f"FRONTEND UPDATE DEBUG: Final metadata keys={list(metadata.keys())}")
+                logger.info(f"FRONTEND UPDATE DEBUG: metadata has entity_snapshot={'entity_snapshot' in metadata}")
                 
                 # Try with status field first, fallback to old behavior if field doesn't exist
                 try:

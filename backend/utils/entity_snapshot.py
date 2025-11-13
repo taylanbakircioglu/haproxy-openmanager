@@ -159,6 +159,17 @@ async def save_entity_snapshot(
             f"SNAPSHOT: Created for {entity_type} {entity_id} "
             f"(operation={operation}, changed_fields={len(changed_fields)})"
         )
+        logger.info(f"SNAPSHOT DEBUG: old_values keys={list(serializable_old_values.keys())[:10]}")
+        logger.info(f"SNAPSHOT DEBUG: Serializable check - can serialize to JSON: {len(serializable_old_values)} fields")
+        
+        # Test if snapshot is JSON serializable
+        try:
+            import json as json_final_test
+            json_final_test.dumps(snapshot)
+            logger.info(f"SNAPSHOT DEBUG: Final JSON test PASSED for {entity_type} {entity_id}")
+        except Exception as json_err:
+            logger.error(f"SNAPSHOT DEBUG: Final JSON test FAILED for {entity_type} {entity_id}: {json_err}")
+            return {}
         
         return {"entity_snapshot": snapshot}
         
@@ -194,7 +205,7 @@ async def rollback_entity_from_snapshot(
                 logger.warning("Rollback failed")
     """
     if not ENTITY_SNAPSHOT_ENABLED:
-        logger.debug("Entity snapshot disabled, skipping rollback")
+        logger.warning("ROLLBACK DEBUG: Entity snapshot disabled by feature flag, skipping rollback")
         return False
     
     entity_type = entity_snapshot.get("entity_type")
@@ -202,14 +213,19 @@ async def rollback_entity_from_snapshot(
     operation = entity_snapshot.get("operation")
     old_values = entity_snapshot.get("old_values")
     
+    logger.info(f"ROLLBACK DEBUG: entity_type={entity_type}, entity_id={entity_id}, operation={operation}")
+    logger.info(f"ROLLBACK DEBUG: old_values exists={old_values is not None}, old_values length={len(old_values) if old_values else 0}")
+    
     if not all([entity_type, entity_id, operation, old_values]):
-        logger.warning(f"ROLLBACK: Invalid snapshot data, skipping rollback")
+        logger.warning(f"ROLLBACK: Invalid snapshot data, skipping rollback (missing: {[k for k in ['entity_type', 'entity_id', 'operation', 'old_values'] if not entity_snapshot.get(k)]})")
         return False
     
     try:
         if operation in ["UPDATE", "UPDATE_RESTORE"]:
             # Entity'yi eski değerlerine geri yükle
+            logger.info(f"ROLLBACK DEBUG: Calling _rollback_update for {entity_type} {entity_id}")
             success = await _rollback_update(conn, entity_type, entity_id, old_values)
+            logger.info(f"ROLLBACK DEBUG: _rollback_update returned {success}")
             return success
             
         elif operation == "CREATE":
@@ -257,7 +273,10 @@ async def _rollback_update(
     try:
         if entity_type == "frontend":
             # Frontend'i eski değerlerine geri yükle
-            await conn.execute("""
+            logger.info(f"ROLLBACK UPDATE DEBUG: Frontend {entity_id} - restoring bind_port={old_values.get('bind_port')}")
+            logger.info(f"ROLLBACK UPDATE DEBUG: old_values sample: name={old_values.get('name')}, bind_port={old_values.get('bind_port')}, ssl_enabled={old_values.get('ssl_enabled')}")
+            
+            result = await conn.execute("""
                 UPDATE frontends SET
                     name = $1, bind_address = $2, bind_port = $3,
                     default_backend = $4, mode = $5, ssl_enabled = $6,
@@ -301,7 +320,13 @@ async def _rollback_update(
                 old_values.get('updated_at'),
                 entity_id
             )
-            logger.info(f"ROLLBACK UPDATE: Frontend {entity_id} restored to previous state")
+            
+            logger.info(f"ROLLBACK UPDATE: Frontend {entity_id} restored to previous state (UPDATE query result={result})")
+            
+            # Verify rollback
+            verify = await conn.fetchrow("SELECT bind_port, last_config_status FROM frontends WHERE id = $1", entity_id)
+            logger.info(f"ROLLBACK UPDATE VERIFY: Frontend {entity_id} after rollback - bind_port={verify['bind_port']}, status={verify['last_config_status']}")
+            
             return True
             
         elif entity_type == "backend":

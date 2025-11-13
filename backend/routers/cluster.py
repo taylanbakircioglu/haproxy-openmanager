@@ -4316,11 +4316,23 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                 # Parse metadata
                 metadata = json_module.loads(version['metadata']) if version['metadata'] else {}
                 
+                logger.info(f"REJECT DEBUG: Version {version['version_name']} - metadata exists={version['metadata'] is not None}")
+                logger.info(f"REJECT DEBUG: Parsed metadata keys={list(metadata.keys()) if metadata else 'EMPTY'}")
+                
                 # Check for single entity snapshot
                 entity_snapshot = metadata.get('entity_snapshot')
+                logger.info(f"REJECT DEBUG: entity_snapshot exists={entity_snapshot is not None}")
+                
                 if entity_snapshot:
                     # Single entity rollback
+                    logger.info(f"REJECT DEBUG: Calling rollback for {entity_snapshot.get('entity_type')} {entity_snapshot.get('entity_id')}")
+                    logger.info(f"REJECT DEBUG: old_values exists={('old_values' in entity_snapshot)}")
+                    logger.info(f"REJECT DEBUG: operation={entity_snapshot.get('operation')}")
+                    
                     success = await rollback_entity_from_snapshot(conn, entity_snapshot)
+                    
+                    logger.info(f"REJECT DEBUG: Rollback result={success}")
+                    
                     if success:
                         rollback_success_count += 1
                         logger.info(f"REJECT ROLLBACK: Rolled back {entity_snapshot['entity_type']} {entity_snapshot['entity_id']}")
