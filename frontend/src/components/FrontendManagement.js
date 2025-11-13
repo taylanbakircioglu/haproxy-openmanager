@@ -548,6 +548,9 @@ const FrontendManagement = () => {
       ssl_certificate_ids: frontend.ssl_certificate_ids,
       ssl_certificate_id: frontend.ssl_certificate_id
     });
+    console.log('🔍 FRONTEND EDIT DEBUG: TCP Request Rules:', frontend.tcp_request_rules);
+    console.log('🔍 FRONTEND EDIT DEBUG: Request Headers:', frontend.request_headers);
+    console.log('🔍 FRONTEND EDIT DEBUG: Options:', frontend.options);
     
     // ENTERPRISE DUAL-MODE: Support both old and new SSL format
     let sslCertIds = [];
