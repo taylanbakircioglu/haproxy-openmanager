@@ -107,22 +107,27 @@ async def save_entity_snapshot(
         if hasattr(old_values, '__iter__') and not isinstance(old_values, dict):
             old_values = dict(old_values)
         
-        # CRITICAL FIX: Convert non-JSON-serializable types
-        # - datetime -> ISO string
-        # - JSONB/list -> keep as-is (already JSON compatible)
+        # CRITICAL FIX: Convert non-JSON-serializable types to JSON-safe format
+        # Use try-catch for each value to handle asyncpg types, datetime, etc.
+        import json as json_test
         serializable_old_values = {}
+        
         for key, value in old_values.items():
-            if value is None:
-                serializable_old_values[key] = None
-            elif isinstance(value, datetime):
-                # datetime -> ISO string
-                serializable_old_values[key] = value.isoformat() + "Z" if value else None
-            elif isinstance(value, (list, dict)):
-                # JSONB already serializable
+            try:
+                # Test if value is JSON serializable
+                json_test.dumps(value)
+                # If no exception, use as-is
                 serializable_old_values[key] = value
-            else:
-                # int, str, bool, etc.
-                serializable_old_values[key] = value
+            except (TypeError, ValueError):
+                # Value is not JSON serializable, convert it
+                if value is None:
+                    serializable_old_values[key] = None
+                elif hasattr(value, 'isoformat'):
+                    # datetime, date, time objects
+                    serializable_old_values[key] = str(value)
+                else:
+                    # Everything else: convert to string
+                    serializable_old_values[key] = str(value)
         
         # Calculate changed fields for UPDATE operations
         changed_fields = []
