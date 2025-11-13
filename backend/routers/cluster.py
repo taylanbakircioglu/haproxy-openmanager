@@ -45,6 +45,123 @@ def _extract_entities_from_config(config_content: str) -> dict:
     return entities
 
 
+async def apply_ssl_related_configs(conn, trigger_cluster_id: int):
+    """
+    SSL-related PENDING config'leri tespit et ve scope'larına göre apply et.
+    
+    Mantık:
+    - Global SSL: Tüm cluster'lardaki ilgili PENDING config'leri APPLIED yap
+    - Cluster-specific SSL: İlgili cluster'lardaki PENDING config'leri APPLIED yap
+    
+    Bu sayede tek Apply tıklaması ile SSL'in scope'u dahilindeki tüm cluster'lara yayılır.
+    """
+    import re
+    
+    # 1. Trigger cluster'daki SSL-related PENDING config'leri bul
+    ssl_pending = await conn.fetch("""
+        SELECT version_name FROM config_versions
+        WHERE cluster_id = $1 
+        AND status = 'PENDING'
+        AND version_name LIKE 'ssl-%'
+    """, trigger_cluster_id)
+    
+    if not ssl_pending:
+        logger.debug(f"SSL AUTO-APPLY: No SSL-related PENDING configs found for cluster {trigger_cluster_id}")
+        return
+    
+    logger.info(f"SSL AUTO-APPLY: Found {len(ssl_pending)} SSL-related PENDING configs in cluster {trigger_cluster_id}")
+    
+    # 2. Her SSL için scope'unu belirle ve tüm ilgili cluster'lara apply et
+    processed_ssl_ids = set()
+    
+    for version in ssl_pending:
+        # Extract SSL ID from version_name: "ssl-5-update-123" → 5
+        match = re.match(r'ssl-(\d+)-', version['version_name'])
+        if not match:
+            logger.warning(f"SSL AUTO-APPLY: Could not extract SSL ID from version name: {version['version_name']}")
+            continue
+        
+        ssl_id = int(match.group(1))
+        
+        # Aynı SSL için tekrar işlem yapma
+        if ssl_id in processed_ssl_ids:
+            continue
+        
+        processed_ssl_ids.add(ssl_id)
+        
+        # SSL'in scope'unu bul
+        ssl_info = await conn.fetchrow("""
+            SELECT cluster_id, name FROM ssl_certificates WHERE id = $1
+        """, ssl_id)
+        
+        if not ssl_info:
+            logger.warning(f"SSL AUTO-APPLY: SSL certificate {ssl_id} not found, skipping")
+            continue
+        
+        target_clusters = []
+        
+        if ssl_info['cluster_id'] is None:
+            # Global SSL → Tüm cluster'lardaki bu SSL'e ait PENDING config'leri bul
+            logger.info(f"SSL AUTO-APPLY: SSL {ssl_id} ('{ssl_info['name']}') is GLOBAL, applying to all affected clusters")
+            
+            # Use parameterized query with string formatting for LIKE pattern
+            ssl_pattern = f'ssl-{ssl_id}-%'
+            target_clusters_result = await conn.fetch("""
+                SELECT DISTINCT cluster_id FROM config_versions
+                WHERE version_name LIKE $1 AND status = 'PENDING'
+            """, ssl_pattern)
+            
+            target_clusters = [row['cluster_id'] for row in target_clusters_result]
+            
+        else:
+            # Cluster-specific SSL → İlgili cluster'lardaki bu SSL'e ait PENDING config'leri bul
+            logger.info(f"SSL AUTO-APPLY: SSL {ssl_id} ('{ssl_info['name']}') is CLUSTER-SPECIFIC, applying to associated clusters")
+            
+            # Use parameterized query with string formatting for LIKE pattern
+            ssl_pattern = f'ssl-{ssl_id}-%'
+            target_clusters_result = await conn.fetch("""
+                SELECT DISTINCT scc.cluster_id 
+                FROM ssl_certificate_clusters scc
+                JOIN config_versions cv ON cv.cluster_id = scc.cluster_id
+                WHERE scc.ssl_certificate_id = $1 
+                AND cv.status = 'PENDING'
+                AND cv.version_name LIKE $2
+            """, ssl_id, ssl_pattern)
+            
+            target_clusters = [row['cluster_id'] for row in target_clusters_result]
+        
+        if not target_clusters:
+            logger.warning(f"SSL AUTO-APPLY: No target clusters found for SSL {ssl_id}")
+            continue
+        
+        logger.info(f"SSL AUTO-APPLY: Applying SSL {ssl_id} to {len(target_clusters)} cluster(s): {target_clusters}")
+        
+        # 3. Tüm ilgili cluster'larda APPLIED olarak işaretle
+        # CRITICAL: is_active=FALSE çünkü consolidated version is_active=TRUE olacak
+        # SSL version'ları sadece history ve entity tracking için kullanılır
+        ssl_pattern = f'ssl-{ssl_id}-%'
+        for target_cluster_id in target_clusters:
+            result = await conn.execute("""
+                UPDATE config_versions 
+                SET status = 'APPLIED', is_active = FALSE
+                WHERE cluster_id = $1 
+                AND version_name LIKE $2 
+                AND status = 'PENDING'
+            """, target_cluster_id, ssl_pattern)
+            
+            logger.info(f"SSL AUTO-APPLY: Applied SSL {ssl_id} to cluster {target_cluster_id} (result: {result})")
+        
+        # 4. SSL entity status'unu APPLIED olarak güncelle
+        await conn.execute("""
+            UPDATE ssl_certificates 
+            SET last_config_status = 'APPLIED'
+            WHERE id = $1
+        """, ssl_id)
+        
+        logger.info(f"SSL AUTO-APPLY: Updated SSL {ssl_id} entity status to APPLIED")
+    
+    logger.info(f"SSL AUTO-APPLY: Completed processing {len(processed_ssl_ids)} unique SSL certificate(s)")
+
 
 @router.post("", summary="Create HAProxy Cluster", response_description="Cluster created successfully")
 async def create_cluster(cluster: HAProxyClusterCreate, authorization: str = Header(None)):
@@ -1129,70 +1246,13 @@ async def apply_pending_changes(
         if not pending_versions:
             return {"message": "No pending changes to apply", "applied_count": 0}
         
-        # GLOBAL SSL HANDLING: Check if any pending versions contain global SSL updates
-        # If yes, we'll apply the same SSL updates to ALL clusters automatically
-        global_ssl_cert_ids = []
-        for version in pending_versions:
-            # Check if this is an SSL update version
-            if version['version_name'].startswith('ssl-') and '-update-' in version['version_name']:
-                # Parse metadata to check if SSL is global
-                metadata = version.get('metadata')
-                if metadata:
-                    if isinstance(metadata, str):
-                        try:
-                            import json
-                            metadata = json.loads(metadata)
-                        except:
-                            metadata = None
-                    
-                    if metadata and isinstance(metadata, dict):
-                        entity_id = metadata.get('entity_id')
-                        if entity_id:
-                            # Check if this SSL certificate is global
-                            # Global SSL = NOT in ssl_certificate_clusters junction table
-                            ssl_cert = await conn.fetchrow("""
-                                SELECT s.id, s.name,
-                                       NOT EXISTS (
-                                           SELECT 1 FROM ssl_certificate_clusters 
-                                           WHERE ssl_certificate_id = s.id
-                                       ) as is_global
-                                FROM ssl_certificates s
-                                WHERE s.id = $1
-                            """, entity_id)
-                            
-                            if ssl_cert and ssl_cert['is_global']:
-                                global_ssl_cert_ids.append(entity_id)
-                                logger.info(f"GLOBAL SSL APPLY: Detected global SSL update for certificate '{ssl_cert['name']}' (ID: {entity_id})")
-        
-        # Get other clusters that need the same global SSL updates
-        other_clusters_to_apply = []
-        if global_ssl_cert_ids:
-            logger.info(f"GLOBAL SSL APPLY: Found {len(global_ssl_cert_ids)} global SSL updates, checking other clusters...")
-            
-            # Get all active clusters except current one
-            other_clusters = await conn.fetch("""
-                SELECT id, name FROM haproxy_clusters 
-                WHERE is_active = TRUE AND id != $1
-            """, cluster_id)
-            
-            for other_cluster in other_clusters:
-                # Check if this cluster has pending SSL updates for the same global certificates
-                has_pending_global_ssl = await conn.fetchval("""
-                    SELECT EXISTS(
-                        SELECT 1 FROM config_versions cv
-                        WHERE cv.cluster_id = $1 
-                        AND cv.status = 'PENDING'
-                        AND cv.version_name LIKE 'ssl-%'
-                        AND cv.metadata::text LIKE ANY($2)
-                    )
-                """, other_cluster['id'], [f'%"entity_id": {cert_id}%' for cert_id in global_ssl_cert_ids])
-                
-                if has_pending_global_ssl:
-                    other_clusters_to_apply.append(other_cluster)
-                    logger.info(f"GLOBAL SSL APPLY: Cluster '{other_cluster['name']}' (ID: {other_cluster['id']}) also has pending global SSL updates")
-            
-            if other_clusters_to_apply:
-                logger.info(f"GLOBAL SSL APPLY: Will automatically apply to {len(other_clusters_to_apply)} additional clusters")
+        # DEPRECATED: Old global SSL auto-apply logic (replaced by apply_ssl_related_configs)
+        # The new implementation handles SSL scope-aware apply directly within the transaction
+        # This old code is kept commented for reference but is no longer needed
+        # global_ssl_cert_ids = []
+        global_ssl_cert_ids = []  # Keep empty to disable old recursive SSL apply logic
+        other_clusters_to_apply = []  # Keep empty to disable old recursive SSL apply logic
+        # Old logic is replaced by apply_ssl_related_configs() which runs inside transaction
         
         # Check for explicit confirmation if required (optional parameter)
         # Default behavior: apply immediately unless explicitly set to require confirmation
@@ -1209,6 +1269,11 @@ async def apply_pending_changes(
             }
         
         async with conn.transaction():
+            # CRITICAL: SSL scope-aware apply (MUST be inside transaction for atomicity)
+            # SSL update'lerde tek Apply tıklaması ile scope'daki tüm cluster'lara yayılır
+            # Global SSL: Tüm cluster'lar, Cluster-specific SSL: İlgili cluster'lar
+            await apply_ssl_related_configs(conn, cluster_id)
+            
             # Mark all current active versions as inactive
             await conn.execute("""
                 UPDATE config_versions 
