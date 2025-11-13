@@ -28,6 +28,6 @@ MANAGEMENT_BASE_URL = os.getenv("MANAGEMENT_BASE_URL", PUBLIC_URL)  # Backward c
 AGENT_HEARTBEAT_TIMEOUT_SECONDS = 15
 AGENT_CONFIG_SYNC_INTERVAL_SECONDS = 30
 
-# Entity snapshot feature flag (for gradual rollout)
-# IMPORTANT: Keep this FALSE in production until Phase 7 deployment
-ENTITY_SNAPSHOT_ENABLED = os.getenv("ENTITY_SNAPSHOT_ENABLED", "false").lower() == "true" 
+# Entity snapshot enabled by default (rollback functionality)
+# Set to "false" only if you need to disable snapshot temporarily
+ENTITY_SNAPSHOT_ENABLED = os.getenv("ENTITY_SNAPSHOT_ENABLED", "true").lower() == "true" 

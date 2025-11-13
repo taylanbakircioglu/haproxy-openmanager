@@ -48,8 +48,9 @@ from datetime import datetime
 # Setup logger
 logger = logging.getLogger(__name__)
 
-# Feature flag for gradual rollout
-ENTITY_SNAPSHOT_ENABLED = os.getenv("ENTITY_SNAPSHOT_ENABLED", "false").lower() == "true"
+# Entity snapshot enabled by default
+# Can be disabled with ENTITY_SNAPSHOT_ENABLED=false if needed
+ENTITY_SNAPSHOT_ENABLED = os.getenv("ENTITY_SNAPSHOT_ENABLED", "true").lower() == "true"
 
 
 async def save_entity_snapshot(
