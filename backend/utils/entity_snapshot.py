@@ -287,9 +287,9 @@ async def _rollback_update(
                     tcp_request_rules = $19, timeout_client = $20, timeout_http_request = $21,
                     rate_limit = $22, compression = $23, log_separate = $24,
                     monitor_uri = $25, maxconn = $26,
-                    last_config_status = $27, 
+                    cluster_id = $27, is_active = $28, last_config_status = $29, 
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = $28
+                WHERE id = $30
             """,
                 old_values.get('name'),
                 old_values.get('bind_address'),
@@ -317,6 +317,8 @@ async def _rollback_update(
                 old_values.get('log_separate'),
                 old_values.get('monitor_uri'),
                 old_values.get('maxconn'),
+                old_values.get('cluster_id'),
+                old_values.get('is_active'),
                 old_values.get('last_config_status'),
                 entity_id
             )
@@ -338,12 +340,12 @@ async def _rollback_update(
                     health_check_uri = $4, health_check_interval = $5,
                     health_check_expected_status = $6, fullconn = $7,
                     timeout_connect = $8, timeout_server = $9, timeout_queue = $10,
-                    cluster_id = $11, maxconn = $12, last_config_status = $13,
-                    is_active = $14,
-                    cookie_name = $15, cookie_options = $16,
-                    default_server_inter = $17, default_server_fall = $18,
-                    default_server_rise = $19, request_headers = $20,
-                    response_headers = $21, options = $22,
+                    cluster_id = $11, maxconn = $12, 
+                    cookie_name = $13, cookie_options = $14,
+                    default_server_inter = $15, default_server_fall = $16,
+                    default_server_rise = $17, request_headers = $18,
+                    response_headers = $19, options = $20,
+                    is_active = $21, last_config_status = $22,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = $23
             """,
@@ -359,8 +361,6 @@ async def _rollback_update(
                 old_values.get('timeout_queue'),
                 old_values.get('cluster_id'),
                 old_values.get('maxconn'),
-                old_values.get('last_config_status'),
-                old_values.get('is_active'),
                 old_values.get('cookie_name'),
                 old_values.get('cookie_options'),
                 old_values.get('default_server_inter'),
@@ -369,6 +369,8 @@ async def _rollback_update(
                 old_values.get('request_headers'),
                 old_values.get('response_headers'),
                 old_values.get('options'),
+                old_values.get('is_active'),
+                old_values.get('last_config_status'),
                 entity_id
             )
             logger.info(f"ROLLBACK UPDATE: Backend {entity_id} restored to previous state")
@@ -381,7 +383,7 @@ async def _rollback_update(
                 UPDATE waf_rules SET
                     name = $1, rule_type = $2, config = $3, action = $4,
                     priority = $5, description = $6, enabled = $7,
-                    cluster_id = $8, last_config_status = $9, is_active = $10,
+                    cluster_id = $8, is_active = $9, last_config_status = $10,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = $11
             """,
@@ -393,8 +395,8 @@ async def _rollback_update(
                 old_values.get('description'),
                 old_values.get('enabled'),
                 old_values.get('cluster_id'),
-                old_values.get('last_config_status'),
                 old_values.get('is_active'),
+                old_values.get('last_config_status'),
                 entity_id
             )
             logger.info(f"ROLLBACK UPDATE: WAF rule {entity_id} restored to previous state")
