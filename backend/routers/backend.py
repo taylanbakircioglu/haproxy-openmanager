@@ -863,15 +863,41 @@ async def update_backend(backend_id: int, backend_update: BackendConfigUpdate, r
             # Mark PENDING for UI before generating config
             await conn.execute("UPDATE backends SET last_config_status = 'PENDING' WHERE id = $1", backend_id)
 
+            # 🆕 PHASE 2: Create entity snapshot for rollback
+            from utils.entity_snapshot import save_entity_snapshot
+            
+            entity_snapshot_metadata = await save_entity_snapshot(
+                conn=conn,
+                entity_type="backend",
+                entity_id=backend_id,
+                old_values=existing_backend,  # Full record from line 763
+                new_values=update_data,  # Only updated fields
+                operation="UPDATE"
+            )
+            
+            # Get pre-apply snapshot (for diff viewer)
+            old_config = await conn.fetchval("""
+                SELECT config_content FROM config_versions 
+                WHERE cluster_id = $1 AND status = 'APPLIED' AND is_active = TRUE
+                ORDER BY created_at DESC LIMIT 1
+            """, cluster_id)
+            
+            # Merge metadata: pre_apply_snapshot + entity_snapshot
+            metadata = {
+                "pre_apply_snapshot": old_config or "",  # For diff viewer
+                **entity_snapshot_metadata  # For rollback
+            }
+            
             # Create a PENDING config version
             config_content = await generate_haproxy_config_for_cluster(cluster_id, conn=conn)
             config_hash = hashlib.sha256(config_content.encode()).hexdigest()
             version_name = f"backend-{backend_id}-update-{int(time.time())}"
             
             await conn.execute("""
-                INSERT INTO config_versions (cluster_id, version_name, config_content, checksum, created_by, status)
-                VALUES ($1, $2, $3, $4, $5, 'PENDING')
-            """, cluster_id, version_name, config_content, config_hash, current_user['id'])
+                INSERT INTO config_versions (cluster_id, version_name, config_content, checksum, created_by, status, metadata)
+                VALUES ($1, $2, $3, $4, $5, 'PENDING', $6)
+            """, cluster_id, version_name, config_content, config_hash, current_user['id'],
+                 json.dumps(metadata) if metadata else None)
 
         await close_database_connection(conn)
         

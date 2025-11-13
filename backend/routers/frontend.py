@@ -600,10 +600,10 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
         
         conn = await get_database_connection()
         
-        # Check if frontend exists and get current configuration
+        # 🆕 PHASE 2: Get FULL frontend record for snapshot (all fields)
+        # CRITICAL: We need ALL fields for rollback, not just SSL fields
         existing = await conn.fetchrow("""
-            SELECT id, name, cluster_id, ssl_enabled, ssl_certificate_id, ssl_port, ssl_cert_path, ssl_cert, ssl_verify
-            FROM frontends WHERE id = $1
+            SELECT * FROM frontends WHERE id = $1
         """, frontend_id)
         if not existing:
             await close_database_connection(conn)
@@ -709,14 +709,71 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
                 # Get system admin user ID for created_by
                 admin_user_id = await conn.fetchval("SELECT id FROM users WHERE username = 'admin' LIMIT 1") or 1
                 
+                # 🆕 PHASE 2: Create entity snapshot for rollback
+                from utils.entity_snapshot import save_entity_snapshot
+                
+                # Prepare new values for snapshot (only changed fields)
+                new_values = {
+                    "name": frontend.name,
+                    "bind_address": frontend.bind_address,
+                    "bind_port": frontend.bind_port,
+                    "default_backend": frontend.default_backend,
+                    "mode": frontend.mode,
+                    "ssl_enabled": ssl_enabled,
+                    "ssl_certificate_id": ssl_certificate_id,
+                    "ssl_certificate_ids": ssl_cert_ids_json,
+                    "ssl_port": ssl_port,
+                    "ssl_cert_path": ssl_cert_path,
+                    "ssl_cert": ssl_cert,
+                    "ssl_verify": ssl_verify,
+                    "acl_rules": json.dumps(frontend.acl_rules or []),
+                    "redirect_rules": json.dumps(frontend.redirect_rules or []),
+                    "use_backend_rules": json.dumps(frontend.use_backend_rules or []),
+                    "request_headers": frontend.request_headers,
+                    "response_headers": frontend.response_headers,
+                    "options": filtered_options,
+                    "tcp_request_rules": frontend.tcp_request_rules,
+                    "timeout_client": frontend.timeout_client,
+                    "timeout_http_request": frontend.timeout_http_request,
+                    "rate_limit": frontend.rate_limit,
+                    "compression": frontend.compression,
+                    "log_separate": frontend.log_separate,
+                    "monitor_uri": frontend.monitor_uri,
+                    "cluster_id": frontend.cluster_id,
+                    "maxconn": frontend.maxconn
+                }
+                
+                entity_snapshot_metadata = await save_entity_snapshot(
+                    conn=conn,
+                    entity_type="frontend",
+                    entity_id=frontend_id,
+                    old_values=existing,  # Full record from line 604
+                    new_values=new_values,
+                    operation="UPDATE"
+                )
+                
+                # Get pre-apply snapshot (for diff viewer)
+                old_config = await conn.fetchval("""
+                    SELECT config_content FROM config_versions 
+                    WHERE cluster_id = $1 AND status = 'APPLIED' AND is_active = TRUE
+                    ORDER BY created_at DESC LIMIT 1
+                """, frontend.cluster_id)
+                
+                # Merge metadata: pre_apply_snapshot + entity_snapshot
+                metadata = {
+                    "pre_apply_snapshot": old_config or "",  # For diff viewer
+                    **entity_snapshot_metadata  # For rollback
+                }
+                
                 # Try with status field first, fallback to old behavior if field doesn't exist
                 try:
                     config_version_id = await conn.fetchval("""
                         INSERT INTO config_versions 
-                        (cluster_id, version_name, config_content, checksum, created_by, is_active, status)
-                        VALUES ($1, $2, $3, $4, $5, FALSE, 'PENDING')
+                        (cluster_id, version_name, config_content, checksum, created_by, is_active, status, metadata)
+                        VALUES ($1, $2, $3, $4, $5, FALSE, 'PENDING', $6)
                         RETURNING id
-                    """, frontend.cluster_id, version_name, config_content, config_hash, admin_user_id)
+                    """, frontend.cluster_id, version_name, config_content, config_hash, admin_user_id,
+                         json.dumps(metadata) if metadata else None)
                     
                     logger.info(f"APPLY WORKFLOW: Created PENDING config version {version_name} for cluster {frontend.cluster_id}")
                     # Mark entity config status as PENDING for UI
