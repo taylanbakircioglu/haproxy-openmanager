@@ -1774,6 +1774,18 @@ async def bulk_create_entities(
                     
                     # Execute UPDATE if there are fields to update
                     if update_fields:
+                        # PHASE 4: Create snapshot BEFORE update
+                        snapshot = await save_entity_snapshot(
+                            conn=conn,
+                            entity_type="frontend",
+                            entity_id=frontend_id,
+                            old_values=existing_full,
+                            new_values=frontend_data,
+                            operation="UPDATE"
+                        )
+                        if snapshot:
+                            bulk_snapshots.append(snapshot)
+                        
                         update_query = f"""
                             UPDATE frontends 
                             SET {', '.join(update_fields)}, updated_at = CURRENT_TIMESTAMP
