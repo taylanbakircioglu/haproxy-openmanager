@@ -1596,6 +1596,98 @@ WHERE id IN (SELECT id FROM ...);
 - Use Apply Changes workflow (don't skip)
 - Keep backend/frontend names unique across clusters
 
+#### 6. Apply Changes Stuck - HAProxy Configuration Validation Errors
+
+**Symptom:** Pending changes in Apply Management remain stuck and are not applied by agents, or agents report configuration failures.
+
+**Root Cause:** The generated HAProxy configuration has syntax errors or validation issues that prevent HAProxy from accepting the new config.
+
+**Diagnosis - Check HAProxy Validation on Agent Server:**
+
+```bash
+# SSH to the agent server where changes are stuck
+ssh user@agent-server
+
+# Check agent logs for validation errors
+sudo tail -f /var/log/haproxy-agent/agent.log
+
+# The agent writes the new config to /tmp/haproxy-new-config.cfg before applying
+# Manually validate the configuration file
+sudo /usr/sbin/haproxy -c -f /tmp/haproxy-new-config.cfg
+
+# If validation fails, you'll see detailed error messages like:
+# [ALERT] parsing [/tmp/haproxy-new-config.cfg:45] : 'bind' : missing address, port or path
+# [ALERT] parsing [/tmp/haproxy-new-config.cfg:78] : unknown keyword 'ssl-certificate'
+```
+
+**Common Validation Issues:**
+
+1. **Invalid SSL Certificate Reference:**
+   ```
+   [ALERT] 'bind' : unable to load SSL certificate '/etc/haproxy/certs/missing-cert.pem'
+   ```
+   - Solution: Ensure SSL certificate was uploaded and synced to the agent
+   - Check: `ls -la /etc/haproxy/certs/`
+
+2. **Backend Server Not Defined:**
+   ```
+   [ALERT] 'use_backend' : unable to find required use_backend: 'backend-name'
+   ```
+   - Solution: Ensure backend exists and is defined before the frontend that uses it
+
+3. **Invalid ACL Syntax:**
+   ```
+   [ALERT] parsing [config:42] : error detected while parsing ACL 'acl-name'
+   ```
+   - Solution: Fix ACL syntax in Frontend Management
+
+4. **Port Already in Use:**
+   ```
+   [ALERT] Starting frontend GLOBAL: cannot bind socket
+   ```
+   - Solution: Check if another service is using the same port
+
+**Recovery Steps:**
+
+1. **View Generated Config:**
+   ```bash
+   # On agent server - view the new config that failed validation
+   sudo cat /tmp/haproxy-new-config.cfg
+   
+   # Compare with current working config
+   sudo cat /etc/haproxy/haproxy.cfg
+   ```
+
+2. **Check Agent Logs:**
+   ```bash
+   # See full error context and rollback messages
+   sudo tail -100 /var/log/haproxy-agent/agent.log | grep -A 10 "validation failed"
+   ```
+
+3. **Fix Issues in UI:**
+   - Go to Apply Management → View pending changes
+   - Identify the problematic entity (frontend, backend, SSL certificate)
+   - Edit or delete the problematic entity
+   - Reject current pending changes
+   - Re-apply after fixing
+
+4. **Emergency Rollback:**
+   ```bash
+   # On agent server - agent automatically keeps backup
+   sudo ls -la /etc/haproxy/haproxy.cfg.backup*
+   
+   # Manually restore if needed (agent usually does this automatically on validation failure)
+   sudo cp /etc/haproxy/haproxy.cfg.backup.TIMESTAMP /etc/haproxy/haproxy.cfg
+   sudo systemctl reload haproxy
+   ```
+
+**Prevention:**
+- Always test configurations incrementally (don't make too many changes at once)
+- Use Configuration Viewer to preview generated HAProxy config before applying
+- Ensure SSL certificates are uploaded before creating frontends that use them
+- Keep backend names unique and descriptive
+- Test ACL syntax before saving
+
 ### Debug Mode
 
 Enable debug logging:
