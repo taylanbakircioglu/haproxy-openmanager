@@ -579,6 +579,19 @@ class HAProxyConfigParser:
                             "Please configure these manually after import."
                         )
                         continue  # Skip this directive
+                    
+                    # Check for use-service directives (consistent with frontend parser)
+                    # Services require specific HAProxy features, Lua scripts, or compile-time options
+                    # Cannot be safely imported without knowing agent's HAProxy capabilities
+                    if 'use-service' in line:
+                        self.warnings.append(
+                            f"Backend '{name}': Service directive detected and skipped: '{line.strip()}'. "
+                            "HAProxy services (prometheus-exporter, lua services, custom services) require "
+                            "specific features, scripts, or compile-time options that may not be available. "
+                            "Please configure service directives manually after import."
+                        )
+                        continue  # Skip this directive
+                    
                     request_headers_list.append(line)
                 
                 # Parse HTTP response headers

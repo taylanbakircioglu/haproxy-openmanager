@@ -1417,10 +1417,33 @@ async def bulk_create_entities(
                         update_values.append(backend_data["default_server_rise"])
                         param_index += 1
                     
-                    if backend_data.get("request_headers") and backend_data["request_headers"] != existing_full["request_headers"]:
-                        update_fields.append(f"request_headers = ${param_index}")
-                        update_values.append(backend_data["request_headers"])
-                        param_index += 1
+                    # BUGFIX: Preserve manually-added use-service directives during bulk import
+                    # Use-service directives (like prometheus-exporter) are skipped during parsing
+                    # but should be preserved if manually added to the backend (consistent with frontend)
+                    if backend_data.get("request_headers"):
+                        # Get existing request_headers
+                        existing_headers = existing_full["request_headers"] or ""
+                        new_headers = backend_data["request_headers"]
+                        
+                        # Extract use-service directives from existing headers
+                        use_service_lines = []
+                        if existing_headers:
+                            for line in existing_headers.split('\n'):
+                                if line.strip() and 'use-service' in line:
+                                    use_service_lines.append(line.strip())
+                        
+                        # Merge: Add preserved use-service lines to new headers
+                        merged_headers = new_headers
+                        if use_service_lines:
+                            # Append use-service lines to new headers
+                            merged_headers = new_headers + '\n' + '\n'.join(use_service_lines)
+                            logger.info(f"BULK IMPORT: Preserved {len(use_service_lines)} use-service directive(s) for backend '{backend_data['name']}'")
+                        
+                        # Only update if merged result is different from existing
+                        if merged_headers != existing_headers:
+                            update_fields.append(f"request_headers = ${param_index}")
+                            update_values.append(merged_headers)
+                            param_index += 1
                     
                     if backend_data.get("response_headers") and backend_data["response_headers"] != existing_full["response_headers"]:
                         update_fields.append(f"response_headers = ${param_index}")

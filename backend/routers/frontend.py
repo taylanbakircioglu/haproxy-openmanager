@@ -663,34 +663,6 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
         if filtered_options != frontend.options and frontend.options:
             logger.info(f"Frontend '{frontend.name}': Filtered 'option httpchk' from options field. Health checks are for backends.")
         
-        # BUGFIX: Merge strategy for request_headers (preserve use-service directives)
-        # Use-service directives (like prometheus-exporter) are skipped during parsing
-        # but should be preserved when manually added and frontend is edited
-        merged_request_headers = frontend.request_headers
-        if existing['request_headers']:
-            # Extract use-service directives from existing headers
-            use_service_lines = []
-            for line in existing['request_headers'].split('\n'):
-                if line.strip() and 'use-service' in line:
-                    use_service_lines.append(line.strip())
-            
-            # If there are use-service lines in existing but not in new, preserve them
-            if use_service_lines:
-                new_has_use_service = False
-                if frontend.request_headers:
-                    for line in frontend.request_headers.split('\n'):
-                        if 'use-service' in line:
-                            new_has_use_service = True
-                            break
-                
-                # Only merge if new headers don't already have use-service (avoid duplicates)
-                if not new_has_use_service:
-                    if merged_request_headers:
-                        merged_request_headers = merged_request_headers + '\n' + '\n'.join(use_service_lines)
-                    else:
-                        merged_request_headers = '\n'.join(use_service_lines)
-                    logger.info(f"FRONTEND UPDATE: Preserved {len(use_service_lines)} use-service directive(s) for frontend '{frontend.name}'")
-        
         # BUGFIX: Merge strategy for tcp_request_rules (preserve from bulk import)
         # TCP request rules from bulk import should be preserved during frontend edit
         merged_tcp_request_rules = frontend.tcp_request_rules
@@ -714,7 +686,7 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
             frontend.default_backend, frontend.mode, ssl_enabled,
             ssl_certificate_id, ssl_cert_ids_json, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
             json.dumps(frontend.acl_rules or []), json.dumps(frontend.redirect_rules or []), json.dumps(frontend.use_backend_rules or []),
-            merged_request_headers, frontend.response_headers, filtered_options, merged_tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
+            frontend.request_headers, frontend.response_headers, filtered_options, merged_tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
             frontend.rate_limit, frontend.compression, frontend.log_separate, frontend.monitor_uri,
             frontend.cluster_id, frontend.maxconn, frontend_id)
             
