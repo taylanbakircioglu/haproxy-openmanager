@@ -31,6 +31,87 @@ const { TextArea } = Input;
 const { Title, Text, Paragraph } = Typography;
 const { Panel } = Collapse;
 
+// Helper function: Calculate line-by-line diff for multi-line fields
+const calculateLineDiff = (oldValue, newValue) => {
+  if (!oldValue && !newValue) return { added: [], removed: [], unchanged: [] };
+  if (!oldValue) return { added: newValue.split('\n').filter(l => l.trim()), removed: [], unchanged: [] };
+  if (!newValue) return { added: [], removed: oldValue.split('\n').filter(l => l.trim()), unchanged: [] };
+  
+  const oldLines = oldValue.split('\n').map(l => l.trim()).filter(l => l);
+  const newLines = newValue.split('\n').map(l => l.trim()).filter(l => l);
+  
+  const oldSet = new Set(oldLines);
+  const newSet = new Set(newLines);
+  
+  const added = newLines.filter(line => !oldSet.has(line));
+  const removed = oldLines.filter(line => !newSet.has(line));
+  const unchanged = newLines.filter(line => oldSet.has(line));
+  
+  return { added, removed, unchanged };
+};
+
+// Helper component: Render line-by-line diff for multi-line fields
+const MultiLineDiffRenderer = ({ value, changeInfo }) => {
+  if (!changeInfo) {
+    // No changes, just show the value
+    return (
+      <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+        {value}
+      </Text>
+    );
+  }
+  
+  // Calculate line-by-line diff
+  const diff = calculateLineDiff(changeInfo.old, changeInfo.new);
+  
+  return (
+    <div>
+      {diff.removed.length > 0 && (
+        <div style={{ 
+          marginBottom: diff.added.length > 0 ? 8 : 0,
+          padding: '4px 8px', 
+          backgroundColor: '#fff1f0',
+          borderLeft: '3px solid #ff4d4f',
+          borderRadius: 2
+        }}>
+          <Text type="secondary" style={{ fontSize: '10px' }}>Removed:</Text>
+          <br />
+          {diff.removed.map((line, idx) => (
+            <Text key={idx} delete code style={{ 
+              display: 'block',
+              fontSize: '11px',
+              color: '#ff4d4f' 
+            }}>
+              - {line}
+            </Text>
+          ))}
+        </div>
+      )}
+      {diff.added.length > 0 && (
+        <div style={{ 
+          padding: '4px 8px', 
+          backgroundColor: '#f6ffed',
+          borderLeft: '3px solid #52c41a',
+          borderRadius: 2
+        }}>
+          <Text type="success" style={{ fontSize: '10px' }}>Added:</Text>
+          <br />
+          {diff.added.map((line, idx) => (
+            <Text key={idx} code style={{ 
+              display: 'block',
+              fontSize: '11px',
+              color: '#52c41a',
+              fontWeight: 500
+            }}>
+              + {line}
+            </Text>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // Helper component to display field changes (old vs new)
 const FieldChange = ({ label, oldValue, newValue, span = 2, isMultiline = false }) => {
   // Handle case where oldValue is explicitly undefined (no _changes object)
@@ -992,42 +1073,10 @@ backend web-backend
                                         </span>
                                       }
                                     >
-                                      {frontend._changes?.options && frontend._changes.options.old && (
-                                        <div style={{ 
-                                          marginBottom: 8, 
-                                          padding: '4px 8px', 
-                                          backgroundColor: '#fff1f0',
-                                          borderLeft: '3px solid #ff4d4f',
-                                          borderRadius: 2
-                                        }}>
-                                          <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
-                                          <br />
-                                          <Text delete code style={{ 
-                                            whiteSpace: 'pre-wrap', 
-                                            fontSize: '11px',
-                                            color: '#999' 
-                                          }}>
-                                            {frontend._changes.options.old}
-                                          </Text>
-                                        </div>
-                                      )}
-                                      <div style={frontend._changes?.options ? { 
-                                        padding: '4px 8px', 
-                                        backgroundColor: '#f6ffed',
-                                        borderLeft: '3px solid #52c41a',
-                                        borderRadius: 2
-                                      } : {}}>
-                                        {frontend._changes?.options && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
-                                        {frontend._changes?.options && <br />}
-                                        <Text code style={{ 
-                                          whiteSpace: 'pre-wrap', 
-                                          fontSize: '11px',
-                                          color: frontend._changes?.options ? '#52c41a' : 'inherit',
-                                          fontWeight: frontend._changes?.options ? 500 : 'normal'
-                                        }}>
-                                          {frontend.options}
-                                        </Text>
-                                      </div>
+                                      <MultiLineDiffRenderer 
+                                        value={frontend.options}
+                                        changeInfo={frontend._changes?.options}
+                                      />
                                     </Descriptions.Item>
                                   )}
                                   {frontend.request_headers && (
@@ -1043,42 +1092,10 @@ backend web-backend
                                         </span>
                                       }
                                     >
-                                      {frontend._changes?.request_headers && frontend._changes.request_headers.old && (
-                                        <div style={{ 
-                                          marginBottom: 8, 
-                                          padding: '4px 8px', 
-                                          backgroundColor: '#fff1f0',
-                                          borderLeft: '3px solid #ff4d4f',
-                                          borderRadius: 2
-                                        }}>
-                                          <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
-                                          <br />
-                                          <Text delete code style={{ 
-                                            whiteSpace: 'pre-wrap', 
-                                            fontSize: '11px',
-                                            color: '#999' 
-                                          }}>
-                                            {frontend._changes.request_headers.old}
-                                          </Text>
-                                        </div>
-                                      )}
-                                      <div style={frontend._changes?.request_headers ? { 
-                                        padding: '4px 8px', 
-                                        backgroundColor: '#f6ffed',
-                                        borderLeft: '3px solid #52c41a',
-                                        borderRadius: 2
-                                      } : {}}>
-                                        {frontend._changes?.request_headers && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
-                                        {frontend._changes?.request_headers && <br />}
-                                        <Text code style={{ 
-                                          whiteSpace: 'pre-wrap', 
-                                          fontSize: '11px',
-                                          color: frontend._changes?.request_headers ? '#52c41a' : 'inherit',
-                                          fontWeight: frontend._changes?.request_headers ? 500 : 'normal'
-                                        }}>
-                                          {frontend.request_headers}
-                                        </Text>
-                                      </div>
+                                      <MultiLineDiffRenderer 
+                                        value={frontend.request_headers}
+                                        changeInfo={frontend._changes?.request_headers}
+                                      />
                                     </Descriptions.Item>
                                   )}
                                   {frontend.response_headers && (
@@ -1094,42 +1111,10 @@ backend web-backend
                                         </span>
                                       }
                                     >
-                                      {frontend._changes?.response_headers && frontend._changes.response_headers.old && (
-                                        <div style={{ 
-                                          marginBottom: 8, 
-                                          padding: '4px 8px', 
-                                          backgroundColor: '#fff1f0',
-                                          borderLeft: '3px solid #ff4d4f',
-                                          borderRadius: 2
-                                        }}>
-                                          <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
-                                          <br />
-                                          <Text delete code style={{ 
-                                            whiteSpace: 'pre-wrap', 
-                                            fontSize: '11px',
-                                            color: '#999' 
-                                          }}>
-                                            {frontend._changes.response_headers.old}
-                                          </Text>
-                                        </div>
-                                      )}
-                                      <div style={frontend._changes?.response_headers ? { 
-                                        padding: '4px 8px', 
-                                        backgroundColor: '#f6ffed',
-                                        borderLeft: '3px solid #52c41a',
-                                        borderRadius: 2
-                                      } : {}}>
-                                        {frontend._changes?.response_headers && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
-                                        {frontend._changes?.response_headers && <br />}
-                                        <Text code style={{ 
-                                          whiteSpace: 'pre-wrap', 
-                                          fontSize: '11px',
-                                          color: frontend._changes?.response_headers ? '#52c41a' : 'inherit',
-                                          fontWeight: frontend._changes?.response_headers ? 500 : 'normal'
-                                        }}>
-                                          {frontend.response_headers}
-                                        </Text>
-                                      </div>
+                                      <MultiLineDiffRenderer 
+                                        value={frontend.response_headers}
+                                        changeInfo={frontend._changes?.response_headers}
+                                      />
                                     </Descriptions.Item>
                                   )}
                                   {frontend.tcp_request_rules && (
@@ -1145,42 +1130,10 @@ backend web-backend
                                         </span>
                                       }
                                     >
-                                      {frontend._changes?.tcp_request_rules && frontend._changes.tcp_request_rules.old && (
-                                        <div style={{ 
-                                          marginBottom: 8, 
-                                          padding: '4px 8px', 
-                                          backgroundColor: '#fff1f0',
-                                          borderLeft: '3px solid #ff4d4f',
-                                          borderRadius: 2
-                                        }}>
-                                          <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
-                                          <br />
-                                          <Text delete code style={{ 
-                                            whiteSpace: 'pre-wrap', 
-                                            fontSize: '11px',
-                                            color: '#999' 
-                                          }}>
-                                            {frontend._changes.tcp_request_rules.old}
-                                          </Text>
-                                        </div>
-                                      )}
-                                      <div style={frontend._changes?.tcp_request_rules ? { 
-                                        padding: '4px 8px', 
-                                        backgroundColor: '#f6ffed',
-                                        borderLeft: '3px solid #52c41a',
-                                        borderRadius: 2
-                                      } : {}}>
-                                        {frontend._changes?.tcp_request_rules && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
-                                        {frontend._changes?.tcp_request_rules && <br />}
-                                        <Text code style={{ 
-                                          whiteSpace: 'pre-wrap', 
-                                          fontSize: '11px',
-                                          color: frontend._changes?.tcp_request_rules ? '#52c41a' : 'inherit',
-                                          fontWeight: frontend._changes?.tcp_request_rules ? 500 : 'normal'
-                                        }}>
-                                          {frontend.tcp_request_rules}
-                                        </Text>
-                                      </div>
+                                      <MultiLineDiffRenderer 
+                                        value={frontend.tcp_request_rules}
+                                        changeInfo={frontend._changes?.tcp_request_rules}
+                                      />
                                     </Descriptions.Item>
                                   )}
                                   {frontend.acl_rules && frontend.acl_rules.length > 0 && (
@@ -1272,42 +1225,10 @@ backend web-backend
                                           } 
                                           span={2}
                                         >
-                                          {backend._changes?.options && backend._changes.options.old && (
-                                            <div style={{ 
-                                              marginBottom: 8, 
-                                              padding: '4px 8px', 
-                                              backgroundColor: '#fff1f0',
-                                              borderLeft: '3px solid #ff4d4f',
-                                              borderRadius: 2
-                                            }}>
-                                              <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
-                                              <br />
-                                              <Text delete code style={{ 
-                                                whiteSpace: 'pre-wrap', 
-                                                fontSize: '11px',
-                                                color: '#999' 
-                                              }}>
-                                                {backend._changes.options.old}
-                                              </Text>
-                                            </div>
-                                          )}
-                                          <div style={backend._changes?.options ? { 
-                                            padding: '4px 8px', 
-                                            backgroundColor: '#f6ffed',
-                                            borderLeft: '3px solid #52c41a',
-                                            borderRadius: 2
-                                          } : {}}>
-                                            {backend._changes?.options && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
-                                            {backend._changes?.options && <br />}
-                                            <Text code style={{ 
-                                              whiteSpace: 'pre-wrap', 
-                                              fontSize: '11px',
-                                              color: backend._changes?.options ? '#52c41a' : 'inherit',
-                                              fontWeight: backend._changes?.options ? 500 : 'normal'
-                                            }}>
-                                              {backend.options}
-                                            </Text>
-                                          </div>
+                                          <MultiLineDiffRenderer 
+                                            value={backend.options}
+                                            changeInfo={backend._changes?.options}
+                                          />
                                         </Descriptions.Item>
                                       )}
                                       {backend.request_headers && (
@@ -1324,42 +1245,10 @@ backend web-backend
                                           } 
                                           span={2}
                                         >
-                                          {backend._changes?.request_headers && backend._changes.request_headers.old && (
-                                            <div style={{ 
-                                              marginBottom: 8, 
-                                              padding: '4px 8px', 
-                                              backgroundColor: '#fff1f0',
-                                              borderLeft: '3px solid #ff4d4f',
-                                              borderRadius: 2
-                                            }}>
-                                              <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
-                                              <br />
-                                              <Text delete code style={{ 
-                                                whiteSpace: 'pre-wrap', 
-                                                fontSize: '11px',
-                                                color: '#999' 
-                                              }}>
-                                                {backend._changes.request_headers.old}
-                                              </Text>
-                                            </div>
-                                          )}
-                                          <div style={backend._changes?.request_headers ? { 
-                                            padding: '4px 8px', 
-                                            backgroundColor: '#f6ffed',
-                                            borderLeft: '3px solid #52c41a',
-                                            borderRadius: 2
-                                          } : {}}>
-                                            {backend._changes?.request_headers && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
-                                            {backend._changes?.request_headers && <br />}
-                                            <Text code style={{ 
-                                              whiteSpace: 'pre-wrap', 
-                                              fontSize: '11px',
-                                              color: backend._changes?.request_headers ? '#52c41a' : 'inherit',
-                                              fontWeight: backend._changes?.request_headers ? 500 : 'normal'
-                                            }}>
-                                              {backend.request_headers}
-                                            </Text>
-                                          </div>
+                                          <MultiLineDiffRenderer 
+                                            value={backend.request_headers}
+                                            changeInfo={backend._changes?.request_headers}
+                                          />
                                         </Descriptions.Item>
                                       )}
                                       {backend.response_headers && (
@@ -1376,42 +1265,10 @@ backend web-backend
                                           } 
                                           span={2}
                                         >
-                                          {backend._changes?.response_headers && backend._changes.response_headers.old && (
-                                            <div style={{ 
-                                              marginBottom: 8, 
-                                              padding: '4px 8px', 
-                                              backgroundColor: '#fff1f0',
-                                              borderLeft: '3px solid #ff4d4f',
-                                              borderRadius: 2
-                                            }}>
-                                              <Text type="secondary" style={{ fontSize: '10px' }}>Old:</Text>
-                                              <br />
-                                              <Text delete code style={{ 
-                                                whiteSpace: 'pre-wrap', 
-                                                fontSize: '11px',
-                                                color: '#999' 
-                                              }}>
-                                                {backend._changes.response_headers.old}
-                                              </Text>
-                                            </div>
-                                          )}
-                                          <div style={backend._changes?.response_headers ? { 
-                                            padding: '4px 8px', 
-                                            backgroundColor: '#f6ffed',
-                                            borderLeft: '3px solid #52c41a',
-                                            borderRadius: 2
-                                          } : {}}>
-                                            {backend._changes?.response_headers && <Text type="success" style={{ fontSize: '10px' }}>New:</Text>}
-                                            {backend._changes?.response_headers && <br />}
-                                            <Text code style={{ 
-                                              whiteSpace: 'pre-wrap', 
-                                              fontSize: '11px',
-                                              color: backend._changes?.response_headers ? '#52c41a' : 'inherit',
-                                              fontWeight: backend._changes?.response_headers ? 500 : 'normal'
-                                            }}>
-                                              {backend.response_headers}
-                                            </Text>
-                                          </div>
+                                          <MultiLineDiffRenderer 
+                                            value={backend.response_headers}
+                                            changeInfo={backend._changes?.response_headers}
+                                          />
                                         </Descriptions.Item>
                                       )}
                                     </Descriptions>
