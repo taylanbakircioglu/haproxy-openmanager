@@ -585,7 +585,9 @@ const FrontendManagement = () => {
       redirect_rules: formattedRedirectRules,
       use_backend_rules: formattedUseBackendRules,
       // Explicitly set options field to handle null/undefined case (NEW field)
-      options: frontend.options || ''
+      options: frontend.options || '',
+      // BUGFIX: Explicitly set tcp_request_rules field to handle null/undefined case
+      tcp_request_rules: frontend.tcp_request_rules || ''
     });
     
     // Update SSL field visibility after setting values
@@ -1605,6 +1607,21 @@ acl host_example hdr(host) -i example.com`}
 use_backend api_servers if is_api
 use_backend static_servers if is_static
 use_backend admin_servers if is_admin`}
+                />
+              </Form.Item>
+
+              <Form.Item
+                name="redirect_rules"
+                label="HTTP Redirect Rules"
+                extra="Define HTTP redirect rules (HTTP to HTTPS, domain redirects, etc.)"
+                tooltip="Redirect rules are applied before backend routing"
+              >
+                <TextArea
+                  rows={4}
+                  placeholder={`Examples:
+redirect scheme https if !{ ssl_fc }
+redirect prefix https://www.example.com code 301 if { hdr(host) -i example.com }
+redirect location https://newsite.com code 302`}
                 />
               </Form.Item>
             </Panel>
