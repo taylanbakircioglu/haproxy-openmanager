@@ -1236,10 +1236,9 @@ async def update_server(server_id: int, server_data: dict, request: Request, aut
         
         conn = await get_database_connection()
         
-        # Check if server exists
+        # PHASE 2: Get FULL server record for snapshot
         existing_server = await conn.fetchrow("""
-            SELECT id, server_name, backend_name, cluster_id 
-            FROM backend_servers WHERE id = $1
+            SELECT * FROM backend_servers WHERE id = $1
         """, server_id)
         
         if not existing_server:
@@ -1292,8 +1291,19 @@ async def update_server(server_id: int, server_data: dict, request: Request, aut
         if cluster_id:
             try:
                 from services.haproxy_config import generate_haproxy_config_for_cluster
+                from utils.entity_snapshot import save_entity_snapshot
                 import hashlib
                 import time
+                
+                # 🆕 PHASE 2: Create entity snapshot for rollback
+                entity_snapshot_metadata = await save_entity_snapshot(
+                    conn=conn,
+                    entity_type="server",
+                    entity_id=server_id,
+                    old_values=existing_server,  # Full record with ALL fields
+                    new_values=server_data,  # Only updated fields
+                    operation="UPDATE"
+                )
                 
                 # Generate new HAProxy config (after database commit)
                 config_content = await generate_haproxy_config_for_cluster(cluster_id)
@@ -1306,13 +1316,27 @@ async def update_server(server_id: int, server_data: dict, request: Request, aut
                 conn2 = await get_database_connection()
                 admin_user_id = await conn2.fetchval("SELECT id FROM users WHERE username = 'admin' LIMIT 1") or 1
                 
-                # Create PENDING config version
+                # Get pre-apply snapshot (for diff viewer)
+                old_config = await conn2.fetchval("""
+                    SELECT config_content FROM config_versions 
+                    WHERE cluster_id = $1 AND status = 'APPLIED' AND is_active = TRUE
+                    ORDER BY created_at DESC LIMIT 1
+                """, cluster_id)
+                
+                # Merge metadata: pre_apply_snapshot + entity_snapshot
+                metadata = {
+                    "pre_apply_snapshot": old_config or "",  # For diff viewer
+                    **entity_snapshot_metadata  # For rollback
+                }
+                
+                # Create PENDING config version with metadata
                 config_version_id = await conn2.fetchval("""
                     INSERT INTO config_versions 
-                    (cluster_id, version_name, config_content, checksum, created_by, is_active, status)
-                    VALUES ($1, $2, $3, $4, $5, FALSE, 'PENDING')
+                    (cluster_id, version_name, config_content, checksum, created_by, is_active, status, metadata)
+                    VALUES ($1, $2, $3, $4, $5, FALSE, 'PENDING', $6)
                     RETURNING id
-                """, cluster_id, version_name, config_content, config_hash, admin_user_id)
+                """, cluster_id, version_name, config_content, config_hash, admin_user_id,
+                     json.dumps(metadata) if metadata else None)
                 
                 logger.info(f"APPLY WORKFLOW: Created PENDING config version {version_name} for cluster {cluster_id}")
                 

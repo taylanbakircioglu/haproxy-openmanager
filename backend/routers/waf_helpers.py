@@ -33,7 +33,7 @@ async def assign_frontends_and_get_clusters(conn, rule_id, frontend_ids, waf_clu
     
     return frontend_assignments, cluster_ids
 
-async def create_pending_configs_for_clusters(conn, cluster_ids, action, rule_id):
+async def create_pending_configs_for_clusters(conn, cluster_ids, action, rule_id, entity_snapshot_metadata=None):
     """Generate HAProxy config and create PENDING config versions for affected clusters."""
     sync_results = []
     admin_user_id = await conn.fetchval("SELECT id FROM users WHERE username = 'admin' LIMIT 1") or 1
@@ -46,12 +46,27 @@ async def create_pending_configs_for_clusters(conn, cluster_ids, action, rule_id
             config_hash = hashlib.sha256(config_content.encode()).hexdigest()
             version_name = f"waf-{rule_id}-{action}-{int(time.time())}"
             
+            # PHASE 2: Merge metadata with entity snapshot if provided
+            metadata = {}
+            if entity_snapshot_metadata:
+                # Get pre-apply snapshot
+                old_config = await conn.fetchval("""
+                    SELECT config_content FROM config_versions 
+                    WHERE cluster_id = $1 AND status = 'APPLIED' AND is_active = TRUE
+                    ORDER BY created_at DESC LIMIT 1
+                """, cluster_id)
+                metadata = {
+                    "pre_apply_snapshot": old_config or "",
+                    **entity_snapshot_metadata
+                }
+            
             await conn.fetchval("""
                 INSERT INTO config_versions 
-                (cluster_id, version_name, config_content, checksum, created_by, is_active, status, file_size)
-                VALUES ($1, $2, $3, $4, $5, FALSE, 'PENDING', $6)
+                (cluster_id, version_name, config_content, checksum, created_by, is_active, status, file_size, metadata)
+                VALUES ($1, $2, $3, $4, $5, FALSE, 'PENDING', $6, $7)
                 RETURNING id
-            """, cluster_id, version_name, config_content, config_hash, admin_user_id, len(config_content))
+            """, cluster_id, version_name, config_content, config_hash, admin_user_id, len(config_content),
+                 json.dumps(metadata) if metadata else None)
             
             logger.info(f"APPLY WORKFLOW: Created PENDING config version {version_name} for cluster {cluster_id}")
             sync_results.append({

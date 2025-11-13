@@ -600,7 +600,7 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
         
         conn = await get_database_connection()
         
-        # 🆕 PHASE 2: Get FULL frontend record for snapshot (all fields)
+        # PHASE 2: Get FULL frontend record for snapshot (all fields)
         # CRITICAL: We need ALL fields for rollback, not just SSL fields
         existing = await conn.fetchrow("""
             SELECT * FROM frontends WHERE id = $1
@@ -709,7 +709,7 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
                 # Get system admin user ID for created_by
                 admin_user_id = await conn.fetchval("SELECT id FROM users WHERE username = 'admin' LIMIT 1") or 1
                 
-                # 🆕 PHASE 2: Create entity snapshot for rollback
+                # PHASE 2: Create entity snapshot for rollback
                 from utils.entity_snapshot import save_entity_snapshot
                 
                 # Prepare new values for snapshot (only changed fields)

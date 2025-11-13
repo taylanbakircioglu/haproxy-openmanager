@@ -133,14 +133,14 @@ async def save_entity_snapshot(
             }
         
         logger.info(
-            f"✅ SNAPSHOT: Created for {entity_type} {entity_id} "
+            f"SNAPSHOT: Created for {entity_type} {entity_id} "
             f"(operation={operation}, changed_fields={len(changed_fields)})"
         )
         
         return {"entity_snapshot": snapshot}
         
     except Exception as e:
-        logger.error(f"❌ SNAPSHOT ERROR: Failed to create snapshot for {entity_type} {entity_id}: {e}")
+        logger.error(f"SNAPSHOT ERROR: Failed to create snapshot for {entity_type} {entity_id}: {e}")
         # Return empty dict on error (graceful degradation)
         return {}
 
@@ -180,7 +180,7 @@ async def rollback_entity_from_snapshot(
     old_values = entity_snapshot.get("old_values")
     
     if not all([entity_type, entity_id, operation, old_values]):
-        logger.warning(f"⚠️ ROLLBACK: Invalid snapshot data, skipping rollback")
+        logger.warning(f"ROLLBACK: Invalid snapshot data, skipping rollback")
         return False
     
     try:
@@ -202,11 +202,11 @@ async def rollback_entity_from_snapshot(
             return success
         
         else:
-            logger.warning(f"⚠️ ROLLBACK: Unknown operation '{operation}', skipping")
+            logger.warning(f"ROLLBACK: Unknown operation '{operation}', skipping")
             return False
             
     except Exception as e:
-        logger.error(f"❌ ROLLBACK ERROR: Failed for {entity_type} {entity_id}: {e}")
+        logger.error(f"ROLLBACK ERROR: Failed for {entity_type} {entity_id}: {e}")
         return False
 
 
@@ -278,23 +278,26 @@ async def _rollback_update(
                 old_values.get('updated_at'),
                 entity_id
             )
-            logger.info(f"✅ ROLLBACK UPDATE: Frontend {entity_id} restored to previous state")
+            logger.info(f"ROLLBACK UPDATE: Frontend {entity_id} restored to previous state")
             return True
             
         elif entity_type == "backend":
             # Backend'i eski değerlerine geri yükle
+            # SCHEMA: backends (ALL FIELDS from migrations.py line 1943-1962 + additions 1966-2006)
             await conn.execute("""
                 UPDATE backends SET
                     name = $1, balance_method = $2, mode = $3,
                     health_check_uri = $4, health_check_interval = $5,
                     health_check_expected_status = $6, fullconn = $7,
-                    cookie_name = $8, cookie_options = $9,
-                    default_server_inter = $10, default_server_fall = $11,
-                    default_server_rise = $12, request_headers = $13,
-                    response_headers = $14, options = $15,
-                    timeout_connect = $16, timeout_server = $17, timeout_queue = $18,
-                    last_config_status = $19, updated_at = $20
-                WHERE id = $21
+                    timeout_connect = $8, timeout_server = $9, timeout_queue = $10,
+                    cluster_id = $11, maxconn = $12, last_config_status = $13,
+                    is_active = $14,
+                    cookie_name = $15, cookie_options = $16,
+                    default_server_inter = $17, default_server_fall = $18,
+                    default_server_rise = $19, request_headers = $20,
+                    response_headers = $21, options = $22,
+                    updated_at = $23
+                WHERE id = $24
             """,
                 old_values.get('name'),
                 old_values.get('balance_method'),
@@ -303,6 +306,13 @@ async def _rollback_update(
                 old_values.get('health_check_interval'),
                 old_values.get('health_check_expected_status'),
                 old_values.get('fullconn'),
+                old_values.get('timeout_connect'),
+                old_values.get('timeout_server'),
+                old_values.get('timeout_queue'),
+                old_values.get('cluster_id'),
+                old_values.get('maxconn'),
+                old_values.get('last_config_status'),
+                old_values.get('is_active'),
                 old_values.get('cookie_name'),
                 old_values.get('cookie_options'),
                 old_values.get('default_server_inter'),
@@ -311,101 +321,123 @@ async def _rollback_update(
                 old_values.get('request_headers'),
                 old_values.get('response_headers'),
                 old_values.get('options'),
-                old_values.get('timeout_connect'),
-                old_values.get('timeout_server'),
-                old_values.get('timeout_queue'),
-                old_values.get('last_config_status'),
                 old_values.get('updated_at'),
                 entity_id
             )
-            logger.info(f"✅ ROLLBACK UPDATE: Backend {entity_id} restored to previous state")
+            logger.info(f"ROLLBACK UPDATE: Backend {entity_id} restored to previous state")
             return True
             
         elif entity_type == "waf_rule":
             # WAF rule'u eski değerlerine geri yükle
+            # SCHEMA: waf_rules (ALL FIELDS from migrations.py line 2144-2160)
             await conn.execute("""
                 UPDATE waf_rules SET
-                    name = $1, rule_type = $2, action = $3, priority = $4,
-                    description = $5, is_active = $6, config = $7,
-                    last_config_status = $8, updated_at = $9
-                WHERE id = $10
+                    name = $1, rule_type = $2, config = $3, action = $4,
+                    priority = $5, description = $6, enabled = $7,
+                    cluster_id = $8, last_config_status = $9, is_active = $10,
+                    updated_at = $11
+                WHERE id = $12
             """,
                 old_values.get('name'),
                 old_values.get('rule_type'),
+                old_values.get('config'),
                 old_values.get('action'),
                 old_values.get('priority'),
                 old_values.get('description'),
-                old_values.get('is_active'),
-                old_values.get('config'),
+                old_values.get('enabled'),
+                old_values.get('cluster_id'),
                 old_values.get('last_config_status'),
+                old_values.get('is_active'),
                 old_values.get('updated_at'),
                 entity_id
             )
-            logger.info(f"✅ ROLLBACK UPDATE: WAF rule {entity_id} restored to previous state")
+            logger.info(f"ROLLBACK UPDATE: WAF rule {entity_id} restored to previous state")
             return True
             
         elif entity_type == "ssl_certificate":
             # SSL certificate'i eski değerlerine geri yükle
+            # SCHEMA: ssl_certificates (ALL FIELDS from migrations.py line 2120-2140)
             await conn.execute("""
                 UPDATE ssl_certificates SET
                     name = $1, primary_domain = $2, certificate_content = $3,
                     private_key_content = $4, chain_content = $5,
-                    expiration_date = $6, usage_type = $7,
-                    last_config_status = $8, updated_at = $9
-                WHERE id = $10
+                    expiry_date = $6, issuer = $7, status = $8,
+                    fingerprint = $9, days_until_expiry = $10, all_domains = $11,
+                    cluster_id = $12, last_config_status = $13, usage_type = $14,
+                    is_active = $15, updated_at = $16
+                WHERE id = $17
             """,
                 old_values.get('name'),
                 old_values.get('primary_domain'),
                 old_values.get('certificate_content'),
                 old_values.get('private_key_content'),
                 old_values.get('chain_content'),
-                old_values.get('expiration_date'),
-                old_values.get('usage_type'),
+                old_values.get('expiry_date'),
+                old_values.get('issuer'),
+                old_values.get('status'),
+                old_values.get('fingerprint'),
+                old_values.get('days_until_expiry'),
+                old_values.get('all_domains'),
+                old_values.get('cluster_id'),
                 old_values.get('last_config_status'),
+                old_values.get('usage_type'),
+                old_values.get('is_active'),
                 old_values.get('updated_at'),
                 entity_id
             )
-            logger.info(f"✅ ROLLBACK UPDATE: SSL certificate {entity_id} restored to previous state")
+            logger.info(f"ROLLBACK UPDATE: SSL certificate {entity_id} restored to previous state")
             return True
             
         elif entity_type == "server":
             # Server'ı eski değerlerine geri yükle
+            # SCHEMA: backend_servers (ALL FIELDS from migrations.py line 2010-2036)
             await conn.execute("""
                 UPDATE backend_servers SET
-                    server_name = $1, backend_name = $2, ip_address = $3, port = $4,
-                    weight = $5, maxconn = $6, check_enabled = $7,
-                    check_inter = $8, check_fall = $9, check_rise = $10,
-                    check_port = $11, server_options = $12, is_backup = $13,
-                    is_active = $14, last_config_status = $15, updated_at = $16
-                WHERE id = $17
+                    backend_id = $1, backend_name = $2, server_name = $3,
+                    server_address = $4, server_port = $5, weight = $6,
+                    maxconn = $7, check_enabled = $8, check_port = $9,
+                    backup_server = $10, ssl_enabled = $11, ssl_verify = $12,
+                    ssl_certificate_id = $13, cookie_value = $14,
+                    inter = $15, fall = $16, rise = $17,
+                    cluster_id = $18, is_active = $19, last_config_status = $20,
+                    haproxy_status = $21, haproxy_status_updated_at = $22,
+                    updated_at = $23
+                WHERE id = $24
             """,
-                old_values.get('server_name'),
+                old_values.get('backend_id'),
                 old_values.get('backend_name'),
-                old_values.get('ip_address'),
-                old_values.get('port'),
+                old_values.get('server_name'),
+                old_values.get('server_address'),
+                old_values.get('server_port'),
                 old_values.get('weight'),
                 old_values.get('maxconn'),
                 old_values.get('check_enabled'),
-                old_values.get('check_inter'),
-                old_values.get('check_fall'),
-                old_values.get('check_rise'),
                 old_values.get('check_port'),
-                old_values.get('server_options'),
-                old_values.get('is_backup'),
+                old_values.get('backup_server'),
+                old_values.get('ssl_enabled'),
+                old_values.get('ssl_verify'),
+                old_values.get('ssl_certificate_id'),
+                old_values.get('cookie_value'),
+                old_values.get('inter'),
+                old_values.get('fall'),
+                old_values.get('rise'),
+                old_values.get('cluster_id'),
                 old_values.get('is_active'),
                 old_values.get('last_config_status'),
+                old_values.get('haproxy_status'),
+                old_values.get('haproxy_status_updated_at'),
                 old_values.get('updated_at'),
                 entity_id
             )
-            logger.info(f"✅ ROLLBACK UPDATE: Server {entity_id} restored to previous state")
+            logger.info(f"ROLLBACK UPDATE: Server {entity_id} restored to previous state")
             return True
             
         else:
-            logger.warning(f"⚠️ ROLLBACK UPDATE: Unsupported entity type '{entity_type}'")
+            logger.warning(f"ROLLBACK UPDATE: Unsupported entity type '{entity_type}'")
             return False
             
     except Exception as e:
-        logger.error(f"❌ ROLLBACK UPDATE ERROR: {entity_type} {entity_id}: {e}", exc_info=True)
+        logger.error(f"ROLLBACK UPDATE ERROR: {entity_type} {entity_id}: {e}", exc_info=True)
         return False
 
 
@@ -437,36 +469,36 @@ async def _rollback_create(
     try:
         if entity_type == "frontend":
             await conn.execute("DELETE FROM frontends WHERE id = $1", entity_id)
-            logger.info(f"✅ ROLLBACK CREATE: Deleted frontend {entity_id}")
+            logger.info(f"ROLLBACK CREATE: Deleted frontend {entity_id}")
             return True
             
         elif entity_type == "backend":
             # Cascade delete: servers otomatik silinecek (foreign key)
             await conn.execute("DELETE FROM backends WHERE id = $1", entity_id)
-            logger.info(f"✅ ROLLBACK CREATE: Deleted backend {entity_id} (+ cascade servers)")
+            logger.info(f"ROLLBACK CREATE: Deleted backend {entity_id} (+ cascade servers)")
             return True
             
         elif entity_type == "waf_rule":
             await conn.execute("DELETE FROM waf_rules WHERE id = $1", entity_id)
-            logger.info(f"✅ ROLLBACK CREATE: Deleted WAF rule {entity_id}")
+            logger.info(f"ROLLBACK CREATE: Deleted WAF rule {entity_id}")
             return True
             
         elif entity_type == "ssl_certificate":
             await conn.execute("DELETE FROM ssl_certificates WHERE id = $1", entity_id)
-            logger.info(f"✅ ROLLBACK CREATE: Deleted SSL certificate {entity_id}")
+            logger.info(f"ROLLBACK CREATE: Deleted SSL certificate {entity_id}")
             return True
             
         elif entity_type == "server":
             await conn.execute("DELETE FROM backend_servers WHERE id = $1", entity_id)
-            logger.info(f"✅ ROLLBACK CREATE: Deleted server {entity_id}")
+            logger.info(f"ROLLBACK CREATE: Deleted server {entity_id}")
             return True
             
         else:
-            logger.warning(f"⚠️ ROLLBACK CREATE: Unsupported entity type '{entity_type}'")
+            logger.warning(f"ROLLBACK CREATE: Unsupported entity type '{entity_type}'")
             return False
             
     except Exception as e:
-        logger.error(f"❌ ROLLBACK CREATE ERROR: {entity_type} {entity_id}: {e}", exc_info=True)
+        logger.error(f"ROLLBACK CREATE ERROR: {entity_type} {entity_id}: {e}", exc_info=True)
         return False
 
 
@@ -498,7 +530,7 @@ async def _rollback_delete(
         True if successful, False otherwise
     """
     logger.warning(
-        f"⚠️ ROLLBACK DELETE: Not implemented yet for {entity_type} {entity_id}. "
+        f"ROLLBACK DELETE: Not implemented yet for {entity_type} {entity_id}. "
         "Currently using soft-delete (is_active=false). Hard-delete rollback is a future feature."
     )
     return False

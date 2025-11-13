@@ -4248,6 +4248,59 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
             await close_database_connection(conn)
             return {"message": "No pending changes found to reject", "rejected_count": 0}
         
+        # PHASE 3: Rollback entities from snapshots BEFORE marking as REJECTED
+        from utils.entity_snapshot import rollback_entity_from_snapshot
+        import json as json_module
+        
+        rollback_success_count = 0
+        rollback_fail_count = 0
+        rollback_skip_count = 0
+        
+        for version in pending_versions:
+            try:
+                # Parse metadata
+                metadata = json_module.loads(version['metadata']) if version['metadata'] else {}
+                
+                # Check for single entity snapshot
+                entity_snapshot = metadata.get('entity_snapshot')
+                if entity_snapshot:
+                    # Single entity rollback
+                    success = await rollback_entity_from_snapshot(conn, entity_snapshot)
+                    if success:
+                        rollback_success_count += 1
+                        logger.info(f"REJECT ROLLBACK: Rolled back {entity_snapshot['entity_type']} {entity_snapshot['entity_id']}")
+                    else:
+                        rollback_fail_count += 1
+                        logger.warning(f"REJECT ROLLBACK: Failed to rollback {entity_snapshot.get('entity_type')} {entity_snapshot.get('entity_id')}")
+                
+                # Check for bulk snapshots (bulk import, restore)
+                bulk_snapshots = metadata.get('bulk_snapshots', [])
+                if bulk_snapshots:
+                    # Bulk entity rollback
+                    logger.info(f"REJECT ROLLBACK: Processing bulk snapshot with {len(bulk_snapshots)} entities")
+                    for snapshot_wrapper in bulk_snapshots:
+                        entity_snap = snapshot_wrapper.get('entity_snapshot')
+                        if entity_snap:
+                            success = await rollback_entity_from_snapshot(conn, entity_snap)
+                            if success:
+                                rollback_success_count += 1
+                            else:
+                                rollback_fail_count += 1
+                
+                # If no snapshot found
+                if not entity_snapshot and not bulk_snapshots:
+                    rollback_skip_count += 1
+                    logger.debug(f"REJECT ROLLBACK: No entity snapshot in version {version['version_name']}, skipping rollback")
+                    
+            except Exception as rollback_error:
+                logger.error(f"REJECT ROLLBACK ERROR: Version {version['version_name']}: {rollback_error}", exc_info=True)
+                rollback_fail_count += 1
+        
+        logger.info(
+            f"REJECT ROLLBACK SUMMARY: success={rollback_success_count}, "
+            f"failed={rollback_fail_count}, skipped={rollback_skip_count}"
+        )
+        
         # Mark all pending config versions as REJECTED (don't delete them)
         rejected_count = len(pending_versions)
         await conn.execute("""
@@ -4256,7 +4309,7 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
             WHERE cluster_id = $1 AND status = 'PENDING'
         """, cluster_id)
 
-        # Reflect REJECTED for WAF rules referenced in those pending versions
+        # Update WAF rules status to APPLIED (rolled back)
         try:
             waf_ids = []
             import re
@@ -4265,16 +4318,19 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                 if m:
                     waf_ids.append(int(m.group(1)))
             if waf_ids:
-                await conn.execute("UPDATE waf_rules SET last_config_status = 'REJECTED' WHERE id = ANY($1)", waf_ids)
+                await conn.execute("UPDATE waf_rules SET last_config_status = 'APPLIED' WHERE id = ANY($1)", waf_ids)
+                logger.info(f"REJECT: Updated {len(waf_ids)} WAF rules status to APPLIED (rolled back)")
         except Exception as _:
             pass
 
-        # Reflect REJECTED for frontends, backends, and servers referenced
+        # PHASE 3: Update entity statuses to APPLIED (entities were rolled back)
+        # CRITICAL: Entities are now at their old values, so status should be APPLIED not REJECTED
         # CRITICAL FIX: Only update entities that actually belong to this cluster (prevent orphan versions)
         try:
             fe_ids = []
             be_ids = []
             srv_ids = []
+            ssl_ids = []
             import re
             for v in pending_versions:
                 m1 = re.search(r'^frontend-(\d+)-', v['version_name'])
@@ -4287,24 +4343,36 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                 m3 = re.search(r'^server-(\d+)-', v['version_name'])
                 if m3:
                     srv_ids.append(int(m3.group(1)))
+                m4 = re.search(r'^ssl-(\d+)-', v['version_name'])
+                if m4:
+                    ssl_ids.append(int(m4.group(1)))
             
             # CRITICAL: Only update entities that belong to THIS cluster (multi-cluster isolation)
+            # Status = APPLIED because entities were rolled back to their old values
             if fe_ids:
                 await conn.execute("""
-                    UPDATE frontends SET last_config_status = 'REJECTED' 
+                    UPDATE frontends SET last_config_status = 'APPLIED' 
                     WHERE id = ANY($1) AND cluster_id = $2
                 """, fe_ids, cluster_id)
+                logger.info(f"REJECT: Updated {len(fe_ids)} frontends status to APPLIED (rolled back)")
             if be_ids:
                 await conn.execute("""
-                    UPDATE backends SET last_config_status = 'REJECTED' 
+                    UPDATE backends SET last_config_status = 'APPLIED' 
                     WHERE id = ANY($1) AND cluster_id = $2
                 """, be_ids, cluster_id)
+                logger.info(f"REJECT: Updated {len(be_ids)} backends status to APPLIED (rolled back)")
             if srv_ids:
                 await conn.execute("""
-                    UPDATE backend_servers SET last_config_status = 'REJECTED' 
+                    UPDATE backend_servers SET last_config_status = 'APPLIED' 
                     WHERE id = ANY($1) AND cluster_id = $2
                 """, srv_ids, cluster_id)
-                logger.info(f"REJECT: Marked {len(srv_ids)} servers as REJECTED")
+                logger.info(f"REJECT: Updated {len(srv_ids)} servers status to APPLIED (rolled back)")
+            if ssl_ids:
+                await conn.execute("""
+                    UPDATE ssl_certificates SET last_config_status = 'APPLIED' 
+                    WHERE id = ANY($1)
+                """, ssl_ids)
+                logger.info(f"REJECT: Updated {len(ssl_ids)} SSL certificates status to APPLIED (rolled back)")
         except Exception as e:
             logger.warning(f"Failed to update entity statuses during reject: {e}")
             pass

@@ -639,6 +639,28 @@ async def update_waf_rule(rule_id: int, waf_rule_data: dict, request: Request, a
             # CRITICAL FIX: Mark as PENDING *before* generating config
             await conn.execute("UPDATE waf_rules SET last_config_status = 'PENDING' WHERE id = $1", rule_id)
             
+            # PHASE 2: Create entity snapshot for rollback
+            from utils.entity_snapshot import save_entity_snapshot
+            
+            new_values = {
+                "name": waf_rule.name,
+                "rule_type": waf_rule.rule_type,
+                "action": waf_rule.action,
+                "priority": waf_rule.priority,
+                "description": waf_rule.description,
+                "is_active": waf_rule.is_active,
+                "config": json.dumps(waf_rule.config)
+            }
+            
+            entity_snapshot_metadata = await save_entity_snapshot(
+                conn=conn,
+                entity_type="waf_rule",
+                entity_id=rule_id,
+                old_values=existing_rule,
+                new_values=new_values,
+                operation="UPDATE"
+            )
+            
             # Update frontend assignments if provided
             frontend_assignments = []
             cluster_ids = set()
@@ -662,7 +684,8 @@ async def update_waf_rule(rule_id: int, waf_rule_data: dict, request: Request, a
                 _ , cluster_ids = await assign_frontends_and_get_clusters(conn, rule_id, existing_frontend_ids, existing_rule.get("cluster_id"))
                 logger.info(f"WAF Update: Frontend associations preserved for rule {rule_id}: {existing_frontend_ids}")
 
-            sync_results = await create_pending_configs_for_clusters(conn, cluster_ids, "update", rule_id)
+            # Pass entity snapshot to config version creation
+            sync_results = await create_pending_configs_for_clusters(conn, cluster_ids, "update", rule_id, entity_snapshot_metadata)
 
         await close_database_connection(conn)
         

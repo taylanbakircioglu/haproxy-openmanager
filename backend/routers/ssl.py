@@ -697,22 +697,22 @@ async def update_ssl_certificate(cert_id: int, certificate: SSLCertificateUpdate
         
         conn = await get_database_connection()
         
-        # Get existing certificate with all details including cluster associations
+        # PHASE 2: Get FULL SSL certificate record for snapshot (ALL fields)
+        # CRITICAL: Use SELECT * to capture all fields for rollback
         existing = await conn.fetchrow("""
-            SELECT s.id, s.name, s.cluster_id, s.certificate_content, s.private_key_content, s.chain_content, s.usage_type,
-                   CASE 
-                       WHEN NOT EXISTS (SELECT 1 FROM ssl_certificate_clusters WHERE ssl_certificate_id = s.id) THEN TRUE
-                       ELSE FALSE
-                   END as is_global
-            FROM ssl_certificates s
-            WHERE s.id = $1
+            SELECT * FROM ssl_certificates WHERE id = $1
+        """, cert_id)
+        
+        # Also check if certificate is global (for logging)
+        is_global = await conn.fetchval("""
+            SELECT NOT EXISTS (SELECT 1 FROM ssl_certificate_clusters WHERE ssl_certificate_id = $1)
         """, cert_id)
         
         if not existing:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="SSL certificate not found")
         
-        logger.info(f"SSL UPDATE: Updating certificate '{existing['name']}' (ID: {cert_id}, is_global: {existing['is_global']})")
+        logger.info(f"SSL UPDATE: Updating certificate '{existing['name']}' (ID: {cert_id}, is_global: {is_global})")
         
         # Validate cluster access for multi-cluster security
         cluster_id = existing['cluster_id'] or certificate.cluster_id
@@ -951,13 +951,37 @@ async def update_ssl_certificate(cert_id: int, certificate: SSLCertificateUpdate
                     # Generate new HAProxy config
                     config_content = await generate_haproxy_config_for_cluster(cluster_id)
                     
-                    # Create metadata with old config for diff display
+                    # PHASE 2: Create entity snapshot for rollback
+                    from utils.entity_snapshot import save_entity_snapshot
+                    
+                    # Prepare new values (all fields being updated)
+                    new_values = {
+                        "certificate_content": certificate.certificate_content,
+                        "private_key_content": certificate.private_key_content,
+                        "chain_content": certificate.chain_content,
+                    }
+                    # Add parsed fields if content was parsed
+                    if cert_info:
+                        new_values["primary_domain"] = cert_info["primary_domain"]
+                        new_values["all_domains"] = cert_info["all_domains"]
+                        new_values["expiry_date"] = cert_info["expiry_date"]
+                        new_values["issuer"] = cert_info.get("issuer")
+                        new_values["fingerprint"] = cert_info.get("fingerprint")
+                        new_values["days_until_expiry"] = cert_info.get("days_until_expiry")
+                    
+                    entity_snapshot_metadata = await save_entity_snapshot(
+                        conn=conn,
+                        entity_type="ssl_certificate",
+                        entity_id=cert_id,
+                        old_values=existing,  # Full record from line 703
+                        new_values=new_values,
+                        operation="UPDATE"
+                    )
+                    
+                    # Create metadata with old config for diff display + entity snapshot for rollback
                     metadata = {
-                        'entity_type': 'ssl_certificate',
-                        'entity_id': cert_id,
-                        'entity_name': existing['name'],
-                        'pre_apply_snapshot': old_config_content,
-                        'change_reason': 'SSL certificate content updated'
+                        'pre_apply_snapshot': old_config_content,  # For diff viewer
+                        **entity_snapshot_metadata  # For rollback
                     }
                     
                     # Create new config version
