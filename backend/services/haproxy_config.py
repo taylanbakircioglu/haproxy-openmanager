@@ -15,9 +15,9 @@ async def _get_ssl_certificate_path(frontend: Dict[str, Any], cluster_id: int, d
     """
     try:
         ssl_cert_id = frontend.get('ssl_certificate_id')
-        logger.info(f"🔍 SSL PATH DEBUG: Frontend '{frontend.get('name')}' ssl_certificate_id: {ssl_cert_id}, cluster_id: {cluster_id}")
+        logger.info(f"SSL PATH DEBUG: Frontend '{frontend.get('name')}' ssl_certificate_id: {ssl_cert_id}, cluster_id: {cluster_id}")
         if not ssl_cert_id:
-            logger.warning(f"🔍 SSL PATH DEBUG: No ssl_certificate_id found for frontend '{frontend.get('name')}'")
+            logger.warning(f"SSL PATH DEBUG: No ssl_certificate_id found for frontend '{frontend.get('name')}'")
             return None
         
         # Get SSL certificate info - Check both global and cluster-specific certificates
@@ -29,7 +29,7 @@ async def _get_ssl_certificate_path(frontend: Dict[str, Any], cluster_id: int, d
             AND (s.cluster_id IS NULL OR scc.cluster_id = $2)
         """, ssl_cert_id, cluster_id)
         
-        logger.info(f"🔍 SSL PATH DEBUG: Query result for cert_id {ssl_cert_id}, cluster {cluster_id}: {ssl_cert}")
+        logger.info(f"SSL PATH DEBUG: Query result for cert_id {ssl_cert_id}, cluster {cluster_id}: {ssl_cert}")
         
         if not ssl_cert:
             logger.warning(f"SSL certificate with ID {ssl_cert_id} not found for cluster {cluster_id}")
@@ -219,20 +219,20 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                         crt_clause = ' '.join([f"crt {path}" for path in cert_paths])
                         config_lines.append(f"    bind {frontend['bind_address']}:{frontend['bind_port']} ssl {crt_clause}")
                         bind_added = True
-                        logger.info(f"🔐 SSL NEW MODE: Added {len(cert_paths)} certificate(s) on port {frontend['bind_port']}")
+                        logger.info(f"SSL NEW MODE: Added {len(cert_paths)} certificate(s) on port {frontend['bind_port']}")
                     else:
                         logger.warning(f"SSL enabled but no valid certificates found for frontend '{frontend['name']}'")
                 
                 # OLD WAY: Single SSL certificate on separate port (backward compatibility)
                 elif frontend.get('ssl_certificate_id'):
-                    logger.info(f"⚠️ SSL OLD MODE (DEPRECATED): Single cert for frontend '{frontend['name']}'")
+                    logger.info(f"SSL OLD MODE (DEPRECATED): Single cert for frontend '{frontend['name']}'")
                     ssl_cert_path = await _get_ssl_certificate_path(frontend, cluster_id, db_conn)
                     if ssl_cert_path:
                         # Use explicit SSL port or default to 443
                         https_port = frontend.get('ssl_port') or 443
                         config_lines.append(f"    bind {frontend['bind_address']}:{https_port} ssl crt {ssl_cert_path}")
                         bind_added = True
-                        logger.info(f"🔐 SSL OLD MODE: Separate HTTPS port {https_port} with single cert")
+                        logger.info(f"SSL OLD MODE: Separate HTTPS port {https_port} with single cert")
                     else:
                         logger.warning(f"SSL enabled but certificate not found for frontend '{frontend['name']}'")
                 else:
@@ -257,16 +257,20 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             
             # CRITICAL: Validate frontend-backend mode compatibility
             if frontend.get('default_backend'):
-                default_backend_name = frontend['default_backend']
-                backend_mode = backend_modes.get(default_backend_name)
-                
-                if backend_mode and backend_mode != frontend['mode']:
-                    # Mode mismatch - this will cause HAProxy validation to fail!
-                    logger.error(f"⚠️  CONFIG ERROR: Frontend '{frontend['name']}' mode '{frontend['mode']}' does not match backend '{default_backend_name}' mode '{backend_mode}'")
-                    config_lines.append(f"    # ⚠️  WARNING: Backend '{default_backend_name}' has mode '{backend_mode}' but frontend has mode '{frontend['mode']}'")
-                    config_lines.append(f"    # ⚠️  HAProxy will reject this configuration! Please fix the mode mismatch in UI.")
-                
-                config_lines.append(f"    default_backend {default_backend_name}")
+                default_backend_name = frontend['default_backend'].strip() if frontend['default_backend'] else ''
+                # Skip empty strings, "[]", or invalid backend names
+                if default_backend_name and default_backend_name not in ('[]', '{}', 'null', 'None'):
+                    backend_mode = backend_modes.get(default_backend_name)
+                    
+                    if backend_mode and backend_mode != frontend['mode']:
+                        # Mode mismatch - this will cause HAProxy validation to fail!
+                        logger.error(f"CONFIG ERROR: Frontend '{frontend['name']}' mode '{frontend['mode']}' does not match backend '{default_backend_name}' mode '{backend_mode}'")
+                        config_lines.append(f"    # WARNING: Backend '{default_backend_name}' has mode '{backend_mode}' but frontend has mode '{frontend['mode']}'")
+                        config_lines.append(f"    # WARNING: HAProxy will reject this configuration! Please fix the mode mismatch in UI.")
+                    
+                    config_lines.append(f"    default_backend {default_backend_name}")
+                else:
+                    logger.warning(f"CONFIG WARNING: Frontend '{frontend['name']}' has invalid default_backend: '{frontend.get('default_backend')}' - skipping")
             
             # Timeouts - CRITICAL FIX: Append 'ms' suffix
             if frontend.get('timeout_client'):
@@ -291,7 +295,10 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             
             # Monitor URI
             if frontend.get('monitor_uri'):
-                config_lines.append(f"    monitor-uri {frontend['monitor_uri']}")
+                monitor_uri = frontend['monitor_uri'].strip() if frontend['monitor_uri'] else ''
+                # Skip empty strings, "[]", or invalid values
+                if monitor_uri and monitor_uri not in ('[]', '{}', 'null', 'None'):
+                    config_lines.append(f"    monitor-uri {monitor_uri}")
             
             # HTTP Request Headers
             if frontend.get('request_headers'):
@@ -456,7 +463,10 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             
             # 3. Health check configuration
             if backend.get('health_check_uri'):
-                config_lines.append(f"    option httpchk GET {backend['health_check_uri']}")
+                health_check_uri = backend['health_check_uri'].strip() if backend['health_check_uri'] else ''
+                # Skip empty strings, "[]", or invalid values
+                if health_check_uri and health_check_uri not in ('[]', '{}', 'null', 'None'):
+                    config_lines.append(f"    option httpchk GET {health_check_uri}")
             
             # HTTP Check Expect Status (new field) - ONLY for HTTP mode!
             # TCP backends cannot use http-check directives
@@ -473,12 +483,15 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             
             # 5. Cookie Persistence
             if backend.get('cookie_name'):
-                cookie_line = f"    cookie {backend['cookie_name']}"
-                cookie_opts = backend.get('cookie_options', '').strip()
+                cookie_name = backend['cookie_name'].strip() if backend['cookie_name'] else ''
                 # Skip empty strings, "[]", or invalid values
-                if cookie_opts and cookie_opts not in ('[]', '{}', 'null', 'None'):
-                    cookie_line += f" {cookie_opts}"
-                config_lines.append(cookie_line)
+                if cookie_name and cookie_name not in ('[]', '{}', 'null', 'None'):
+                    cookie_line = f"    cookie {cookie_name}"
+                    cookie_opts = backend.get('cookie_options', '').strip()
+                    # Skip empty strings, "[]", or invalid values
+                    if cookie_opts and cookie_opts not in ('[]', '{}', 'null', 'None'):
+                        cookie_line += f" {cookie_opts}"
+                    config_lines.append(cookie_line)
             
             # 6. Full Connections
             if backend.get('fullconn'):
@@ -526,29 +539,33 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 ORDER BY COALESCE(server_name, 'server_' || id), id
             """, backend["name"], cluster_id)
             
-            logger.info(f"🔍 CONFIG DEBUG: Found {len(servers)} servers for backend '{backend['name']}' in cluster {cluster_id}")
+            logger.info(f"CONFIG DEBUG: Found {len(servers)} servers for backend '{backend['name']}' in cluster {cluster_id}")
             for i, server in enumerate(servers):
-                logger.info(f"🔍 CONFIG DEBUG: Server {i+1}: id={server.get('id')}, name={server.get('server_name')}, address={server.get('server_address')}:{server.get('server_port')}")
+                logger.info(f"CONFIG DEBUG: Server {i+1}: id={server.get('id')}, name={server.get('server_name')}, address={server.get('server_address')}:{server.get('server_port')}")
             
             for server in servers:
                 # CRITICAL FIX: Handle NULL server_name by using a fallback or skipping
-                server_name = server.get('server_name') or f"server_{server['id']}"
+                server_name = server.get('server_name', '').strip() if server.get('server_name') else ''
+                # Skip invalid server names
+                if not server_name or server_name in ('[]', '{}', 'null', 'None'):
+                    server_name = f"server_{server['id']}"
                 
                 # Validate server address (critical - server without address is invalid)
-                if not server.get('server_address'):
+                server_address = server.get('server_address', '').strip() if server.get('server_address') else ''
+                if not server_address or server_address in ('[]', '{}', 'null', 'None'):
                     logger.error(f"Server '{server_name}' in backend '{backend['name']}' has no address - skipping")
                     continue
                 
-                logger.info(f"🔍 CONFIG DEBUG: Processing server {server_name} - address={server.get('server_address')}:{server.get('server_port')}, weight={server.get('weight')}, active={server.get('is_active')}")
+                logger.info(f"CONFIG DEBUG: Processing server {server_name} - address={server_address}:{server.get('server_port')}, weight={server.get('weight')}, active={server.get('is_active')}")
                 
                 # CRITICAL FIX: Port 0 means no port specified (use backend default)
                 # In HAProxy, "server name addr" without port uses backend's default port
                 server_port = server.get('server_port')
                 if server_port and server_port != 0:
-                    server_line = f"    server {server_name} {server['server_address']}:{server_port}"
+                    server_line = f"    server {server_name} {server_address}:{server_port}"
                 else:
                     # No port specified - HAProxy will use backend's default port based on mode
-                    server_line = f"    server {server_name} {server['server_address']}"
+                    server_line = f"    server {server_name} {server_address}"
                 
                 server_line += f" weight {server['weight']}"
                 
@@ -611,12 +628,12 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 # If server is disabled (but not deleted), comment it out
                 if not server.get('is_active', True):
                     server_line = f"    # DISABLED: {server_line.strip()}"
-                    logger.info(f"🔍 CONFIG DEBUG: Server {server_name} marked as DISABLED")
+                    logger.info(f"CONFIG DEBUG: Server {server_name} marked as DISABLED")
                 else:
-                    logger.info(f"🔍 CONFIG DEBUG: Server {server_name} is ACTIVE - adding to config")
+                    logger.info(f"CONFIG DEBUG: Server {server_name} is ACTIVE - adding to config")
                 
                 config_lines.append(server_line)
-                logger.info(f"🔍 CONFIG DEBUG: Added server line: {server_line}")
+                logger.info(f"CONFIG DEBUG: Added server line: {server_line}")
             
             config_lines.append("")
         
