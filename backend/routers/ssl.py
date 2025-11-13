@@ -896,7 +896,7 @@ async def update_ssl_certificate(cert_id: int, certificate: SSLCertificateUpdate
         # Determine affected clusters for config version creation
         affected_clusters = []
         
-        if existing['is_global']:
+        if is_global:
             # For global SSL certificates, update ALL active clusters
             clusters = await conn.fetch("SELECT id FROM haproxy_clusters WHERE is_active = TRUE")
             affected_clusters = [cluster['id'] for cluster in clusters]
@@ -1062,7 +1062,7 @@ async def update_ssl_certificate(cert_id: int, certificate: SSLCertificateUpdate
                 resource_id=str(cert_id),
                 details={
                     'certificate_name': certificate.name or existing['name'],
-                    'is_global': existing['is_global'],
+                    'is_global': is_global,
                     'content_updated': content_updated,
                     'affected_clusters': len(affected_clusters) if affected_clusters else 0,
                     'sync_results': len(sync_results)
