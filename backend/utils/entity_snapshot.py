@@ -107,6 +107,23 @@ async def save_entity_snapshot(
         if hasattr(old_values, '__iter__') and not isinstance(old_values, dict):
             old_values = dict(old_values)
         
+        # CRITICAL FIX: Convert non-JSON-serializable types
+        # - datetime -> ISO string
+        # - JSONB/list -> keep as-is (already JSON compatible)
+        serializable_old_values = {}
+        for key, value in old_values.items():
+            if value is None:
+                serializable_old_values[key] = None
+            elif isinstance(value, datetime):
+                # datetime -> ISO string
+                serializable_old_values[key] = value.isoformat() + "Z" if value else None
+            elif isinstance(value, (list, dict)):
+                # JSONB already serializable
+                serializable_old_values[key] = value
+            else:
+                # int, str, bool, etc.
+                serializable_old_values[key] = value
+        
         # Calculate changed fields for UPDATE operations
         changed_fields = []
         if operation in ["UPDATE", "UPDATE_RESTORE"] and new_values:
@@ -121,7 +138,7 @@ async def save_entity_snapshot(
             "entity_id": entity_id,
             "operation": operation,
             "timestamp": datetime.utcnow().isoformat() + "Z",
-            "old_values": old_values,
+            "old_values": serializable_old_values,  # JSON-safe values
             "changed_fields": changed_fields
         }
         
