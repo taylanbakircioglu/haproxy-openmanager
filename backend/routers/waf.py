@@ -417,7 +417,7 @@ async def create_waf_rule(waf_rule_data: dict, cluster_id: Optional[int] = None,
         
         # CRITICAL VALIDATION: At least one frontend must be selected
         # Use case: Prevent unintentional application to ALL frontends
-        # WAF rule without frontend = no config change = should not create pending version
+        # Risk: WAF rule without frontend = applies to ALL frontends in cluster (dangerous!)
         if not waf_rule.frontend_ids or len(waf_rule.frontend_ids) == 0:
             await close_database_connection(conn)
             raise HTTPException(

@@ -1403,20 +1403,42 @@ const FrontendManagement = () => {
                 name="default_backend"
                 label="Default Backend"
                 extra="Backend that will handle requests not matched by any ACL rules"
+                tooltip="Optional: Default backend for routing. Leave empty to use only ACL-based routing."
               >
                 <Select
-                  placeholder="Select default backend"
+                  placeholder="Select default backend (optional)"
                   allowClear
                   showSearch
                   filterOption={(input, option) =>
                     option.children.toLowerCase().indexOf(input.toLowerCase()) >= 0
                   }
+                  onChange={(value) => {
+                    if (value) {
+                      const selectedBackend = backends.find(b => b.name === value);
+                      const serverCount = selectedBackend?.servers?.length || 0;
+                      if (serverCount === 0) {
+                        message.warning({
+                          content: `Warning: Backend '${value}' has no active servers. Traffic will receive 503 errors until you add servers to this backend.`,
+                          duration: 6
+                        });
+                      }
+                    }
+                  }}
                 >
-                  {backends.map(backend => (
-                    <Option key={backend.name} value={backend.name}>
-                      {backend.name} ({backend.servers?.length || 0} servers)
-                    </Option>
-                  ))}
+                  {backends.map(backend => {
+                    const serverCount = backend.servers?.length || 0;
+                    const hasServers = serverCount > 0;
+                    return (
+                      <Option 
+                        key={backend.name} 
+                        value={backend.name}
+                        style={!hasServers ? { color: '#ff4d4f' } : {}}
+                      >
+                        {backend.name} ({serverCount} server{serverCount !== 1 ? 's' : ''})
+                        {!hasServers && ' - No servers'}
+                      </Option>
+                    );
+                  })}
                 </Select>
               </Form.Item>
             </Panel>

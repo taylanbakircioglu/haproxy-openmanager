@@ -405,28 +405,6 @@ async def create_frontend(frontend: FrontendConfig, request: Request, authorizat
             await close_database_connection(conn)
             raise HTTPException(status_code=400, detail=f"Frontend '{frontend.name}' already exists")
         
-        # CRITICAL VALIDATION: Check if default_backend has active servers
-        # Use case: Prevent frontend from routing to DOWN backend (no servers = 503 errors)
-        # HAProxy allows this (syntax valid) but it's bad practice for production
-        if frontend.default_backend:
-            backend_has_servers = await conn.fetchval("""
-                SELECT EXISTS(
-                    SELECT 1 FROM backend_servers bs
-                    JOIN backends b ON bs.backend_name = b.name AND bs.cluster_id = b.cluster_id
-                    WHERE b.name = $1 
-                    AND b.cluster_id = $2 
-                    AND b.is_active = TRUE
-                    AND bs.is_active = TRUE
-                )
-            """, frontend.default_backend, frontend.cluster_id)
-            
-            if not backend_has_servers:
-                await close_database_connection(conn)
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Backend '{frontend.default_backend}' has no active servers. Please add at least one server to the backend before assigning it to a frontend."
-                )
-        
         # ENTERPRISE DUAL-MODE: Save ssl_certificate_ids (NEW) and ssl_certificate_id (OLD - backward compat)
         # Convert ssl_certificate_ids to JSONB for database
         ssl_cert_ids_json = json.dumps(frontend.ssl_certificate_ids) if frontend.ssl_certificate_ids else '[]'
@@ -646,28 +624,6 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
             if name_exists:
                 await close_database_connection(conn)
                 raise HTTPException(status_code=400, detail=f"Frontend name '{frontend.name}' already exists")
-        
-        # CRITICAL VALIDATION: Check if default_backend has active servers
-        # Use case: Prevent frontend from routing to DOWN backend (no servers = 503 errors)
-        # HAProxy allows this (syntax valid) but it's bad practice for production
-        if frontend.default_backend:
-            backend_has_servers = await conn.fetchval("""
-                SELECT EXISTS(
-                    SELECT 1 FROM backend_servers bs
-                    JOIN backends b ON bs.backend_name = b.name AND bs.cluster_id = b.cluster_id
-                    WHERE b.name = $1 
-                    AND (b.cluster_id = $2 OR b.cluster_id IS NULL)
-                    AND b.is_active = TRUE
-                    AND bs.is_active = TRUE
-                )
-            """, frontend.default_backend, cluster_id)
-            
-            if not backend_has_servers:
-                await close_database_connection(conn)
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Backend '{frontend.default_backend}' has no active servers. Please add at least one server to the backend before assigning it to a frontend."
-                )
         
         # CRITICAL FIX: Preserve SSL configuration if not explicitly changed
         # If SSL is currently enabled but incoming data has ssl_enabled=False or ssl_certificate_id=None,
