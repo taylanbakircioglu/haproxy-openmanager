@@ -521,7 +521,11 @@ const AgentManagement = () => {
       setSelectedClusterId(associatedClusters[0].id);
       console.log('🔍 POOL SELECTION DEBUG - Auto-selected cluster:', associatedClusters[0].id);
     } else if (associatedClusters.length === 0) {
-      message.warning('No clusters found for this pool. Please create a cluster first.');
+      message.error({
+        content: 'No clusters found for this pool. Please create a cluster or select a different pool.',
+        duration: 5
+      });
+      console.warn('⚠️ VALIDATION: Pool has no clusters - agent creation should be blocked');
     }
   };
 
@@ -2074,6 +2078,27 @@ const AgentManagement = () => {
                 </Row>
               </Form>
 
+              {/* Validation Alert - Pool has no clusters */}
+              {selectedPoolId && poolClusters.length === 0 && (
+                <Alert
+                  message="Pool Has No Clusters"
+                  description={
+                    <div>
+                      <p>The selected pool does not have any clusters assigned.</p>
+                      <p><strong>Action required:</strong></p>
+                      <ul style={{ marginBottom: 0 }}>
+                        <li>Create a new cluster and assign it to this pool, OR</li>
+                        <li>Edit an existing cluster and assign it to this pool, OR</li>
+                        <li>Select a different pool that has clusters</li>
+                      </ul>
+                    </div>
+                  }
+                  type="error"
+                  showIcon
+                  style={{ marginBottom: '16px' }}
+                />
+              )}
+
               <div style={{ textAlign: 'right' }}>
                 <Space>
                   <Button onClick={() => setCurrentStep(0)}>
@@ -2083,7 +2108,7 @@ const AgentManagement = () => {
                     type="primary" 
                     onClick={() => setCurrentStep(2)}
                     icon={<CodeOutlined />}
-                    disabled={!agentName.trim() || !hostnamePrefix.trim() || !selectedPoolId}
+                    disabled={!agentName.trim() || !hostnamePrefix.trim() || !selectedPoolId || poolClusters.length === 0}
                   >
                     Next: Generate Script
                   </Button>

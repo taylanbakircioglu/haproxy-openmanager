@@ -461,17 +461,64 @@ async def generate_install_script(req_data: AgentScriptRequest, request: Request
         
         # Validate that the cluster exists and belongs to the specified pool
         conn = await get_database_connection()
+        
+        # CRITICAL: Check if this is an agent upgrade FIRST
+        # Skip strict validation for upgrades - agent may have old/fallback config
+        is_agent_upgrade = (x_api_key is not None and authorization is None)
+        
+        # For NEW agent creation, verify pool has at least one cluster
+        if not is_agent_upgrade:
+            pool_cluster_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM haproxy_clusters WHERE pool_id = $1",
+                req_data.pool_id
+            )
+            
+            if pool_cluster_count == 0:
+                await close_database_connection(conn)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Pool {req_data.pool_id} has no clusters assigned. Please create a cluster for this pool or select a different pool."
+                )
+        
         cluster_result = await conn.fetchrow(
-            "SELECT id FROM haproxy_clusters WHERE id = $1 AND pool_id = $2", 
-            req_data.cluster_id, req_data.pool_id
+            "SELECT id, pool_id FROM haproxy_clusters WHERE id = $1", 
+            req_data.cluster_id
         )
-        await close_database_connection(conn)
         
         if not cluster_result:
+            await close_database_connection(conn)
             raise HTTPException(
                 status_code=404, 
-                detail=f"Cluster {req_data.cluster_id} not found or does not belong to pool {req_data.pool_id}"
+                detail=f"Cluster {req_data.cluster_id} not found"
             )
+        
+        if not is_agent_upgrade:
+            # NEW AGENT CREATION: Strict validation
+            
+            # Cluster must have a pool_id assigned
+            if not cluster_result['pool_id']:
+                await close_database_connection(conn)
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Cluster {req_data.cluster_id} does not have a pool assigned. Please edit the cluster and assign a pool before creating agents."
+                )
+            
+            # Validate pool_id matches
+            if cluster_result['pool_id'] != req_data.pool_id:
+                await close_database_connection(conn)
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Cluster {req_data.cluster_id} belongs to pool {cluster_result['pool_id']}, not pool {req_data.pool_id}. Please select the correct cluster."
+                )
+        else:
+            # AGENT UPGRADE: Allow upgrade even if pool_id mismatch (will be fixed by heartbeat)
+            logger.info(f"AGENT UPGRADE: Skipping pool validation for agent upgrade request (cluster_id={req_data.cluster_id})")
+            
+            # If cluster has pool but agent sent different pool, log warning
+            if cluster_result['pool_id'] and cluster_result['pool_id'] != req_data.pool_id:
+                logger.warning(f"AGENT UPGRADE: Pool mismatch - cluster pool={cluster_result['pool_id']}, agent sent={req_data.pool_id}. Will be auto-corrected on next heartbeat.")
+        
+        await close_database_connection(conn)
 
         # Dynamic platform detection - more flexible approach
         platform = req_data.platform.lower()
@@ -738,7 +785,7 @@ async def agent_config_applied_notification(agent_name: str, notification_data: 
         if x_api_key and not agent_auth:
             logger.warning(f"Invalid API key provided by agent '{agent_name}' for config-applied")
             raise HTTPException(status_code=401, detail="Invalid API key")
-        # POOL-BASED AUTH: Token is valid for all agents in the same pool - no agent name check needed
+        # GLOBAL TOKEN: Token can be used by multiple agents across different pools/clusters
         
         conn = await get_database_connection()
         
@@ -806,7 +853,7 @@ async def agent_config_validation_failed(agent_name: str, notification_data: dic
         if x_api_key and not agent_auth:
             logger.warning(f"Invalid API key provided by agent '{agent_name}' for validation-failed")
             raise HTTPException(status_code=401, detail="Invalid API key")
-        # POOL-BASED AUTH: Token is valid for all agents in the same pool - no agent name check needed
+        # GLOBAL TOKEN: Token can be used by multiple agents across different pools/clusters
         
         conn = await get_database_connection()
         
@@ -871,7 +918,7 @@ async def agent_config_sync(agent_name: str, sync_data: dict, x_api_key: Optiona
         if x_api_key and not agent_auth:
             logger.warning(f"Invalid API key provided by agent '{agent_name}' for config-sync")
             raise HTTPException(status_code=401, detail="Invalid API key")
-        # POOL-BASED AUTH: Token is valid for all agents in the same pool - no agent name check needed
+        # GLOBAL TOKEN: Token can be used by multiple agents across different pools/clusters
         
         conn = await get_database_connection()
         
@@ -1255,7 +1302,11 @@ async def agent_heartbeat_by_name(heartbeat_data: AgentHeartbeat, x_api_key: Opt
         if heartbeat_data.server_statuses:
             logger.info(f"AGENT HEARTBEAT: Agent '{agent_name}' reported server statuses: {heartbeat_data.server_statuses}")
             
+            # CRITICAL FIX: Find cluster_id even if agent pool_id is NULL
+            # This handles the case where cluster was created before pool, then pool was assigned later
             cluster_id = None
+            
+            # Method 1: Try to find cluster via agent's pool_id (if set)
             if agent['pool_id']:
                 cluster_result = await conn.fetchrow(
                     "SELECT id FROM haproxy_clusters WHERE pool_id = $1 LIMIT 1", 
@@ -1263,6 +1314,31 @@ async def agent_heartbeat_by_name(heartbeat_data: AgentHeartbeat, x_api_key: Opt
                 )
                 if cluster_result:
                     cluster_id = cluster_result['id']
+                    logger.debug(f"CLUSTER LOOKUP: Found cluster {cluster_id} via agent pool_id {agent['pool_id']}")
+            
+            # Method 2: If cluster_id not found and agent sends cluster_id in heartbeat, use that
+            # This provides fallback when agent pool_id is NULL (e.g. cluster created before pool)
+            if not cluster_id and heartbeat_data.cluster_id:
+                # Verify this cluster actually exists and get its pool
+                cluster_pool = await conn.fetchval(
+                    "SELECT pool_id FROM haproxy_clusters WHERE id = $1", 
+                    heartbeat_data.cluster_id
+                )
+                
+                if cluster_pool:
+                    # Cluster exists, use it for stats processing
+                    cluster_id = heartbeat_data.cluster_id
+                    logger.info(f"CLUSTER LOOKUP: Using cluster_id {cluster_id} from agent heartbeat data")
+                    
+                    # IMPORTANT: Update agent's pool_id if missing (fixes the cluster-created-before-pool scenario)
+                    if not agent['pool_id']:
+                        await conn.execute(
+                            "UPDATE agents SET pool_id = $1 WHERE id = $2", 
+                            cluster_pool, agent_id
+                        )
+                        logger.info(f"AGENT FIX: Auto-assigned agent '{agent_name}' to pool {cluster_pool} via heartbeat cluster_id {cluster_id}")
+                else:
+                    logger.warning(f"CLUSTER LOOKUP: Cluster {heartbeat_data.cluster_id} not found or has no pool assigned")
             
             if cluster_id:
                 # Process stats for dashboard cache
@@ -1330,17 +1406,7 @@ async def agent_heartbeat_by_name(heartbeat_data: AgentHeartbeat, x_api_key: Opt
                             logger.warning(f"Failed to update server status for {backend_name}/{server_name}: {e}")
             else:
                 logger.warning(f"Could not determine cluster_id for agent '{agent_name}' to update server statuses")
-
-        if not agent['pool_id'] and heartbeat_data.cluster_id:
-            pool_id = await conn.fetchval(
-                "SELECT pool_id FROM haproxy_clusters WHERE id = $1", heartbeat_data.cluster_id
-            )
-            if pool_id:
-                await conn.execute(
-                    "UPDATE agents SET pool_id = $1 WHERE id = $2", pool_id, agent_id
-                )
-                logger.info(f"Auto-assigned agent '{agent_name}' to pool {pool_id} via cluster {heartbeat_data.cluster_id}")
-
+                # NOTE: Pool assignment is now handled above in the cluster_id lookup logic
 
         await close_database_connection(conn)
         
@@ -1748,7 +1814,7 @@ async def agent_upgrade_complete(agent_name: str, completion_data: dict, x_api_k
         if x_api_key and not agent_auth:
             logger.warning(f"Invalid API key provided by agent '{agent_name}' for upgrade complete")
             raise HTTPException(status_code=401, detail="Invalid API key")
-        # POOL-BASED AUTH: Token is valid for all agents in the same pool - no agent name check needed
+        # GLOBAL TOKEN: Token can be used by multiple agents across different pools/clusters
         
         conn = await get_database_connection()
         
