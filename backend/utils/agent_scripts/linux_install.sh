@@ -1186,16 +1186,24 @@ SIMPLE_HEARTBEAT_EOF
     log "DEBUG" "Sending heartbeat"
     
     # Send heartbeat to backend with HTTP status code check
-    # Use temp file to avoid "Argument list too long" error with large stats CSV
+    # Use temp files for both payload and response to handle large stats CSV (>200KB, production can be >1MB)
+    local temp_payload="/tmp/heartbeat_payload_$$.json"
     local temp_response="/tmp/heartbeat_response_$$.txt"
+    
+    # Write payload to temp file to avoid any size limits
+    printf '%s' "$heartbeat_payload" > "$temp_payload"
+    
+    # Send request using temp file
     "$CURL_BIN" -k -s -w "\n%{http_code}" -X POST "$MANAGEMENT_URL/api/agents/heartbeat" \
         -H "Content-Type: application/json" \
         -H "X-API-Key: $AGENT_TOKEN" \
-        -d "$heartbeat_payload" > "$temp_response" 2>&1
+        --data-binary @"$temp_payload" > "$temp_response" 2>&1
     
     local http_code=$(tail -n1 "$temp_response" 2>/dev/null || echo "000")
     local response_body=$(head -n-1 "$temp_response" 2>/dev/null || echo "")
-    rm -f "$temp_response"
+    
+    # Cleanup temp files
+    rm -f "$temp_payload" "$temp_response"
     
     # Check HTTP status code
     if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
@@ -2433,16 +2441,24 @@ SYSTEM_INFO_EOF
         heartbeat_payload+="}"
         
         # Send heartbeat to backend with HTTP status code check
-        # Use temp file to avoid "Argument list too long" error with large stats CSV
+        # Use temp files for both payload and response to handle large stats CSV (>200KB, production can be >1MB)
+        local temp_payload="/tmp/heartbeat_payload_$$.json"
         local temp_response="/tmp/heartbeat_response_$$.txt"
+        
+        # Write payload to temp file to avoid any size limits
+        printf '%s' "$heartbeat_payload" > "$temp_payload"
+        
+        # Send request using temp file
         curl -k -s -w "\n%{http_code}" -X POST "$MANAGEMENT_URL/api/agents/heartbeat" \
             -H "Content-Type: application/json" \
             -H "X-API-Key: $AGENT_TOKEN" \
-            -d "$heartbeat_payload" > "$temp_response" 2>&1
+            --data-binary @"$temp_payload" > "$temp_response" 2>&1
         
         local http_code=$(tail -n1 "$temp_response" 2>/dev/null || echo "000")
         local response_body=$(head -n-1 "$temp_response" 2>/dev/null || echo "")
-        rm -f "$temp_response"
+        
+        # Cleanup temp files
+        rm -f "$temp_payload" "$temp_response"
         
         # Check HTTP status code
         if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
