@@ -441,6 +441,19 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 logger.error("Backend with missing name detected - skipping")
                 continue
             
+            # CRITICAL PRE-CHECK: Get servers BEFORE starting backend config
+            # This allows us to skip backends with no servers before writing anything
+            # CRITICAL FIX: Handle servers with NULL cluster_id (legacy data)
+            # CRITICAL: Select ssl_certificate_id for SSL ca-file path generation
+            servers_precheck = await db_conn.fetch("""
+                SELECT id FROM backend_servers 
+                WHERE backend_name = $1 AND (cluster_id = $2 OR cluster_id IS NULL) AND is_active = TRUE
+            """, backend["name"], cluster_id)
+            
+            if not servers_precheck or len(servers_precheck) == 0:
+                logger.warning(f"⚠️  CONFIG GENERATION: Skipping backend '{backend['name']}' - NO ACTIVE SERVERS. HAProxy requires at least one server per backend.")
+                continue
+            
             config_lines.append(f"backend {backend['name']}")
             
             # --- HAProxy Configuration Best Practice Order ---
