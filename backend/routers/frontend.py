@@ -357,12 +357,16 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                     "updated_at": f["updated_at"].isoformat().replace('+00:00', 'Z') if f["updated_at"] else None,
                     "cluster_id": f.get("cluster_id"),
                     "has_pending_config": (
+                        # CRITICAL FIX: Same as backend.py logic for consistency
+                        # Problem: Frontend with is_active=FALSE and last_config_status='APPLIED' was showing as pending
+                        # Solution: Inactive frontend is only pending if last_config_status is PENDING, not APPLIED
                         (
-                            f["id"] in pending_frontend_ids or 
-                            f.get("last_config_status") == "PENDING" or 
-                            not f.get("is_active", True)
+                            (f["id"] in pending_frontend_ids) or 
+                            (f.get("last_config_status") == "PENDING") or 
+                            (not f.get("is_active", True) and f.get("last_config_status") == "PENDING")
                         ) and 
-                        f.get("last_config_status") != "REJECTED"  # Exclude REJECTED entities
+                        (f.get("last_config_status") != "REJECTED") and 
+                        not (not f.get("is_active", True) and f.get("last_config_status") == "APPLIED")
                     )
                 } for f in frontends
             ]

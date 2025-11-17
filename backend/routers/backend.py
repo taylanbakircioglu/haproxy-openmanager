@@ -428,14 +428,21 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
             # Check if backend has pending changes via:
             # 1. Config versions (pending_backend_ids) - version name parsing
             # 2. Entity's own last_config_status (for bulk import and other operations)
-            # 3. Backend is inactive (soft delete) - BUT NOT if REJECTED
+            # 3. Backend is inactive (soft delete) AND pending - NOT if already APPLIED
             has_config_version = backend["id"] in pending_backend_ids
             has_pending_status = backend.get("last_config_status") == "PENDING"
             is_inactive = not backend.get("is_active", True)
             is_rejected = backend.get("last_config_status") == "REJECTED"
+            is_applied = backend.get("last_config_status") == "APPLIED"
             
-            # CRITICAL: Exclude REJECTED entities from pending (already rejected, no action needed)
-            backend["has_pending_config"] = (has_config_version or has_pending_status or is_inactive) and not is_rejected
+            # CRITICAL FIX: Inactive backend should only be pending if not already APPLIED/REJECTED
+            # Problem: Backend with is_active=FALSE and last_config_status='APPLIED' was showing as pending
+            # Result: Apply/Reject couldn't process it (no PENDING status), but UI kept showing it
+            # Solution: Inactive backend is only pending if last_config_status is PENDING
+            is_inactive_and_pending = is_inactive and has_pending_status
+            
+            # CRITICAL: Exclude REJECTED and APPLIED inactive entities from pending
+            backend["has_pending_config"] = (has_config_version or has_pending_status or is_inactive_and_pending) and not is_rejected and not (is_inactive and is_applied)
             
             # Enhanced debug logging
             if backend['name'] == 'backend7' or has_config_version or has_pending_status:
