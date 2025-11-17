@@ -1096,13 +1096,16 @@ SIMPLE_HEARTBEAT_EOF
     log "DEBUG" "Sending heartbeat"
     
     # Send heartbeat to backend with HTTP status code check
-    local http_response=$("$CURL_BIN" -k -s -w "\n%{http_code}" -X POST "$MANAGEMENT_URL/api/agents/heartbeat" \
+    # Use temp file to avoid "Argument list too long" error with large stats CSV
+    local temp_response="/tmp/heartbeat_response_$$.txt"
+    "$CURL_BIN" -k -s -w "\n%{http_code}" -X POST "$MANAGEMENT_URL/api/agents/heartbeat" \
         -H "Content-Type: application/json" \
         -H "X-API-Key: $AGENT_TOKEN" \
-        -d "$heartbeat_payload" 2>&1)
+        -d "$heartbeat_payload" > "$temp_response" 2>&1
     
-    local http_code=$(echo "$http_response" | tail -n1)
-    local response_body=$(echo "$http_response" | head -n-1)
+    local http_code=$(tail -n1 "$temp_response" 2>/dev/null || echo "000")
+    local response_body=$(head -n-1 "$temp_response" 2>/dev/null || echo "")
+    rm -f "$temp_response"
     
     # Check HTTP status code
     if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
@@ -2373,13 +2376,16 @@ SYSTEM_INFO_EOF
         heartbeat_payload+="}"
         
         # Send heartbeat to backend with HTTP status code check
-        local http_response=$(curl -k -s -w "\n%{http_code}" -X POST "$MANAGEMENT_URL/api/agents/heartbeat" \
+        # Use temp file to avoid "Argument list too long" error with large stats CSV
+        local temp_response="/tmp/heartbeat_response_$$.txt"
+        curl -k -s -w "\n%{http_code}" -X POST "$MANAGEMENT_URL/api/agents/heartbeat" \
             -H "Content-Type: application/json" \
             -H "X-API-Key: $AGENT_TOKEN" \
-            -d "$heartbeat_payload" 2>&1)
+            -d "$heartbeat_payload" > "$temp_response" 2>&1
         
-        local http_code=$(echo "$http_response" | tail -n1)
-        local response_body=$(echo "$http_response" | head -n-1)
+        local http_code=$(tail -n1 "$temp_response" 2>/dev/null || echo "000")
+        local response_body=$(head -n-1 "$temp_response" 2>/dev/null || echo "")
+        rm -f "$temp_response"
         
         # Check HTTP status code
         if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
