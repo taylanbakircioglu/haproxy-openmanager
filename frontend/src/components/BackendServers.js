@@ -1018,7 +1018,20 @@ const BackendServers = () => {
       title: 'Servers',
       dataIndex: 'servers',
       key: 'servers',
-      render: (servers) => {
+      render: (servers = []) => {
+        // CRITICAL FIX: Handle null/undefined servers array for backends without servers
+        if (!servers || !Array.isArray(servers)) {
+          return (
+            <Space>
+              <Tag color="red">0</Tag>
+              <span>/0</span>
+              <Text type="secondary">active</Text>
+              <Tooltip title="No servers configured. Please add at least one server.">
+                <Tag color="warning" style={{ marginLeft: 4, fontSize: '10px' }}>⚠️ Empty</Tag>
+              </Tooltip>
+            </Space>
+          );
+        }
         const activeServers = servers.filter(s => s.is_active).length;
         const totalServers = servers.length;
         return (
@@ -1250,13 +1263,15 @@ const BackendServers = () => {
   ];
 
   const renderServerList = () => {
-    const allServers = backends.flatMap(backend => 
-      backend.servers.map(server => ({
+    // CRITICAL FIX: Handle null/undefined servers array for backends without servers
+    const allServers = backends.flatMap(backend => {
+      const servers = backend.servers || [];
+      return servers.map(server => ({
         ...server,
         backend_name: backend.name,
         backend_id: backend.id
-      }))
-    );
+      }));
+    });
 
     return (
       <Table
@@ -1470,62 +1485,66 @@ const BackendServers = () => {
               rowKey="id"
               loading={loading}
               expandable={{
-                expandedRowRender: record => (
-                  <div style={{ margin: 0 }}>
-                    <Title level={5}>Servers in {record.name}:</Title>
-                    {record.servers.length > 0 ? (
-                      <Table
-                        columns={serverColumns.concat([
-                          {
-                            title: 'Actions',
-                            key: 'actions',
-                            render: (_, server) => (
-                              <Space size="small">
-                                <Tooltip title="Edit Server">
-                                  <Button
-                                    size="small"
-                                    icon={<EditOutlined />}
-                                    onClick={() => handleEditServer(server, record)}
-                                  />
-                                </Tooltip>
-                                <Popconfirm
-                                  title="Are you sure you want to delete this server?"
-                                  onConfirm={() => handleDeleteServer(server.id)}
-                                  okText="Yes"
-                                  cancelText="No"
-                                >
-                                  <Tooltip title="Delete Server">
+                expandedRowRender: record => {
+                  // CRITICAL FIX: Handle null/undefined servers array for backends without servers
+                  const servers = record.servers || [];
+                  return (
+                    <div style={{ margin: 0 }}>
+                      <Title level={5}>Servers in {record.name}:</Title>
+                      {servers.length > 0 ? (
+                        <Table
+                          columns={serverColumns.concat([
+                            {
+                              title: 'Actions',
+                              key: 'actions',
+                              render: (_, server) => (
+                                <Space size="small">
+                                  <Tooltip title="Edit Server">
                                     <Button
-                                      danger
                                       size="small"
-                                      icon={<DeleteOutlined />}
+                                      icon={<EditOutlined />}
+                                      onClick={() => handleEditServer(server, record)}
                                     />
                                   </Tooltip>
-                                </Popconfirm>
-                              </Space>
-                            ),
-                          },
-                        ])}
-                        dataSource={record.servers}
-                        rowKey="id"
-                        pagination={false}
-                        size="small"
-                      />
-                    ) : (
-                      <div style={{ textAlign: 'center', padding: 20 }}>
-                        <Text type="secondary">No servers configured</Text>
-                        <br />
-                        <Button
-                          type="link"
-                          icon={<PlusOutlined />}
-                          onClick={() => handleAddServer(record)}
-                        >
-                          Add First Server
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                ),
+                                  <Popconfirm
+                                    title="Are you sure you want to delete this server?"
+                                    onConfirm={() => handleDeleteServer(server.id)}
+                                    okText="Yes"
+                                    cancelText="No"
+                                  >
+                                    <Tooltip title="Delete Server">
+                                      <Button
+                                        danger
+                                        size="small"
+                                        icon={<DeleteOutlined />}
+                                      />
+                                    </Tooltip>
+                                  </Popconfirm>
+                                </Space>
+                              ),
+                            },
+                          ])}
+                          dataSource={servers}
+                          rowKey="id"
+                          pagination={false}
+                          size="small"
+                        />
+                      ) : (
+                        <div style={{ textAlign: 'center', padding: 20 }}>
+                          <Text type="secondary">No servers configured</Text>
+                          <br />
+                          <Button
+                            type="link"
+                            icon={<PlusOutlined />}
+                            onClick={() => handleAddServer(record)}
+                          >
+                            Add First Server
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                },
               }}
               pagination={{
                 showSizeChanger: true,
