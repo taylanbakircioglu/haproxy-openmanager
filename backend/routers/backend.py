@@ -470,6 +470,44 @@ async def create_backend(backend: BackendConfig, authorization: str = Header(Non
         if backend.cluster_id:
             await validate_user_cluster_access(current_user['id'], backend.cluster_id, conn)
         
+        # CRITICAL FIX: Check for inactive (soft-deleted) backends and clean them up
+        # Problem: Backend soft-deleted (is_active=FALSE) but unique constraint still blocks creation
+        # Solution: If inactive backend exists, hard delete it first (with all related data)
+        # SAFETY: Check updated_at to avoid race condition with agent config-sync
+        # Agent sync temporarily marks backends as inactive, we must not delete those!
+        inactive_backend = await conn.fetchrow("""
+            SELECT id, name, updated_at FROM backends 
+            WHERE name = $1 AND (cluster_id = $2 OR cluster_id IS NULL) AND is_active = FALSE
+            AND updated_at < NOW() - INTERVAL '30 seconds'
+        """, backend.name, backend.cluster_id)
+        
+        if inactive_backend:
+            logger.warning(f"BACKEND CREATE: Found stale inactive backend '{backend.name}' (id={inactive_backend['id']}, inactive since {inactive_backend['updated_at']}). Cleaning up before creating new one.")
+            
+            # Hard delete inactive backend and all related data
+            # 1. Delete related config versions
+            await conn.execute("""
+                DELETE FROM config_versions 
+                WHERE cluster_id = $1 
+                AND (version_name LIKE $2 OR config_content LIKE $3)
+            """, backend.cluster_id, f"%backend-{inactive_backend['id']}-%", f"%backend {backend.name}%")
+            
+            # 2. Delete related servers
+            if backend.cluster_id:
+                await conn.execute("""
+                    DELETE FROM backend_servers 
+                    WHERE backend_name = $1 AND cluster_id = $2
+                """, backend.name, backend.cluster_id)
+            else:
+                await conn.execute("""
+                    DELETE FROM backend_servers 
+                    WHERE backend_name = $1 AND cluster_id IS NULL
+                """, backend.name)
+            
+            # 3. Hard delete the backend itself
+            await conn.execute("DELETE FROM backends WHERE id = $1", inactive_backend['id'])
+            logger.info(f"BACKEND CREATE: Cleaned up inactive backend '{backend.name}' and all related data")
+        
         # Check if backend name already exists in the same cluster (only active backends)
         existing = await conn.fetchrow("""
             SELECT id FROM backends 
@@ -501,14 +539,30 @@ async def create_backend(backend: BackendConfig, authorization: str = Header(Non
         
         # If cluster_id provided, create new config version for agents
         sync_results = []
+        has_servers = False  # Initialize before try block for proper scope
         if backend.cluster_id:
             try:
+                # CRITICAL FIX: Check if backend has servers before creating config version
+                # This helps users understand why config is empty
+                has_servers = await conn.fetchval("""
+                    SELECT EXISTS(
+                        SELECT 1 FROM backend_servers 
+                        WHERE backend_name = $1 AND cluster_id = $2 AND is_active = TRUE
+                    )
+                """, backend.name, backend.cluster_id)
+                
                 # Generate new HAProxy config
                 config_content = await generate_haproxy_config_for_cluster(backend.cluster_id)
                 
                 # Create new config version
                 config_hash = hashlib.sha256(config_content.encode()).hexdigest()
                 version_name = f"backend-{backend_id}-create-{int(time.time())}"
+                
+                # Create description based on whether backend has servers
+                if not has_servers:
+                    version_description = f"Backend '{backend.name}' created without servers. Will be deployed to HAProxy after adding servers."
+                else:
+                    version_description = f"Backend '{backend.name}' created with servers."
                 
                 # Get system admin user ID for created_by (fresh DB has admin with ID 1)
                 admin_user_id = await conn.fetchval("SELECT id FROM users WHERE username = 'admin' LIMIT 1") or 1
@@ -517,27 +571,30 @@ async def create_backend(backend: BackendConfig, authorization: str = Header(Non
                 try:
                     config_version_id = await conn.fetchval("""
                         INSERT INTO config_versions 
-                        (cluster_id, version_name, config_content, checksum, created_by, is_active, status)
-                        VALUES ($1, $2, $3, $4, $5, FALSE, 'PENDING')
+                        (cluster_id, version_name, config_content, checksum, created_by, is_active, status, description)
+                        VALUES ($1, $2, $3, $4, $5, FALSE, 'PENDING', $6)
                         RETURNING id
-                    """, backend.cluster_id, version_name, config_content, config_hash, admin_user_id)
+                    """, backend.cluster_id, version_name, config_content, config_hash, admin_user_id, version_description)
                     
-                    logger.info(f"APPLY WORKFLOW: Created PENDING config version {version_name} for cluster {backend.cluster_id}")
+                    logger.info(f"APPLY WORKFLOW: Created PENDING config version {version_name} for cluster {backend.cluster_id} (has_servers={has_servers})")
                     # Mark entity as PENDING for UI
                     await conn.execute("UPDATE backends SET last_config_status = 'PENDING' WHERE id = $1", backend_id)
                     
                     # Don't notify agents yet - wait for manual Apply
-                    sync_results = [{'node': 'pending', 'success': True, 'version': version_name, 'status': 'PENDING', 'message': 'Changes created. Click Apply to activate.'}]
+                    if has_servers:
+                        sync_results = [{'node': 'pending', 'success': True, 'version': version_name, 'status': 'PENDING', 'message': 'Backend created. Click Apply to activate.'}]
+                    else:
+                        sync_results = [{'node': 'pending', 'success': True, 'version': version_name, 'status': 'PENDING', 'message': 'Backend created without servers. Add servers then click Apply to deploy.'}]
                     
                 except Exception as status_error:
                     logger.warning(f"FALLBACK: Status field not available, using old immediate-apply behavior: {status_error}")
                     # Fallback to old behavior without status field
                     config_version_id = await conn.fetchval("""
                         INSERT INTO config_versions 
-                        (cluster_id, version_name, config_content, checksum, created_by, is_active)
-                        VALUES ($1, $2, $3, $4, $5, TRUE)
+                        (cluster_id, version_name, config_content, checksum, created_by, is_active, description)
+                        VALUES ($1, $2, $3, $4, $5, TRUE, $6)
                         RETURNING id
-                    """, backend.cluster_id, version_name, config_content, config_hash, admin_user_id)
+                    """, backend.cluster_id, version_name, config_content, config_hash, admin_user_id, version_description)
                     
                     # Deactivate previous versions for this cluster
                     await conn.execute("""
@@ -552,14 +609,26 @@ async def create_backend(backend: BackendConfig, authorization: str = Header(Non
                 logger.error(f"Cluster config update failed for backend {backend.name}: {e}")
                 # Still return success for database save, but with sync warning
                 sync_results = [{'node': 'cluster', 'success': False, 'error': str(e)}]
+                has_servers = False  # Set to False if config generation fails
         
         await close_database_connection(conn)
         
+        # CRITICAL FIX: Use has_servers from initial check (backend just created, no servers yet)
+        # No need for second DB query - backend is brand new, servers added in separate endpoint
+        has_servers_final = has_servers if backend.cluster_id else False
+        
+        # Create user-friendly message
+        if has_servers_final:
+            message = f"Backend '{backend.name}' created successfully with servers"
+        else:
+            message = f"Backend '{backend.name}' created successfully. ⚠️ Add servers and click Apply to deploy to HAProxy."
+        
         return {
-            "message": f"Backend '{backend.name}' created successfully",
+            "message": message,
             "id": backend_id,
             "backend": backend.dict(),
-            "sync_results": sync_results
+            "sync_results": sync_results,
+            "has_servers": has_servers_final
         }
     except HTTPException:
         raise
@@ -974,8 +1043,8 @@ async def delete_backend(backend_id: int, authorization: str = Header(None)):
         
         conn = await get_database_connection()
         
-        # Check if backend exists
-        backend = await conn.fetchrow("SELECT name, cluster_id FROM backends WHERE id = $1", backend_id)
+        # Check if backend exists (including inactive ones)
+        backend = await conn.fetchrow("SELECT name, cluster_id, is_active FROM backends WHERE id = $1", backend_id)
         if not backend:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="Backend not found")
@@ -987,7 +1056,43 @@ async def delete_backend(backend_id: int, authorization: str = Header(None)):
         # Before deleting backend, handle dependencies properly
         backend_name = backend["name"]
         cluster_id = backend["cluster_id"]
+        is_already_inactive = not backend["is_active"]
         
+        # CRITICAL FIX: If backend is already inactive (soft-deleted), do HARD DELETE
+        # Problem: Soft-deleted backends remain in DB and block unique constraint
+        # Solution: Hard delete inactive backends and all related data
+        if is_already_inactive:
+            logger.warning(f"BACKEND DELETE: Backend '{backend_name}' (id={backend_id}) is already inactive. Performing HARD DELETE.")
+            
+            # Hard delete: Remove all traces from database
+            # 1. Delete related config versions
+            await conn.execute("""
+                DELETE FROM config_versions 
+                WHERE cluster_id = $1 
+                AND (version_name LIKE $2 OR config_content LIKE $3)
+            """, cluster_id, f"%backend-{backend_id}-%", f"%backend {backend_name}%")
+            
+            # 2. Delete related servers (HARD DELETE)
+            if cluster_id is not None:
+                await conn.execute("""
+                    DELETE FROM backend_servers 
+                    WHERE backend_name = $1 AND cluster_id = $2
+                """, backend_name, cluster_id)
+            else:
+                await conn.execute("""
+                    DELETE FROM backend_servers 
+                    WHERE backend_name = $1 AND cluster_id IS NULL
+                """, backend_name)
+            
+            # 3. Delete the backend itself (HARD DELETE)
+            await conn.execute("DELETE FROM backends WHERE id = $1", backend_id)
+            
+            await close_database_connection(conn)
+            
+            logger.info(f"BACKEND DELETE: Hard deleted inactive backend '{backend_name}' and all related data")
+            return {"message": f"Inactive backend '{backend_name}' has been permanently deleted from database"}
+        
+        # Normal flow for ACTIVE backends: Soft delete
         # 1. Soft delete all servers belonging to this backend (mark inactive)
         # CRITICAL: Include cluster_id to prevent affecting other clusters with same backend name
         # Handle NULL cluster_id (legacy data) - must use IS NULL check
