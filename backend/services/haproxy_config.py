@@ -451,8 +451,7 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             """, backend["name"], cluster_id)
             
             if not servers_precheck or len(servers_precheck) == 0:
-                logger.warning(f"⚠️  CONFIG GENERATION: Skipping backend '{backend['name']}' - NO ACTIVE SERVERS. HAProxy requires at least one server per backend.")
-                continue
+                logger.info(f"CONFIG GENERATION: Backend '{backend['name']}' has NO ACTIVE SERVERS. Writing backend block (will show as DOWN until servers added).")
             
             config_lines.append(f"backend {backend['name']}")
             

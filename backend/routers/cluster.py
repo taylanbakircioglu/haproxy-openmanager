@@ -1597,45 +1597,14 @@ defaults
             """, cluster_id)
             logger.info(f"APPLY: Updated timestamps only for PENDING frontends in cluster {cluster_id}")
             
-            # Update only backends with PENDING status that have active servers
-            # CRITICAL FIX: Only mark backends as APPLIED if they have active servers
-            # Problem: Backend without servers is skipped by config generator but marked as APPLIED
-            # Result: Backend shows as APPLIED in UI but is not in haproxy.cfg (inconsistent state)
-            # Solution: Only mark backends with active servers as APPLIED, keep serverless backends as PENDING
-            updated_backends = await conn.fetch("""
-                UPDATE backends 
-                SET updated_at = CURRENT_TIMESTAMP, last_config_status = 'APPLIED'
-                WHERE cluster_id = $1 
-                AND last_config_status = 'PENDING'
-                AND EXISTS (
-                    SELECT 1 FROM backend_servers 
-                    WHERE backend_servers.backend_name = backends.name 
-                    AND backend_servers.cluster_id = backends.cluster_id 
-                    AND backend_servers.is_active = TRUE
-                )
-                RETURNING id, name
+            # Update only backends with PENDING status
+            # REVERTED: Now ALL backends are written to config (even without servers)
+            # Config generator writes backend block for all backends (servers optional)
+            await conn.execute("""
+                UPDATE backends SET updated_at = CURRENT_TIMESTAMP, last_config_status = 'APPLIED'
+                WHERE cluster_id = $1 AND last_config_status = 'PENDING'
             """, cluster_id)
-            
-            if updated_backends:
-                backend_names = [b['name'] for b in updated_backends]
-                logger.info(f"APPLY: Marked {len(updated_backends)} PENDING backends as APPLIED (with active servers): {', '.join(backend_names)}")
-            
-            # Log backends that remain PENDING (no active servers)
-            pending_without_servers = await conn.fetch("""
-                SELECT id, name FROM backends
-                WHERE cluster_id = $1 
-                AND last_config_status = 'PENDING'
-                AND NOT EXISTS (
-                    SELECT 1 FROM backend_servers 
-                    WHERE backend_servers.backend_name = backends.name 
-                    AND backend_servers.cluster_id = backends.cluster_id 
-                    AND backend_servers.is_active = TRUE
-                )
-            """, cluster_id)
-            
-            if pending_without_servers:
-                pending_names = [b['name'] for b in pending_without_servers]
-                logger.warning(f"APPLY: {len(pending_without_servers)} backends remain PENDING (no active servers): {', '.join(pending_names)}. Add servers to deploy.")
+            logger.info(f"APPLY: Updated timestamps only for PENDING backends in cluster {cluster_id}")
             
             # Update only WAF rules with PENDING status
             await conn.execute("""
