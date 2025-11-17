@@ -141,14 +141,13 @@ const ApplyManagement = () => {
       ]);
 
       // DEBUG: Log raw backend data
-      console.log('🔍 APPLY MANAGEMENT DEBUG - Backend Data:');
+      console.log('[APPLY MANAGEMENT DEBUG] Backend Data:');
       console.log('Total backends from API:', backendsRes.data.backends?.length || 0);
       
-      // Check specific backends
-      const targetBackends = ['Apmserver', 'Elasticsearch', 'Kibana'];
-      const foundTargets = (backendsRes.data.backends || []).filter(b => targetBackends.includes(b.name));
-      foundTargets.forEach(b => {
-        console.log(`🔍 Backend: ${b.name} (id=${b.id})`, {
+      // CRITICAL DEBUG: Log ALL backends to find the hidden pending one
+      console.log('[ALL BACKENDS FROM API]:');
+      (backendsRes.data.backends || []).forEach(b => {
+        console.log(`  - Backend: ${b.name} (id=${b.id})`, {
           cluster_id: b.cluster_id,
           last_config_status: b.last_config_status,
           has_pending_config: b.has_pending_config,
@@ -160,10 +159,16 @@ const ApplyManagement = () => {
       const frontends = (frontendsRes.data.frontends || []).filter(f => f.has_pending_config);
       const backends = (backendsRes.data.backends || []).filter(b => b.has_pending_config);
       
-      // DEBUG: Log filtered backends
-      console.log('🔍 Filtered pending backends:', backends.length);
-      backends.filter(b => targetBackends.includes(b.name)).forEach(b => {
-        console.log(`🔍 PENDING Backend: ${b.name} (id=${b.id}) - has_pending_config=${b.has_pending_config}`);
+      // CRITICAL DEBUG: Log ALL filtered pending backends
+      console.log('[Filtered pending backends]:', backends.length);
+      console.log('[PENDING BACKENDS DETAILS]:');
+      backends.forEach(b => {
+        console.log(`  [PENDING] ${b.name} (id=${b.id})`, {
+          cluster_id: b.cluster_id,
+          last_config_status: b.last_config_status,
+          has_pending_config: b.has_pending_config,
+          is_active: b.is_active
+        });
       });
       
       const waf_rules = (wafRes.data.rules || []).filter(w => w.has_pending_config);
@@ -372,6 +377,25 @@ const ApplyManagement = () => {
 
   const executeApplyAll = async () => {
     setApplyLoading(true);
+    
+      // CRITICAL DEBUG: Log what we're about to apply
+      console.log('[EXECUTE APPLY ALL] Starting...');
+      console.log('[Pending Changes State]:', {
+        frontends: pendingChanges.frontends.length,
+        backends: pendingChanges.backends.length,
+        waf_rules: pendingChanges.waf_rules.length,
+        ssl_certificates: pendingChanges.ssl_certificates.length,
+        total: effectiveTotal
+      });
+      console.log('[Backend Details Being Applied]:');
+      pendingChanges.backends.forEach(b => {
+        console.log(`  - Backend: ${b.name} (id=${b.id})`, {
+          last_config_status: b.last_config_status,
+          has_pending_config: b.has_pending_config,
+          is_active: b.is_active
+        });
+      });
+    
       // CRITICAL: Mark this browser session as the one who initiated apply
       // This prevents notification confusion when multiple users share same admin account
       const applySessionId = `apply_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -415,14 +439,19 @@ const ApplyManagement = () => {
         { headers: { Authorization: `Bearer ${token}` } }
       );
       
+      // CRITICAL DEBUG: Log apply response
+      console.log('[APPLY ALL RESPONSE]:', response.data);
+      
       setSyncProgress({ visible: true, step: `Configuration applied, syncing agents... Entities: ${totalEntities}/${totalEntities}, Agents: 0/${totalAgents}`, progress: 60 });
       updateProgress(`Configuration applied, syncing agents... Entities: ${totalEntities}/${totalEntities}, Agents: 0/${totalAgents}`, 60);
       updateEntityCounts(totalEntities, totalEntities, 0, totalAgents);
       
       // Refresh data immediately
+      console.log('[REFRESHING DATA] after apply...');
       await fetchPendingChanges();
       await fetchConfigVersions();
       await fetchAgentSync();
+      console.log('[DATA REFRESHED] after apply');
 
       setSyncProgress({ visible: true, step: `Waiting for agent synchronization... Entities: ${totalEntities}/${totalEntities}, Agents: ⏳/${totalAgents}`, progress: 80 });
       updateProgress(`Waiting for agent synchronization... Entities: ${totalEntities}/${totalEntities}, Agents: ⏳/${totalAgents}`, 80);
@@ -637,6 +666,25 @@ const ApplyManagement = () => {
 
   const executeRejectAll = async () => {
     setApplyLoading(true);
+    
+    // CRITICAL DEBUG: Log what we're about to reject
+    console.log('[EXECUTE REJECT ALL] Starting...');
+    console.log('[Pending Changes State]:', {
+      frontends: pendingChanges.frontends.length,
+      backends: pendingChanges.backends.length,
+      waf_rules: pendingChanges.waf_rules.length,
+      ssl_certificates: pendingChanges.ssl_certificates.length,
+      total: effectiveTotal
+    });
+    console.log('[Backend Details Being Rejected]:');
+    pendingChanges.backends.forEach(b => {
+      console.log(`  - Backend: ${b.name} (id=${b.id})`, {
+        last_config_status: b.last_config_status,
+        has_pending_config: b.has_pending_config,
+        is_active: b.is_active
+      });
+    });
+    
     try {
       const token = localStorage.getItem('token');
       
@@ -645,12 +693,19 @@ const ApplyManagement = () => {
         { headers: { Authorization: `Bearer ${token}` } }
       );
       
+      // CRITICAL DEBUG: Log reject response
+      console.log('[REJECT ALL RESPONSE]:', response.data);
+      
       message.success(response.data.message || 'All pending changes rejected successfully!');
       
       // Refresh data after successful reject
+      console.log('[REFRESHING DATA] after reject...');
+
       await fetchPendingChanges();
       await fetchConfigVersions();
       await fetchAgentSync();
+      
+      console.log('[DATA REFRESHED] after reject');
       
     } catch (error) {
       console.error('Error rejecting changes:', error);
