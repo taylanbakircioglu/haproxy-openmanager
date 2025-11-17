@@ -2558,17 +2558,9 @@ CONFIG_RESPONSE_EOF
     
     log "DEBUG" "DAEMON: Essential functions loaded for daemon mode (including check_config_requests)"
     
-    # Send simple completion heartbeat
-    log "DEBUG" "DAEMON: Sending upgrade completion heartbeat..."
-    curl -k -s -X POST "$MANAGEMENT_URL/api/agents/heartbeat" \
-        -H "Content-Type: application/json" \
-        -H "X-API-Key: $AGENT_TOKEN" \
-        -d "{\"name\":\"$AGENT_NAME\",\"hostname\":\"$(hostname)\",\"status\":\"online\",\"platform\":\"linux\",\"architecture\":\"$(uname -m)\",\"version\":\"{{AGENT_VERSION}}\",\"haproxy_status\":\"running\",\"cluster_id\":$CLUSTER_ID}" >/dev/null 2>&1
-    
-    log "DEBUG" "DAEMON: Agent upgrade completed successfully"
-    log "DEBUG" "DAEMON: Agent is now online with version {{AGENT_VERSION}}"
-    
-    # FINAL FIX: Implement daemon loop directly (no exec to avoid infinite recursion) - EXACT MacOS COPY
+    # CRITICAL FIX: Remove misleading "upgrade completion" heartbeat from daemon startup
+    # Agent will send normal heartbeat in daemon loop - no need for special startup heartbeat
+    # This was causing confusion in logs and potential upgrade loop issues
     log "DEBUG" "DAEMON: Starting continuous daemon mode..."
     
     # Initialize daemon environment

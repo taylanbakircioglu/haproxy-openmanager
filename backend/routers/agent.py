@@ -1408,9 +1408,24 @@ async def agent_heartbeat_by_name(heartbeat_data: AgentHeartbeat, x_api_key: Opt
                 logger.warning(f"Could not determine cluster_id for agent '{agent_name}' to update server statuses")
                 # NOTE: Pool assignment is now handled above in the cluster_id lookup logic
 
+        # Check for pending configuration requests (for immediate agent response)
+        has_pending_config_request = await conn.fetchval("""
+            SELECT EXISTS(
+                SELECT 1 FROM agent_config_requests 
+                WHERE agent_name = $1 
+                AND status = 'pending' 
+                AND expires_at > CURRENT_TIMESTAMP
+            )
+        """, agent_name)
+        
         await close_database_connection(conn)
         
-        return {"status": "ok", "message": "Heartbeat received", "agent_id": agent_id}
+        return {
+            "status": "ok", 
+            "message": "Heartbeat received", 
+            "agent_id": agent_id,
+            "pending_config_request": bool(has_pending_config_request)
+        }
         
     except Exception as e:
         logger.error(f"Heartbeat processing failed for agent '{heartbeat_data.name}': {e}", exc_info=True)
