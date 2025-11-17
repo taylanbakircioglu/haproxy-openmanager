@@ -1473,13 +1473,31 @@ const WAFManagement = () => {
               <Form.Item
                 name="frontend_ids"
                 label="Target Frontends"
-                tooltip="WAF rule will be applied to selected frontends. This can be left empty for a globally available WAF rule."
+                rules={[
+                  { 
+                    required: true, 
+                    message: 'Please select at least one frontend' 
+                  },
+                  {
+                    validator: (_, value) => {
+                      if (!value || value.length === 0) {
+                        return Promise.reject('At least one frontend must be selected for WAF rule');
+                      }
+                      return Promise.resolve();
+                    }
+                  }
+                ]}
+                tooltip="Select which frontend(s) this WAF rule should be applied to. At least one frontend is required."
               >
                 <Select 
                   mode="multiple"
-                  placeholder="Select frontends to apply this WAF rule"
+                  placeholder="Select frontends to apply this WAF rule (Required *)"
                   disabled={!selectedCluster}
                   maxTagCount="responsive"
+                  showSearch
+                  filterOption={(input, option) =>
+                    option.children.toLowerCase().indexOf(input.toLowerCase()) >= 0
+                  }
                 >
                   {frontends.map(frontend => (
                     <Option key={frontend.id} value={frontend.id}>

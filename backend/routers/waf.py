@@ -415,6 +415,16 @@ async def create_waf_rule(waf_rule_data: dict, cluster_id: Optional[int] = None,
             cluster_info = f" in cluster {cluster_id}" if cluster_id else ""
             raise HTTPException(status_code=400, detail=f"WAF rule '{waf_rule.name}' already exists{cluster_info}")
         
+        # CRITICAL VALIDATION: At least one frontend must be selected
+        # Use case: Prevent unintentional application to ALL frontends
+        # WAF rule without frontend = no config change = should not create pending version
+        if not waf_rule.frontend_ids or len(waf_rule.frontend_ids) == 0:
+            await close_database_connection(conn)
+            raise HTTPException(
+                status_code=400,
+                detail="At least one frontend must be selected for WAF rule. Please select target frontend(s) where this WAF rule should be applied."
+            )
+        
         async with conn.transaction():
             rule_id = await conn.fetchval("""
                 INSERT INTO waf_rules (name, rule_type, config, action, priority, description, enabled, is_active, cluster_id) 
@@ -673,6 +683,15 @@ async def update_waf_rule(rule_id: int, waf_rule_data: dict, request: Request, a
             frontend_ids_in_payload = 'frontend_ids' in waf_rule_data
             
             if frontend_ids_in_payload:
+                # CRITICAL VALIDATION: If frontend_ids explicitly provided, must have at least one
+                # Use case: Prevent clearing all frontends (WAF rule would apply to nothing)
+                if not waf_rule.frontend_ids or len(waf_rule.frontend_ids) == 0:
+                    await close_database_connection(conn)
+                    raise HTTPException(
+                        status_code=400,
+                        detail="At least one frontend must be selected for WAF rule. Cannot remove all frontend assignments. Please select target frontend(s)."
+                    )
+                
                 # Frontend IDs were explicitly provided in the request (could be [] or [1,2,3])
                 await conn.execute("DELETE FROM frontend_waf_rules WHERE waf_rule_id = $1", rule_id)
                 frontend_assignments, cluster_ids = await assign_frontends_and_get_clusters(conn, rule_id, waf_rule.frontend_ids or [], existing_rule.get("cluster_id"))
