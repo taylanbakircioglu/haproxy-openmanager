@@ -613,6 +613,7 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             servers = await db_conn.fetch("""
                 SELECT id, backend_name, server_name, server_address, server_port, weight, maxconn,
                        check_enabled, check_port, backup_server, ssl_enabled, ssl_verify, ssl_certificate_id,
+                       ssl_sni, ssl_min_ver, ssl_max_ver, ssl_ciphers,
                        cookie_value, inter, fall, rise, is_active, cluster_id, last_config_status
                 FROM backend_servers 
                 WHERE backend_name = $1 AND (cluster_id = $2 OR cluster_id IS NULL)
