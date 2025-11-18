@@ -1185,6 +1185,11 @@ async def agent_heartbeat_by_name(
         
         # Parse sanitized JSON into Pydantic model
         heartbeat_dict = json.loads(body_str)
+        
+        # DEBUG: Log cluster_id for auto-register troubleshooting
+        if heartbeat_dict.get('name'):
+            logger.info(f"HEARTBEAT DEBUG: agent={heartbeat_dict.get('name')}, cluster_id={heartbeat_dict.get('cluster_id')}, has_cluster_id={bool(heartbeat_dict.get('cluster_id'))}")
+        
         heartbeat_data = AgentHeartbeat(**heartbeat_dict)
     
     except json.JSONDecodeError as e:
@@ -1243,16 +1248,21 @@ async def agent_heartbeat_by_name(
                 else:
                     # Auto-register new agent
                     logger.info(f"Agent '{agent_name}' not found. Auto-registering...")
+                    logger.info(f"AUTO-REGISTER DEBUG: heartbeat_dict has cluster_id={heartbeat_dict.get('cluster_id')}")
                     try:
                         # Get pool_id from cluster_id if provided in heartbeat
                         pool_id_from_cluster = None
                         if heartbeat_dict.get('cluster_id'):
+                            logger.info(f"AUTO-REGISTER: Querying cluster_id {heartbeat_dict['cluster_id']} for pool_id")
                             cluster_pool = await conn.fetchrow("""
                                 SELECT pool_id FROM haproxy_clusters WHERE id = $1
                             """, heartbeat_dict['cluster_id'])
+                            logger.info(f"AUTO-REGISTER: Cluster query result: {cluster_pool}")
                             if cluster_pool:
                                 pool_id_from_cluster = cluster_pool['pool_id']
                                 logger.info(f"Auto-register: Got pool_id {pool_id_from_cluster} from cluster_id {heartbeat_dict['cluster_id']}")
+                        else:
+                            logger.warning(f"AUTO-REGISTER: No cluster_id in heartbeat for agent '{agent_name}'")
                         
                         agent_id = await conn.fetchval("""
                             INSERT INTO agents (name, status, last_seen, api_key, pool_id) 
@@ -1266,17 +1276,22 @@ async def agent_heartbeat_by_name(
                         raise HTTPException(status_code=500, detail=f"Could not create agent: {agent_name}")
         elif not agent:
             # Auto-register new agent without API key
-            logger.info(f"Agent '{agent_name}' not found. Auto-registering...")
+            logger.info(f"Agent '{agent_name}' not found. Auto-registering (no API key path)...")
+            logger.info(f"AUTO-REGISTER DEBUG (no key): heartbeat_dict has cluster_id={heartbeat_dict.get('cluster_id')}")
             try:
                 # Get pool_id from cluster_id if provided in heartbeat
                 pool_id_from_cluster = None
                 if heartbeat_dict.get('cluster_id'):
+                    logger.info(f"AUTO-REGISTER (no key): Querying cluster_id {heartbeat_dict['cluster_id']} for pool_id")
                     cluster_pool = await conn.fetchrow("""
                         SELECT pool_id FROM haproxy_clusters WHERE id = $1
                     """, heartbeat_dict['cluster_id'])
+                    logger.info(f"AUTO-REGISTER (no key): Cluster query result: {cluster_pool}")
                     if cluster_pool:
                         pool_id_from_cluster = cluster_pool['pool_id']
                         logger.info(f"Auto-register: Got pool_id {pool_id_from_cluster} from cluster_id {heartbeat_dict['cluster_id']}")
+                else:
+                    logger.warning(f"AUTO-REGISTER (no key): No cluster_id in heartbeat for agent '{agent_name}'")
                 
                 agent_id = await conn.fetchval("""
                     INSERT INTO agents (name, status, last_seen, pool_id) 
