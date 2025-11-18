@@ -768,29 +768,47 @@ async def parse_bulk_config(
         ssl_auto_assigned_frontends = []
         
         for frontend in parse_result.frontends:
-            # SMART SSL MATCHING: Check if SSL cert path matches existing SYNCED SSL
+            # SMART SSL MATCHING: Check if SSL cert paths match existing SYNCED SSLs
             ssl_enabled = False
             ssl_certificate_ids = []
             ssl_port = None
             
-            if frontend.ssl_cert_path:
-                # Extract SSL certificate name from path
-                # Example: /etc/ssl/haproxy/demo-global.pem → demo-global
-                ssl_filename = os.path.basename(frontend.ssl_cert_path)
-                ssl_name = re.sub(r'\.(pem|crt|key)$', '', ssl_filename, flags=re.IGNORECASE)
+            # CRITICAL FIX: Support multiple SSL certificates per frontend
+            cert_paths_to_match = frontend.ssl_cert_paths if frontend.ssl_cert_paths else (
+                [frontend.ssl_cert_path] if frontend.ssl_cert_path else []
+            )
+            
+            if cert_paths_to_match:
+                matched_certs = []
+                for cert_path in cert_paths_to_match:
+                    # Extract SSL certificate name from path
+                    # Example: /etc/ssl/haproxy/demo-global.pem → demo-global
+                    ssl_filename = os.path.basename(cert_path)
+                    ssl_name = re.sub(r'\.(pem|crt|key)$', '', ssl_filename, flags=re.IGNORECASE)
+                    
+                    # Check if this SSL exists in SSL Management and is SYNCED
+                    if ssl_name.lower() in ssl_name_map:
+                        ssl_cert_id = ssl_name_map[ssl_name.lower()]
+                        ssl_certificate_ids.append(ssl_cert_id)
+                        matched_certs.append({
+                            'ssl_name': ssl_name,
+                            'ssl_id': ssl_cert_id,
+                            'cert_path': cert_path
+                        })
+                        logger.info(f"BULK IMPORT SSL AUTO-ASSIGN: Frontend '{frontend.name}' matched SSL '{ssl_name}' (ID: {ssl_cert_id})")
+                    else:
+                        logger.warning(f"BULK IMPORT SSL: Frontend '{frontend.name}' certificate '{ssl_name}' not found in SSL Management (not SYNCED)")
                 
-                # Check if this SSL exists in SSL Management and is SYNCED
-                if ssl_name.lower() in ssl_name_map:
-                    ssl_cert_id = ssl_name_map[ssl_name.lower()]
+                # Mark SSL as enabled if at least one certificate was matched
+                if ssl_certificate_ids:
                     ssl_enabled = True
-                    ssl_certificate_ids = [ssl_cert_id]
                     ssl_port = frontend.ssl_port
                     ssl_auto_assigned_frontends.append({
                         'frontend': frontend.name,
-                        'ssl_name': ssl_name,
-                        'ssl_id': ssl_cert_id
+                        'matched_certs': matched_certs,
+                        'total_matched': len(ssl_certificate_ids),
+                        'total_paths': len(cert_paths_to_match)
                     })
-                    logger.info(f"BULK IMPORT SSL AUTO-ASSIGN: Frontend '{frontend.name}' matched SSL '{ssl_name}' (ID: {ssl_cert_id})")
             
             frontends_data.append({
                 "name": frontend.name,
@@ -807,6 +825,14 @@ async def parse_bulk_config(
                 "response_headers": frontend.response_headers,
                 "options": frontend.options,
                 "tcp_request_rules": frontend.tcp_request_rules,
+                # CRITICAL: SSL Advanced Options (parsed from bind directive)
+                "ssl_alpn": frontend.ssl_alpn,
+                "ssl_npn": frontend.ssl_npn,
+                "ssl_ciphers": frontend.ssl_ciphers,
+                "ssl_ciphersuites": frontend.ssl_ciphersuites,
+                "ssl_min_ver": frontend.ssl_min_ver,
+                "ssl_max_ver": frontend.ssl_max_ver,
+                "ssl_strict_sni": frontend.ssl_strict_sni,
                 "acl_rules": frontend.acl_rules,
                 "use_backend_rules": frontend.use_backend_rules
             })

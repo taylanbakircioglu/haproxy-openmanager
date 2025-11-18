@@ -77,7 +77,8 @@ class ParsedFrontend:
     ssl_enabled: bool = False
     ssl_port: Optional[int] = None
     ssl_certificate_id: Optional[int] = None
-    ssl_cert_path: Optional[str] = None
+    ssl_cert_path: Optional[str] = None  # Legacy: First SSL cert path (for backward compat)
+    ssl_cert_paths: Optional[List[str]] = None  # CRITICAL: All SSL cert paths (for multiple certs)
     ssl_cert: Optional[str] = None
     ssl_verify: Optional[str] = None
     
@@ -342,11 +343,13 @@ class HAProxyConfigParser:
                                 i += 1
                             
                             if cert_paths:
-                                # CRITICAL: Store first cert path for SSL auto-matching in bulk import
+                                # CRITICAL: Store ALL cert paths for multi-SSL auto-matching
+                                frontend.ssl_cert_paths = cert_paths
+                                # Legacy: Store first cert path for backward compatibility
                                 frontend.ssl_cert_path = cert_paths[0]
                                 
                                 self.warnings.append(
-                                    f"Frontend '{name}': SSL certificates detected in config ({', '.join(cert_paths)}). "
+                                    f"Frontend '{name}': {len(cert_paths)} SSL certificate(s) detected in config ({', '.join(cert_paths)}). "
                                     "SSL certificates should be managed through the SSL Management page, not in the config file."
                                 )
                             
