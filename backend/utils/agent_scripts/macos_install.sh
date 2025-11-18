@@ -2911,14 +2911,30 @@ CONFIG_RESPONSE_EOF
                             
                             # Mark this version as validation failed to prevent repeated error logs
                             last_validation_failed_version="$config_version"
+                            
+                            # CRITICAL DEBUG FEATURE: Save failed config for troubleshooting
+                            # Instead of deleting, rename with timestamp for later inspection
+                            failed_config_timestamp=$(date +%Y%m%d-%H%M%S)
+                            failed_config_path="/tmp/haproxy-failed-${config_version}-${failed_config_timestamp}.cfg"
+                            if [[ -f /tmp/haproxy-new-config.cfg ]]; then
+                                mv /tmp/haproxy-new-config.cfg "$failed_config_path" 2>/dev/null
+                                if [[ -f "$failed_config_path" ]]; then
+                                    log "INFO" "DAEMON: Failed config saved to: $failed_config_path"
+                                    log "INFO" "DAEMON: Debug: cat $failed_config_path"
+                                    log "INFO" "DAEMON: Debug: haproxy -c -f $failed_config_path"
+                                    # Clean up old failed configs (keep last 5)
+                                    ls -t /tmp/haproxy-failed-*.cfg 2>/dev/null | tail -n +6 | xargs rm -f 2>/dev/null
+                                fi
+                            fi
                         else
                             # Already reported this validation failure, just log in DEBUG to avoid spam
                             log "DEBUG" "DAEMON: Config version $config_version still failing validation (already reported)"
                         fi
                     fi
                     
-                        # Clean up
-                        rm -f /tmp/haproxy-new-config.cfg
+                    # Clean up temp file (if validation was successful, it's already copied to haproxy.cfg)
+                    # (if validation failed, it's already moved to haproxy-failed-*.cfg above)
+                    rm -f /tmp/haproxy-new-config.cfg 2>/dev/null
                     fi
                     fi  # End of config_is_valid check
                 fi  # End of version already applied check
