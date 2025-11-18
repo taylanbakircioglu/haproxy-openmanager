@@ -1133,8 +1133,15 @@ async def agent_config_sync(agent_name: str, sync_data: dict, x_api_key: Optiona
         return {"status": "error", "message": str(e)}
 
 @router.post("/heartbeat")
-async def agent_heartbeat_by_name(heartbeat_data: AgentHeartbeat, x_api_key: Optional[str] = Header(None)):
-    """Receive agent heartbeat by agent name, with auto-registration and data validation."""
+async def agent_heartbeat_by_name(
+    request: Request,
+    heartbeat_data: AgentHeartbeat, 
+    x_api_key: Optional[str] = Header(None)
+):
+    """Receive agent heartbeat by agent name, with auto-registration and data validation.
+    
+    Enhanced with robust error handling and detailed logging for malformed JSON payloads.
+    """
     try:
         # Validate agent API key for security
         from auth_middleware import validate_agent_api_key

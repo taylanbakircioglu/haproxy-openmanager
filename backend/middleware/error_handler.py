@@ -79,7 +79,7 @@ class GlobalExceptionHandler:
     
     @staticmethod
     async def handle_validation_error(request: Request, exc: Exception) -> JSONResponse:
-        """Handle validation errors (Pydantic, FastAPI)"""
+        """Handle validation errors (Pydantic, FastAPI) with enhanced debugging for agent heartbeats"""
         correlation_id = get_correlation_id()
         
         # Extract validation details
@@ -98,15 +98,58 @@ class GlobalExceptionHandler:
         else:
             error_details = {"raw_error": str(exc)}
         
-        # Log validation error
+        # ENHANCED: For heartbeat endpoint, try to extract RAW body for debugging
+        raw_body_preview = None
+        agent_name = "unknown"
+        if "/heartbeat" in str(request.url.path):
+            try:
+                # Try to get raw body (might fail if already consumed)
+                raw_body = await request.body()
+                if raw_body:
+                    raw_body_str = raw_body.decode('utf-8', errors='replace')
+                    # Extract agent name from JSON if possible
+                    import json
+                    try:
+                        body_json = json.loads(raw_body_str)
+                        agent_name = body_json.get('name', 'unknown')
+                    except:
+                        # Try simple regex to extract name
+                        import re
+                        name_match = re.search(r'"name"\s*:\s*"([^"]+)"', raw_body_str)
+                        if name_match:
+                            agent_name = name_match.group(1)
+                    
+                    # Log first 500 characters for debugging (don't log full body - too large)
+                    raw_body_preview = raw_body_str[:500] if len(raw_body_str) > 500 else raw_body_str
+                    error_details["raw_body_preview"] = raw_body_preview
+                    error_details["body_size_bytes"] = len(raw_body)
+            except Exception as body_error:
+                logger.debug(f"Could not extract raw body for debugging: {body_error}")
+        
+        # Enhanced log message for agent heartbeats
+        log_message = f"Validation error: {str(exc)}"
+        if agent_name != "unknown":
+            log_message = f"Agent '{agent_name}' heartbeat validation error: {str(exc)}"
+        
+        # Log validation error with enhanced details
         log_with_correlation(
             logger, "WARNING",
-            f"Validation error: {str(exc)}",
+            log_message,
             path=str(request.url.path),
             method=request.method,
             client_ip=request.client.host if request.client else "unknown",
-            validation_details=error_details
+            validation_details=error_details,
+            agent_name=agent_name if agent_name != "unknown" else None
         )
+        
+        # CRITICAL: For JSON decode errors at specific position, log exact context
+        for error in error_details.get("validation_errors", []):
+            if error.get("type") == "json_invalid" and "body ->" in error.get("field", ""):
+                logger.error(
+                    f"CRITICAL JSON PARSE ERROR for agent '{agent_name}': {error.get('message')} "
+                    f"at position {error.get('field')} | "
+                    f"Body preview (first 500 chars): {raw_body_preview[:500] if raw_body_preview else 'N/A'}"
+                )
         
         return GlobalExceptionHandler.create_error_response(
             status_code=422,
