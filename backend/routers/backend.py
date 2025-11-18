@@ -256,6 +256,7 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
                 servers = await conn.fetch("""
                     SELECT id, server_name, server_address, server_port, weight, maxconn,
                            check_enabled, check_port, backup_server, ssl_enabled, ssl_verify, ssl_certificate_id,
+                           ssl_sni, ssl_min_ver, ssl_max_ver, ssl_ciphers,
                            cookie_value, inter, fall, rise,
                            is_active, cluster_id,
                            haproxy_status, haproxy_status_updated_at, backend_name
@@ -266,6 +267,7 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
                 servers = await conn.fetch("""
                     SELECT id, server_name, server_address, server_port, weight, maxconn,
                            check_enabled, check_port, backup_server, ssl_enabled, ssl_verify, ssl_certificate_id,
+                           ssl_sni, ssl_min_ver, ssl_max_ver, ssl_ciphers,
                            cookie_value, inter, fall, rise,
                            is_active, cluster_id,
                            haproxy_status, haproxy_status_updated_at, backend_name
@@ -317,6 +319,11 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
                     "ssl_enabled": s.get("ssl_enabled", False),
                     "ssl_verify": s.get("ssl_verify"),
                     "ssl_certificate_id": s.get("ssl_certificate_id"),
+                    # CRITICAL FIX: Include SSL advanced options for backend servers
+                    "ssl_sni": s.get("ssl_sni"),
+                    "ssl_min_ver": s.get("ssl_min_ver"),
+                    "ssl_max_ver": s.get("ssl_max_ver"),
+                    "ssl_ciphers": s.get("ssl_ciphers"),
                     "cookie_value": s.get("cookie_value"),
                     "inter": s.get("inter"),
                     "fall": s.get("fall"),

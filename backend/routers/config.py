@@ -1777,6 +1777,43 @@ async def bulk_create_entities(
                         update_values.append(frontend_data["options"])
                         param_index += 1
                     
+                    # CRITICAL FIX: Update SSL advanced options (alpn, npn, ciphers, etc.)
+                    # These are parsed from bind directive and should be preserved in database
+                    if "ssl_alpn" in frontend_data and frontend_data.get("ssl_alpn") != existing_full.get("ssl_alpn"):
+                        update_fields.append(f"ssl_alpn = ${param_index}")
+                        update_values.append(frontend_data.get("ssl_alpn"))
+                        param_index += 1
+                    
+                    if "ssl_npn" in frontend_data and frontend_data.get("ssl_npn") != existing_full.get("ssl_npn"):
+                        update_fields.append(f"ssl_npn = ${param_index}")
+                        update_values.append(frontend_data.get("ssl_npn"))
+                        param_index += 1
+                    
+                    if "ssl_ciphers" in frontend_data and frontend_data.get("ssl_ciphers") != existing_full.get("ssl_ciphers"):
+                        update_fields.append(f"ssl_ciphers = ${param_index}")
+                        update_values.append(frontend_data.get("ssl_ciphers"))
+                        param_index += 1
+                    
+                    if "ssl_ciphersuites" in frontend_data and frontend_data.get("ssl_ciphersuites") != existing_full.get("ssl_ciphersuites"):
+                        update_fields.append(f"ssl_ciphersuites = ${param_index}")
+                        update_values.append(frontend_data.get("ssl_ciphersuites"))
+                        param_index += 1
+                    
+                    if "ssl_min_ver" in frontend_data and frontend_data.get("ssl_min_ver") != existing_full.get("ssl_min_ver"):
+                        update_fields.append(f"ssl_min_ver = ${param_index}")
+                        update_values.append(frontend_data.get("ssl_min_ver"))
+                        param_index += 1
+                    
+                    if "ssl_max_ver" in frontend_data and frontend_data.get("ssl_max_ver") != existing_full.get("ssl_max_ver"):
+                        update_fields.append(f"ssl_max_ver = ${param_index}")
+                        update_values.append(frontend_data.get("ssl_max_ver"))
+                        param_index += 1
+                    
+                    if "ssl_strict_sni" in frontend_data and frontend_data.get("ssl_strict_sni") != existing_full.get("ssl_strict_sni", False):
+                        update_fields.append(f"ssl_strict_sni = ${param_index}")
+                        update_values.append(frontend_data.get("ssl_strict_sni", False))
+                        param_index += 1
+                    
                     if frontend_data.get("timeout_http_request") and frontend_data["timeout_http_request"] != existing_full["timeout_http_request"]:
                         update_fields.append(f"timeout_http_request = ${param_index}")
                         update_values.append(frontend_data["timeout_http_request"])
