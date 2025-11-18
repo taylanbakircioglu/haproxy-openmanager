@@ -4488,13 +4488,17 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                             entity_id = entity_snap.get('entity_id')
                             operation = entity_snap.get('operation')
                             
-                            # Track bulk import entities for verification
-                            if entity_type == "frontend":
-                                bulk_import_entity_ids["frontends"].append(entity_id)
-                            elif entity_type == "backend":
-                                bulk_import_entity_ids["backends"].append(entity_id)
-                            elif entity_type == "server":
-                                bulk_import_entity_ids["servers"].append(entity_id)
+                            # CRITICAL FIX: Only track CREATE operations for force deletion
+                            # UPDATE operations should be rolled back, not deleted!
+                            # If we delete an UPDATE entity, we lose the original entity that existed before bulk import
+                            if operation == "CREATE":
+                                # Track bulk import entities for verification (only newly created ones)
+                                if entity_type == "frontend":
+                                    bulk_import_entity_ids["frontends"].append(entity_id)
+                                elif entity_type == "backend":
+                                    bulk_import_entity_ids["backends"].append(entity_id)
+                                elif entity_type == "server":
+                                    bulk_import_entity_ids["servers"].append(entity_id)
                 else:
                     # Normal entity-specific version (frontend-5-update, backend-3-create, etc.)
                     m1 = re.search(r'^frontend-(\d+)-', v['version_name'])
