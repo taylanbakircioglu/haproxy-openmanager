@@ -1413,6 +1413,25 @@ async def agent_heartbeat_by_name(
         # API key validation is already done at the beginning - no need for final check
         # Multi-agent token system allows multiple agents to use the same token
 
+        # CRITICAL FIX: Auto-heal agent pool_id BEFORE checking server_statuses
+        # This ensures pool_id is set even on first heartbeat (when haproxy config is empty)
+        if not agent['pool_id'] and heartbeat_data.cluster_id:
+            # Agent has no pool_id but sends cluster_id - auto-heal it
+            cluster_pool = await conn.fetchval(
+                "SELECT pool_id FROM haproxy_clusters WHERE id = $1", 
+                heartbeat_data.cluster_id
+            )
+            if cluster_pool:
+                await conn.execute(
+                    "UPDATE agents SET pool_id = $1 WHERE id = $2", 
+                    cluster_pool, agent_id
+                )
+                logger.info(f"AGENT AUTO-HEAL: Fixed agent '{agent_name}' pool_id to {cluster_pool} from heartbeat cluster_id {heartbeat_data.cluster_id}")
+                # Update in-memory agent dict for subsequent logic
+                agent['pool_id'] = cluster_pool
+            else:
+                logger.warning(f"AGENT AUTO-HEAL: Cluster {heartbeat_data.cluster_id} not found or has no pool assigned")
+
         if heartbeat_data.server_statuses:
             logger.info(f"AGENT HEARTBEAT: Agent '{agent_name}' reported server statuses: {heartbeat_data.server_statuses}")
             
@@ -1443,14 +1462,6 @@ async def agent_heartbeat_by_name(
                     # Cluster exists, use it for stats processing
                     cluster_id = heartbeat_data.cluster_id
                     logger.info(f"CLUSTER LOOKUP: Using cluster_id {cluster_id} from agent heartbeat data")
-                    
-                    # IMPORTANT: Update agent's pool_id if missing (fixes the cluster-created-before-pool scenario)
-                    if not agent['pool_id']:
-                        await conn.execute(
-                            "UPDATE agents SET pool_id = $1 WHERE id = $2", 
-                            cluster_pool, agent_id
-                        )
-                        logger.info(f"AGENT FIX: Auto-assigned agent '{agent_name}' to pool {cluster_pool} via heartbeat cluster_id {cluster_id}")
                 else:
                     logger.warning(f"CLUSTER LOOKUP: Cluster {heartbeat_data.cluster_id} not found or has no pool assigned")
             
