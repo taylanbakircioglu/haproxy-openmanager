@@ -5,6 +5,7 @@ Parses HAProxy config files and extracts frontend, backend, and server definitio
 
 import re
 import logging
+import shlex
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
 
@@ -282,9 +283,14 @@ class HAProxyConfigParser:
                             ssl_cert_found = True
                             # Extract certificate paths and SSL parameters
                             # CRITICAL FIX: Parse multiple crt paths even with alpn/other params after them
+                            # Use shlex.split() to handle quoted values correctly
                             cert_paths = []
                             ssl_params_detected = []
-                            parts = line.split()
+                            try:
+                                parts = shlex.split(line)
+                            except ValueError:
+                                # Fallback to simple split if shlex fails (malformed quotes)
+                                parts = line.split()
                             
                             i = 0
                             while i < len(parts):
@@ -840,21 +846,23 @@ class HAProxyConfigParser:
             )
         
         # Parse SSL Advanced Options (server SSL parameters)
-        sni_match = re.search(r'sni\s+(\S+)', options, re.IGNORECASE)
+        # Support both quoted and unquoted values
+        sni_match = re.search(r'sni\s+(?:"([^"]+)"|(\S+))', options, re.IGNORECASE)
         if sni_match:
-            server.ssl_sni = sni_match.group(1)
+            server.ssl_sni = (sni_match.group(1) or sni_match.group(2)).strip('"')
         
-        ssl_min_ver_match = re.search(r'ssl-min-ver\s+(\S+)', options, re.IGNORECASE)
+        ssl_min_ver_match = re.search(r'ssl-min-ver\s+(?:"([^"]+)"|(\S+))', options, re.IGNORECASE)
         if ssl_min_ver_match:
-            server.ssl_min_ver = ssl_min_ver_match.group(1)
+            server.ssl_min_ver = (ssl_min_ver_match.group(1) or ssl_min_ver_match.group(2)).strip('"')
         
-        ssl_max_ver_match = re.search(r'ssl-max-ver\s+(\S+)', options, re.IGNORECASE)
+        ssl_max_ver_match = re.search(r'ssl-max-ver\s+(?:"([^"]+)"|(\S+))', options, re.IGNORECASE)
         if ssl_max_ver_match:
-            server.ssl_max_ver = ssl_max_ver_match.group(1)
+            server.ssl_max_ver = (ssl_max_ver_match.group(1) or ssl_max_ver_match.group(2)).strip('"')
         
-        ciphers_match = re.search(r'ciphers\s+([^\s]+)', options, re.IGNORECASE)
+        # Ciphers can be a long colon-separated list, support quoted values
+        ciphers_match = re.search(r'ciphers\s+(?:"([^"]+)"|([^\s]+))', options, re.IGNORECASE)
         if ciphers_match:
-            server.ssl_ciphers = ciphers_match.group(1)
+            server.ssl_ciphers = (ciphers_match.group(1) or ciphers_match.group(2)).strip('"')
         
         # Parse cookie value
         cookie_match = re.search(r'cookie\s+(\S+)', options, re.IGNORECASE)
