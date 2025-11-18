@@ -548,6 +548,15 @@ const FrontendManagement = () => {
       ssl_certificate_ids: frontend.ssl_certificate_ids,
       ssl_certificate_id: frontend.ssl_certificate_id
     });
+    console.log('🎯 SSL ADVANCED OPTIONS DEBUG:', {
+      ssl_alpn: frontend.ssl_alpn,
+      ssl_npn: frontend.ssl_npn,
+      ssl_ciphers: frontend.ssl_ciphers,
+      ssl_ciphersuites: frontend.ssl_ciphersuites,
+      ssl_min_ver: frontend.ssl_min_ver,
+      ssl_max_ver: frontend.ssl_max_ver,
+      ssl_strict_sni: frontend.ssl_strict_sni
+    });
     console.log('🔍 FRONTEND EDIT DEBUG: TCP Request Rules:', frontend.tcp_request_rules);
     console.log('🔍 FRONTEND EDIT DEBUG: Request Headers:', frontend.request_headers);
     console.log('🔍 FRONTEND EDIT DEBUG: Options:', frontend.options);

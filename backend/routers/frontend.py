@@ -171,6 +171,7 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                 frontends = await conn.fetch("""
                     SELECT id, name, bind_address, bind_port, default_backend, mode, 
                            ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
+                           ssl_alpn, ssl_npn, ssl_ciphers, ssl_ciphersuites, ssl_min_ver, ssl_max_ver, ssl_strict_sni,
                            acl_rules, redirect_rules, use_backend_rules,
                            request_headers, response_headers, options, tcp_request_rules,
                            timeout_client, timeout_http_request,
@@ -186,6 +187,7 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                 frontends = await conn.fetch("""
                     SELECT id, name, bind_address, bind_port, default_backend, mode, 
                            ssl_enabled, ssl_cert_path, ssl_cert, ssl_verify,
+                           ssl_alpn, ssl_npn, ssl_ciphers, ssl_ciphersuites, ssl_min_ver, ssl_max_ver, ssl_strict_sni,
                            acl_rules, redirect_rules, use_backend_rules,
                            request_headers, response_headers, options, tcp_request_rules,
                            timeout_client, timeout_http_request,
@@ -214,6 +216,7 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                     frontends = await conn.fetch("""
                         SELECT id, name, bind_address, bind_port, default_backend, mode,
                                ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
+                               ssl_alpn, ssl_npn, ssl_ciphers, ssl_ciphersuites, ssl_min_ver, ssl_max_ver, ssl_strict_sni,
                                acl_rules, redirect_rules, use_backend_rules,
                                request_headers, response_headers, options, tcp_request_rules,
                                timeout_client, timeout_http_request,
@@ -225,6 +228,7 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                     frontends = await conn.fetch("""
                         SELECT id, name, bind_address, bind_port, default_backend, mode,
                                ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
+                               ssl_alpn, ssl_npn, ssl_ciphers, ssl_ciphersuites, ssl_min_ver, ssl_max_ver, ssl_strict_sni,
                                acl_rules, redirect_rules, use_backend_rules,
                                request_headers, response_headers, options, tcp_request_rules,
                                timeout_client, timeout_http_request,
@@ -239,6 +243,7 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                     frontends = await conn.fetch("""
                         SELECT id, name, bind_address, bind_port, default_backend, mode,
                                ssl_enabled, ssl_cert_path, ssl_cert, ssl_verify,
+                               ssl_alpn, ssl_npn, ssl_ciphers, ssl_ciphersuites, ssl_min_ver, ssl_max_ver, ssl_strict_sni,
                                acl_rules, redirect_rules, use_backend_rules,
                                request_headers, response_headers, options, tcp_request_rules,
                                timeout_client, timeout_http_request,
@@ -250,6 +255,7 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                     frontends = await conn.fetch("""
                         SELECT id, name, bind_address, bind_port, default_backend, mode,
                                ssl_enabled, ssl_cert_path, ssl_cert, ssl_verify,
+                               ssl_alpn, ssl_npn, ssl_ciphers, ssl_ciphersuites, ssl_min_ver, ssl_max_ver, ssl_strict_sni,
                                acl_rules, redirect_rules, use_backend_rules,
                                request_headers, response_headers, options, tcp_request_rules,
                                timeout_client, timeout_http_request,
