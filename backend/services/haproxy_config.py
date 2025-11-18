@@ -409,26 +409,58 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             # Use Backend Rules
             if frontend.get('use_backend_rules'):
                 use_backend_rules = frontend['use_backend_rules']
-                # Parse JSON string if needed
+                
+                # DEBUG: Log type and value
+                logger.debug(f"Frontend '{frontend['name']}' use_backend_rules type: {type(use_backend_rules)}, value: {use_backend_rules}")
+                
+                # Normalize to list
+                rules_list = None
+                
                 if isinstance(use_backend_rules, str):
+                    # String: try JSON parse first
                     try:
-                        use_backend_rules = json.loads(use_backend_rules)
+                        parsed = json.loads(use_backend_rules)
+                        if isinstance(parsed, list):
+                            rules_list = parsed
+                        else:
+                            logger.warning(f"Frontend '{frontend['name']}' use_backend_rules parsed to non-list: {type(parsed)}")
                     except:
                         # Legacy format: newline-separated string
-                        use_backend_rules = [r.strip() for r in use_backend_rules.split('\n') if r.strip()]
+                        rules_list = [r.strip() for r in use_backend_rules.split('\n') if r.strip()]
                 
-                if isinstance(use_backend_rules, list):
-                    for rule in use_backend_rules:
-                        if rule and rule.strip():
+                elif isinstance(use_backend_rules, (list, tuple)):
+                    # Already a sequence
+                    rules_list = list(use_backend_rules)
+                
+                else:
+                    # Unexpected type - try to convert to string and log warning
+                    logger.error(f"Frontend '{frontend['name']}' use_backend_rules has unexpected type {type(use_backend_rules)}: {use_backend_rules}")
+                    # Try to convert to string representation and parse
+                    try:
+                        rules_str = str(use_backend_rules)
+                        if rules_str.startswith('[') and rules_str.endswith(']'):
+                            # Looks like a string representation of a list
+                            rules_list = json.loads(rules_str)
+                    except Exception as e:
+                        logger.error(f"Failed to parse use_backend_rules: {e}")
+                        rules_list = None
+                
+                # Write rules if we successfully parsed them
+                if rules_list:
+                    for rule in rules_list:
+                        if rule and isinstance(rule, str):
                             rule_text = rule.strip()
                             # Skip empty strings, "[]", or invalid use_backend rules
-                            if rule_text and rule_text not in ('[]', '{}', 'null', 'None'):
+                            if rule_text and rule_text not in ('[]', '{}', 'null', 'None', '""', "''"):
                                 # CRITICAL FIX: use_backend rules from parser already include "use_backend" keyword
                                 # Don't add it again! Parser stores: "use_backend BackendName if condition"
                                 # If rule doesn't start with "use_backend ", add it (for manual entries)
                                 if not rule_text.startswith('use_backend '):
                                     rule_text = f"use_backend {rule_text}"
                                 config_lines.append(f"    {rule_text}")
+                                logger.debug(f"Added use_backend rule: {rule_text}")
+                        else:
+                            logger.warning(f"Skipping invalid rule (type: {type(rule)}): {rule}")
             
             # Default backend (already added at the beginning of frontend section)
             
