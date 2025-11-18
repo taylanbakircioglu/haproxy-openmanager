@@ -940,7 +940,9 @@ async def parse_bulk_config(
         # If SSL was auto-assigned, user doesn't need warnings about manual assignment
         auto_assigned_ssl_names = set()
         for f in ssl_auto_assigned_frontends:
-            auto_assigned_ssl_names.add(f['ssl_name'].lower())
+            # Handle new multi-SSL format
+            for cert in f.get('matched_certs', []):
+                auto_assigned_ssl_names.add(cert['ssl_name'].lower())
         for s in ssl_auto_assigned_servers:
             auto_assigned_ssl_names.add(s['ssl_name'].lower())
         
@@ -961,10 +963,16 @@ async def parse_bulk_config(
         # Add SSL auto-assignment info to warnings
         ssl_auto_assign_info = []
         if ssl_auto_assigned_frontends:
+            # Build matched info string for multi-SSL support
+            matched_info = []
+            for f in ssl_auto_assigned_frontends:
+                cert_names = ', '.join([cert['ssl_name'] for cert in f.get('matched_certs', [])])
+                matched_info.append(f"{f['frontend']} ({f['total_matched']} certs: {cert_names})")
+            
             ssl_auto_assign_info.append(
                 f"SSL AUTO-ASSIGNED: {len(ssl_auto_assigned_frontends)} frontend(s) automatically matched with existing SSL certificates. "
                 f"These frontends will be created with SSL enabled. "
-                f"Matched: {', '.join([f['frontend'] + ' (' + f['ssl_name'] + ')' for f in ssl_auto_assigned_frontends])}"
+                f"Matched: {', '.join(matched_info)}"
             )
         if ssl_auto_assigned_servers:
             ssl_auto_assign_info.append(
