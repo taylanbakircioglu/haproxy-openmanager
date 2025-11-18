@@ -1530,6 +1530,124 @@ const FrontendManagement = () => {
                   </Form.Item>
                 </Col>
               </Row>
+
+              {/* SSL Advanced Options */}
+              <Divider orientation="left" style={{ marginTop: 24, marginBottom: 16 }}>
+                SSL Advanced Options
+              </Divider>
+              
+              <Row gutter={16} className="ssl-fields">
+                <Col span={12}>
+                  <Form.Item
+                    name="ssl_alpn"
+                    label="ALPN Protocols"
+                    extra="Application-Layer Protocol Negotiation (e.g., h2,http/1.1)"
+                    tooltip="Comma-separated list of protocols for ALPN. Common: h2,http/1.1 for HTTP/2 and HTTP/1.1"
+                  >
+                    <Input placeholder="h2,http/1.1" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item
+                    name="ssl_npn"
+                    label="NPN Protocols (Legacy)"
+                    extra="Next Protocol Negotiation - deprecated, use ALPN instead"
+                    tooltip="Legacy protocol negotiation, replaced by ALPN in modern browsers"
+                  >
+                    <Input placeholder="http/1.1" />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Row gutter={16} className="ssl-fields">
+                <Col span={12}>
+                  <Form.Item
+                    name="ssl_min_ver"
+                    label="Minimum TLS Version"
+                    extra="Minimum allowed TLS protocol version"
+                    tooltip="Enforce minimum TLS version for security. TLSv1.2 or higher recommended."
+                  >
+                    <Select placeholder="Select minimum TLS version" allowClear>
+                      <Option value="SSLv3">SSLv3 (Not recommended)</Option>
+                      <Option value="TLSv1.0">TLSv1.0 (Deprecated)</Option>
+                      <Option value="TLSv1.1">TLSv1.1 (Deprecated)</Option>
+                      <Option value="TLSv1.2">TLSv1.2 (Recommended)</Option>
+                      <Option value="TLSv1.3">TLSv1.3 (Most secure)</Option>
+                    </Select>
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item
+                    name="ssl_max_ver"
+                    label="Maximum TLS Version"
+                    extra="Maximum allowed TLS protocol version"
+                    tooltip="Usually left unset to allow latest TLS version"
+                  >
+                    <Select placeholder="Select maximum TLS version" allowClear>
+                      <Option value="TLSv1.0">TLSv1.0</Option>
+                      <Option value="TLSv1.1">TLSv1.1</Option>
+                      <Option value="TLSv1.2">TLSv1.2</Option>
+                      <Option value="TLSv1.3">TLSv1.3</Option>
+                    </Select>
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Row gutter={16} className="ssl-fields">
+                <Col span={24}>
+                  <Form.Item
+                    name="ssl_ciphers"
+                    label="SSL Ciphers (TLS 1.2 and below)"
+                    extra="Cipher suite list for TLS 1.2 and earlier versions"
+                    tooltip="Colon-separated list of OpenSSL cipher names. Leave empty for HAProxy defaults."
+                  >
+                    <Input placeholder="ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384" />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Row gutter={16} className="ssl-fields">
+                <Col span={24}>
+                  <Form.Item
+                    name="ssl_ciphersuites"
+                    label="SSL Cipher Suites (TLS 1.3)"
+                    extra="Cipher suite list specifically for TLS 1.3"
+                    tooltip="Colon-separated list of TLS 1.3 cipher suite names. Leave empty for defaults."
+                  >
+                    <Input placeholder="TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256" />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Row gutter={16} className="ssl-fields">
+                <Col span={24}>
+                  <Form.Item
+                    name="ssl_strict_sni"
+                    label="Strict SNI"
+                    valuePropName="checked"
+                    extra="Reject connections without valid SNI or with SNI not matching any certificate"
+                    tooltip="When enabled, connections must provide SNI matching a configured certificate"
+                  >
+                    <Switch />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Alert
+                message="SSL Advanced Options Help"
+                description={
+                  <div>
+                    <p><strong>ALPN (Application-Layer Protocol Negotiation):</strong> Modern protocol for negotiating HTTP/2. Use "h2,http/1.1" for HTTP/2 support.</p>
+                    <p><strong>TLS Version:</strong> TLSv1.2 minimum recommended for security. TLSv1.3 provides best performance and security.</p>
+                    <p><strong>Ciphers:</strong> Leave empty to use HAProxy secure defaults. Custom ciphers only if required by specific compliance needs.</p>
+                    <p><strong>Strict SNI:</strong> Enable for multi-domain setups to ensure clients request correct certificate via SNI.</p>
+                  </div>
+                }
+                type="info"
+                showIcon
+                style={{ marginTop: 16 }}
+                className="ssl-fields"
+              />
             </Panel>
 
             {/* Advanced Options */}

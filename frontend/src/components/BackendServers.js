@@ -1991,71 +1991,149 @@ const BackendServers = () => {
           <Form.Item noStyle shouldUpdate={(prevValues, currentValues) => prevValues.ssl_enabled !== currentValues.ssl_enabled}>
             {({ getFieldValue }) =>
               getFieldValue('ssl_enabled') ? (
-                <Row gutter={16}>
-                  <Col span={24}>
-                    <Form.Item
-                      name="ssl_certificate_id"
-                      label="SSL Certificate"
-                      tooltip="Select SSL certificate for backend server (required if ssl_verify is 'required')"
-                      rules={[
-                        ({ getFieldValue }) => ({
-                          validator(_, value) {
-                            const sslVerify = getFieldValue('ssl_verify');
-                            if (sslVerify === 'required' && !value) {
-                              return Promise.reject(new Error('SSL Certificate is required when SSL verification is set to "required"'));
-                            }
-                            return Promise.resolve();
-                          },
-                        }),
-                      ]}
-                    >
-                      <Select
-                        allowClear
-                        placeholder="Select an SSL certificate (optional unless verify=required)"
-                        showSearch
-                        filterOption={(input, option) =>
-                          (option.label || '').toLowerCase().includes(input.toLowerCase())
-                        }
-                        optionLabelProp="label"
+                <>
+                  <Row gutter={16}>
+                    <Col span={24}>
+                      <Form.Item
+                        name="ssl_certificate_id"
+                        label="SSL Certificate"
+                        tooltip="Select SSL certificate for backend server (required if ssl_verify is 'required')"
+                        rules={[
+                          ({ getFieldValue }) => ({
+                            validator(_, value) {
+                              const sslVerify = getFieldValue('ssl_verify');
+                              if (sslVerify === 'required' && !value) {
+                                return Promise.reject(new Error('SSL Certificate is required when SSL verification is set to "required"'));
+                              }
+                              return Promise.resolve();
+                            },
+                          }),
+                        ]}
                       >
-                        {sslCertificates.map((cert) => {
-                          // Status and type info for both dropdown and selected view
-                          const statusText = cert.status === 'valid' ? 'Valid' : 
-                                            cert.status === 'expiring_soon' ? 'Expiring' : 'Expired';
-                          const expiryInfo = cert.days_until_expiry !== undefined ? 
-                            `${cert.days_until_expiry} days` : '';
-                          const sslType = cert.ssl_type === 'Global' ? 'Global' : 'Cluster';
-                          
-                          // Rich label for selected view (shows in the input when selected)
-                          const richLabel = `${cert.name} - ${cert.domain} [${sslType}] ${statusText}${expiryInfo ? ' (' + expiryInfo + ')' : ''}`;
-                          
-                          return (
-                            <Option 
-                              key={cert.id} 
-                              value={cert.id}
-                              label={richLabel}
-                            >
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <span>
-                                  <strong>{cert.name}</strong> - {cert.domain}
-                                  <Tag 
-                                    color={cert.ssl_type === 'Global' ? 'blue' : 'green'} 
-                                    style={{ marginLeft: 8, fontSize: '10px' }}
-                                  >
-                                    {sslType}
-                                  </Tag>
-                                </span>
-                                <span style={{ fontSize: '12px', color: '#666', marginLeft: 12 }}>
-                                  {statusText} {expiryInfo && `(${expiryInfo})`}
-                                </span>
-                              </div>
-                            </Option>
-                          );
-                        })}
-                      </Select>
-                    </Form.Item>
-                  </Col>
-                </Row>
+                        <Select
+                          allowClear
+                          placeholder="Select an SSL certificate (optional unless verify=required)"
+                          showSearch
+                          filterOption={(input, option) =>
+                            (option.label || '').toLowerCase().includes(input.toLowerCase())
+                          }
+                          optionLabelProp="label"
+                        >
+                          {sslCertificates.map((cert) => {
+                            // Status and type info for both dropdown and selected view
+                            const statusText = cert.status === 'valid' ? 'Valid' : 
+                                              cert.status === 'expiring_soon' ? 'Expiring' : 'Expired';
+                            const expiryInfo = cert.days_until_expiry !== undefined ? 
+                              `${cert.days_until_expiry} days` : '';
+                            const sslType = cert.ssl_type === 'Global' ? 'Global' : 'Cluster';
+                            
+                            // Rich label for selected view (shows in the input when selected)
+                            const richLabel = `${cert.name} - ${cert.domain} [${sslType}] ${statusText}${expiryInfo ? ' (' + expiryInfo + ')' : ''}`;
+                            
+                            return (
+                              <Option 
+                                key={cert.id} 
+                                value={cert.id}
+                                label={richLabel}
+                              >
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <span>
+                                    <strong>{cert.name}</strong> - {cert.domain}
+                                    <Tag 
+                                      color={cert.ssl_type === 'Global' ? 'blue' : 'green'} 
+                                      style={{ marginLeft: 8, fontSize: '10px' }}
+                                    >
+                                      {sslType}
+                                    </Tag>
+                                  </span>
+                                  <span style={{ fontSize: '12px', color: '#666', marginLeft: 12 }}>
+                                    {statusText} {expiryInfo && `(${expiryInfo})`}
+                                  </span>
+                                </div>
+                              </Option>
+                            );
+                          })}
+                        </Select>
+                      </Form.Item>
+                    </Col>
+                  </Row>
+
+                  {/* SSL Advanced Options for Backend Servers */}
+                  <Divider orientation="left" style={{ marginTop: 16, marginBottom: 16 }}>
+                    SSL Advanced Options
+                  </Divider>
+
+                  <Row gutter={16}>
+                    <Col span={12}>
+                      <Form.Item
+                        name="ssl_sni"
+                        label="SNI Hostname"
+                        tooltip="Server Name Indication - hostname to send when connecting (useful for SNI-based backends)"
+                        extra="Hostname sent via SNI during SSL handshake"
+                      >
+                        <Input placeholder="backend.example.com" />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item
+                        name="ssl_min_ver"
+                        label="Minimum TLS Version"
+                        tooltip="Minimum TLS version for backend connection"
+                        extra="Enforce minimum TLS version for backend SSL"
+                      >
+                        <Select placeholder="Select min TLS version" allowClear>
+                          <Option value="SSLv3">SSLv3 (Not recommended)</Option>
+                          <Option value="TLSv1.0">TLSv1.0</Option>
+                          <Option value="TLSv1.1">TLSv1.1</Option>
+                          <Option value="TLSv1.2">TLSv1.2 (Recommended)</Option>
+                          <Option value="TLSv1.3">TLSv1.3</Option>
+                        </Select>
+                      </Form.Item>
+                    </Col>
+                  </Row>
+
+                  <Row gutter={16}>
+                    <Col span={12}>
+                      <Form.Item
+                        name="ssl_max_ver"
+                        label="Maximum TLS Version"
+                        tooltip="Maximum TLS version for backend connection"
+                        extra="Usually left unset for latest TLS support"
+                      >
+                        <Select placeholder="Select max TLS version" allowClear>
+                          <Option value="TLSv1.0">TLSv1.0</Option>
+                          <Option value="TLSv1.1">TLSv1.1</Option>
+                          <Option value="TLSv1.2">TLSv1.2</Option>
+                          <Option value="TLSv1.3">TLSv1.3</Option>
+                        </Select>
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item
+                        name="ssl_ciphers"
+                        label="SSL Ciphers"
+                        tooltip="Colon-separated list of SSL cipher suites for backend connection"
+                        extra="Leave empty for HAProxy defaults"
+                      >
+                        <Input placeholder="ECDHE-RSA-AES128-GCM-SHA256:..." />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+
+                  <Alert
+                    message="Backend SSL Advanced Options"
+                    description={
+                      <div>
+                        <p><strong>SNI Hostname:</strong> Specify hostname for SNI when connecting to SSL backend (e.g., for multiple virtual hosts on one IP).</p>
+                        <p><strong>TLS Version:</strong> Control TLS version for backend connections. TLSv1.2+ recommended.</p>
+                        <p><strong>Ciphers:</strong> Override default cipher suites if backend requires specific ciphers. Leave empty for secure defaults.</p>
+                      </div>
+                    }
+                    type="info"
+                    showIcon
+                    style={{ marginTop: 16, marginBottom: 16 }}
+                  />
+                </>
               ) : null
             }
           </Form.Item>

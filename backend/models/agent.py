@@ -36,7 +36,7 @@ class AgentHeartbeat(BaseModel):
     version: Optional[str] = None  # Agent version
     cluster_id: Optional[int] = None
     
-    # Detailed system information
+    # Detailed system information (flat format - for backward compatibility with old agents)
     operating_system: Optional[str] = None
     kernel_version: Optional[str] = None
     uptime: Optional[int] = None  # in seconds
@@ -67,12 +67,16 @@ class AgentHeartbeat(BaseModel):
     # Config sync tracking (agent reports what it successfully applied)
     applied_config_version: Optional[str] = None
     
-    # System info collected by agent (JSON object)
+    # System info collected by agent (JSON object - nested format for new agents)
     system_info: Optional[Dict[str, Any]] = None
     
     # Other optional fields
     last_config_update: Optional[str] = None
     errors: Optional[List[str]] = None
+    
+    class Config:
+        # Allow extra fields from agents (for forward compatibility and tolerance)
+        extra = "allow"
 
 class AgentToggle(BaseModel):
     enabled: bool
