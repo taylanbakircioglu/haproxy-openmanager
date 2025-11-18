@@ -248,9 +248,21 @@ class FrontendConfig(BaseModel):
             # ALPN protocols are comma-separated
             protocols = [p.strip() for p in v.split(',')]
             valid_protocols = ['h2', 'http/1.1', 'http/1.0', 'h2c', 'spdy/3', 'spdy/2', 'spdy/1']
+            
             for proto in protocols:
                 if proto and proto not in valid_protocols:
-                    raise ValueError(f'Invalid ALPN protocol: {proto}. Valid protocols: {", ".join(valid_protocols)}')
+                    # Provide helpful error message for common mistakes
+                    if proto.lower() in ['http/2', 'http2', 'http-2']:
+                        raise ValueError(
+                            f'Invalid ALPN protocol: {proto}. '
+                            f'For HTTP/2, use "h2" (not "http/2"). '
+                            f'Valid protocols: {", ".join(valid_protocols)}'
+                        )
+                    else:
+                        raise ValueError(
+                            f'Invalid ALPN protocol: {proto}. '
+                            f'Valid protocols: {", ".join(valid_protocols)}'
+                        )
         return v
     
     @validator('ssl_npn')
