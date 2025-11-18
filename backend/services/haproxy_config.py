@@ -336,7 +336,32 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 if monitor_uri and monitor_uri not in ('[]', '{}', 'null', 'None'):
                     config_lines.append(f"    monitor-uri {monitor_uri}")
             
-            # HTTP Request Headers
+            # CRITICAL FIX: ACL Rules MUST come BEFORE http-request directives
+            # HAProxy requires ACL definitions before they are referenced
+            # ACL Rules
+            if frontend.get('acl_rules'):
+                acl_rules = frontend['acl_rules']
+                # Parse JSON string if needed
+                if isinstance(acl_rules, str):
+                    try:
+                        acl_rules = json.loads(acl_rules)
+                    except:
+                        acl_rules = []
+                
+                if isinstance(acl_rules, list):
+                    for acl in acl_rules:
+                        if acl and acl.strip():
+                            acl_text = acl.strip()
+                            # Skip empty strings, "[]", or invalid ACL rules
+                            if acl_text and acl_text not in ('[]', '{}', 'null', 'None'):
+                                # CRITICAL FIX: ACL rules from parser already include "acl" keyword
+                                # Don't add it again! Parser stores: "acl name condition value"
+                                # If ACL doesn't start with "acl ", add it (for manual entries)
+                                if not acl_text.startswith('acl '):
+                                    acl_text = f"acl {acl_text}"
+                                config_lines.append(f"    {acl_text}")
+            
+            # HTTP Request Headers (must come AFTER ACL definitions)
             if frontend.get('request_headers'):
                 for line in frontend['request_headers'].split('\n'):
                     line_stripped = line.strip()
@@ -362,29 +387,6 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     if line_stripped and line_stripped not in ('[]', '{}', 'null', 'None'):
                         # Lines are already complete directives (e.g., "tcp-request inspect-delay 5s")
                         config_lines.append(f"    {line_stripped}")
-            
-            # ACL Rules
-            if frontend.get('acl_rules'):
-                acl_rules = frontend['acl_rules']
-                # Parse JSON string if needed
-                if isinstance(acl_rules, str):
-                    try:
-                        acl_rules = json.loads(acl_rules)
-                    except:
-                        acl_rules = []
-                
-                if isinstance(acl_rules, list):
-                    for acl in acl_rules:
-                        if acl and acl.strip():
-                            acl_text = acl.strip()
-                            # Skip empty strings, "[]", or invalid ACL rules
-                            if acl_text and acl_text not in ('[]', '{}', 'null', 'None'):
-                                # CRITICAL FIX: ACL rules from parser already include "acl" keyword
-                                # Don't add it again! Parser stores: "acl name condition value"
-                                # If ACL doesn't start with "acl ", add it (for manual entries)
-                                if not acl_text.startswith('acl '):
-                                    acl_text = f"acl {acl_text}"
-                                config_lines.append(f"    {acl_text}")
             
             # Redirect Rules
             if frontend.get('redirect_rules'):
