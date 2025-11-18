@@ -1135,13 +1135,69 @@ async def agent_config_sync(agent_name: str, sync_data: dict, x_api_key: Optiona
 @router.post("/heartbeat")
 async def agent_heartbeat_by_name(
     request: Request,
-    heartbeat_data: AgentHeartbeat, 
     x_api_key: Optional[str] = Header(None)
 ):
     """Receive agent heartbeat by agent name, with auto-registration and data validation.
     
-    Enhanced with robust error handling and detailed logging for malformed JSON payloads.
+    Enhanced with robust JSON sanitization to handle malformed agent payloads.
     """
+    import re
+    import json
+    from pydantic import ValidationError
+    
+    # Read raw body and sanitize common JSON errors from agents
+    try:
+        raw_body = await request.body()
+        body_str = raw_body.decode('utf-8')
+        
+        # Sanitize common malformed JSON patterns from agents
+        original_body = body_str
+        sanitized = False
+        
+        # Fix 1: Empty values before comma (most common: "server_statuses": ,)
+        if re.search(r':\s*,', body_str):
+            body_str = re.sub(r':\s*,', ': null,', body_str)
+            sanitized = True
+        
+        # Fix 2: Empty values before closing brace
+        if re.search(r':\s*}', body_str):
+            body_str = re.sub(r':\s*}', ': null}', body_str)
+            sanitized = True
+        
+        # Fix 3: Trailing commas
+        if re.search(r',(\s*[}\]])', body_str):
+            body_str = re.sub(r',(\s*[}\]])', r'\1', body_str)
+            sanitized = True
+        
+        if sanitized:
+            # Extract agent name for logging
+            agent_name = "unknown"
+            try:
+                name_match = re.search(r'"name"\s*:\s*"([^"]+)"', body_str)
+                if name_match:
+                    agent_name = name_match.group(1)
+            except:
+                pass
+            
+            logger.info(f"Sanitized malformed JSON from agent '{agent_name}' - fixed empty values and trailing commas")
+            logger.debug(f"Original JSON (preview): {original_body[:300]}")
+            logger.debug(f"Sanitized JSON (preview): {body_str[:300]}")
+        
+        # Parse sanitized JSON into Pydantic model
+        heartbeat_dict = json.loads(body_str)
+        heartbeat_data = AgentHeartbeat(**heartbeat_dict)
+    
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error even after sanitization: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+    except ValidationError as e:
+        logger.error(f"Pydantic validation error after sanitization: {e}")
+        raise HTTPException(status_code=422, detail=f"Validation error: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error processing heartbeat: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    
+    # Continue with normal heartbeat processing
     try:
         # Validate agent API key for security
         from auth_middleware import validate_agent_api_key

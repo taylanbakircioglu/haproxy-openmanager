@@ -33,7 +33,6 @@ from middleware.error_handler import (
     GlobalExceptionHandler, get_error_statistics
 )
 from middleware.activity_logger import log_activity_middleware
-from middleware.json_sanitizer import JSONSanitizerMiddleware
 
 # Setup structured logging
 logger = setup_production_logging(LOG_LEVEL)
@@ -294,9 +293,6 @@ async def cleanup_stuck_agent_upgrades():
 # Production middleware stack (order matters!)
 app.add_middleware(PerformanceMonitoringMiddleware, slow_request_threshold_ms=1000)
 app.add_middleware(RequestLoggingMiddleware, exclude_paths=["/api/health/", "/docs", "/redoc"])
-
-# JSON Sanitizer - MUST be early to fix malformed JSON before FastAPI parses it
-app.add_middleware(JSONSanitizerMiddleware)
 
 # Activity logging middleware - must be before CORS
 app.middleware("http")(log_activity_middleware)
