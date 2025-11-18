@@ -25,6 +25,14 @@ class ServerConfig(BaseModel):
     fall: Optional[int] = None
     rise: Optional[int] = None
     is_active: bool = True
+    
+    @validator('ssl_min_ver', 'ssl_max_ver')
+    def validate_tls_version(cls, v):
+        if v is not None:
+            valid_versions = ['SSLv3', 'TLSv1.0', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3']
+            if v not in valid_versions:
+                raise ValueError(f'Invalid TLS version: {v}. Must be one of: {", ".join(valid_versions)}')
+        return v
 
 class BackendConfig(BaseModel):
     name: str

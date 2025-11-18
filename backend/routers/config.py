@@ -1060,6 +1060,29 @@ async def parse_bulk_config(
                     has_changes = True
                     changes["tcp_request_rules"] = {"old": existing["tcp_request_rules"], "new": frontend["tcp_request_rules"]}
                 
+                # CRITICAL: SSL Advanced Options change detection
+                if frontend.get("ssl_alpn") is not None and frontend.get("ssl_alpn") != existing.get("ssl_alpn"):
+                    has_changes = True
+                    changes["ssl_alpn"] = {"old": existing.get("ssl_alpn"), "new": frontend.get("ssl_alpn")}
+                if frontend.get("ssl_npn") is not None and frontend.get("ssl_npn") != existing.get("ssl_npn"):
+                    has_changes = True
+                    changes["ssl_npn"] = {"old": existing.get("ssl_npn"), "new": frontend.get("ssl_npn")}
+                if frontend.get("ssl_ciphers") is not None and frontend.get("ssl_ciphers") != existing.get("ssl_ciphers"):
+                    has_changes = True
+                    changes["ssl_ciphers"] = {"old": existing.get("ssl_ciphers"), "new": frontend.get("ssl_ciphers")}
+                if frontend.get("ssl_ciphersuites") is not None and frontend.get("ssl_ciphersuites") != existing.get("ssl_ciphersuites"):
+                    has_changes = True
+                    changes["ssl_ciphersuites"] = {"old": existing.get("ssl_ciphersuites"), "new": frontend.get("ssl_ciphersuites")}
+                if frontend.get("ssl_min_ver") is not None and frontend.get("ssl_min_ver") != existing.get("ssl_min_ver"):
+                    has_changes = True
+                    changes["ssl_min_ver"] = {"old": existing.get("ssl_min_ver"), "new": frontend.get("ssl_min_ver")}
+                if frontend.get("ssl_max_ver") is not None and frontend.get("ssl_max_ver") != existing.get("ssl_max_ver"):
+                    has_changes = True
+                    changes["ssl_max_ver"] = {"old": existing.get("ssl_max_ver"), "new": frontend.get("ssl_max_ver")}
+                if "ssl_strict_sni" in frontend and frontend.get("ssl_strict_sni") != existing.get("ssl_strict_sni", False):
+                    has_changes = True
+                    changes["ssl_strict_sni"] = {"old": existing.get("ssl_strict_sni", False), "new": frontend.get("ssl_strict_sni")}
+                
                 # Additional frontend fields (timeout_http_request, rate_limit, compression, log_separate, monitor_uri)
                 if frontend.get("timeout_http_request") and frontend["timeout_http_request"] != existing.get("timeout_http_request"):
                     has_changes = True

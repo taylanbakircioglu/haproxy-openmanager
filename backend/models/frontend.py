@@ -233,6 +233,36 @@ class FrontendConfig(BaseModel):
         if v is not None and (v < 1 or v > 100000):
             raise ValueError('Max connections must be between 1 and 100000')
         return v
+    
+    @validator('ssl_min_ver', 'ssl_max_ver')
+    def validate_tls_version(cls, v):
+        if v is not None:
+            valid_versions = ['SSLv3', 'TLSv1.0', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3']
+            if v not in valid_versions:
+                raise ValueError(f'Invalid TLS version: {v}. Must be one of: {", ".join(valid_versions)}')
+        return v
+    
+    @validator('ssl_alpn')
+    def validate_alpn(cls, v):
+        if v is not None and v.strip():
+            # ALPN protocols are comma-separated
+            protocols = [p.strip() for p in v.split(',')]
+            valid_protocols = ['h2', 'http/1.1', 'http/1.0', 'h2c', 'spdy/3', 'spdy/2', 'spdy/1']
+            for proto in protocols:
+                if proto and proto not in valid_protocols:
+                    raise ValueError(f'Invalid ALPN protocol: {proto}. Valid protocols: {", ".join(valid_protocols)}')
+        return v
+    
+    @validator('ssl_npn')
+    def validate_npn(cls, v):
+        if v is not None and v.strip():
+            # NPN protocols are comma-separated (legacy)
+            protocols = [p.strip() for p in v.split(',')]
+            valid_protocols = ['http/1.1', 'http/1.0', 'spdy/3', 'spdy/2', 'spdy/1']
+            for proto in protocols:
+                if proto and proto not in valid_protocols:
+                    raise ValueError(f'Invalid NPN protocol: {proto}. Valid protocols: {", ".join(valid_protocols)}')
+        return v
         
     @validator('acl_rules')
     def validate_acl_rules(cls, v):
