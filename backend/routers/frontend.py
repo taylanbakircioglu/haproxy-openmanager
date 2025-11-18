@@ -414,20 +414,23 @@ async def create_frontend(frontend: FrontendConfig, request: Request, authorizat
         if filtered_options != frontend.options and frontend.options:
             logger.info(f"Frontend '{frontend.name}': Filtered 'option httpchk' from options field. Health checks are for backends.")
         
-        # Insert new frontend with all form fields
+        # Insert new frontend with all form fields (including SSL advanced options)
         frontend_id = await conn.fetchval("""
             INSERT INTO frontends (
                 name, bind_address, bind_port, default_backend, mode, 
                 ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
+                ssl_alpn, ssl_npn, ssl_ciphers, ssl_ciphersuites, ssl_min_ver, ssl_max_ver, ssl_strict_sni,
                 acl_rules, redirect_rules, use_backend_rules,
                 request_headers, response_headers, options, tcp_request_rules, timeout_client, timeout_http_request,
                 rate_limit, compression, log_separate, monitor_uri,
                 cluster_id, maxconn, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, CURRENT_TIMESTAMP) 
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, CURRENT_TIMESTAMP) 
             RETURNING id
         """, frontend.name, frontend.bind_address, frontend.bind_port, 
             frontend.default_backend, frontend.mode, frontend.ssl_enabled,
             frontend.ssl_certificate_id, ssl_cert_ids_json, frontend.ssl_port, frontend.ssl_cert_path, frontend.ssl_cert, frontend.ssl_verify,
+            frontend.ssl_alpn, frontend.ssl_npn, frontend.ssl_ciphers, frontend.ssl_ciphersuites, 
+            frontend.ssl_min_ver, frontend.ssl_max_ver, frontend.ssl_strict_sni,
             json.dumps(frontend.acl_rules or []), json.dumps(frontend.redirect_rules or []), json.dumps(frontend.use_backend_rules or []),
             frontend.request_headers, frontend.response_headers, filtered_options, frontend.tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
             frontend.rate_limit, frontend.compression, frontend.log_separate, frontend.monitor_uri,
@@ -666,20 +669,23 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
         if filtered_options != frontend.options and frontend.options:
             logger.info(f"Frontend '{frontend.name}': Filtered 'option httpchk' from options field. Health checks are for backends.")
         
-        # Update frontend with all form fields
+        # Update frontend with all form fields (including SSL advanced options)
         await conn.execute("""
             UPDATE frontends SET 
                 name = $1, bind_address = $2, bind_port = $3, 
                 default_backend = $4, mode = $5, ssl_enabled = $6,
                 ssl_certificate_id = $7, ssl_certificate_ids = $8, ssl_port = $9, ssl_cert_path = $10, ssl_cert = $11, ssl_verify = $12,
-                acl_rules = $13, redirect_rules = $14, use_backend_rules = $15,
-                request_headers = $16, response_headers = $17, options = $18, tcp_request_rules = $19, timeout_client = $20, timeout_http_request = $21,
-                rate_limit = $22, compression = $23, log_separate = $24, monitor_uri = $25,
-                cluster_id = $26, maxconn = $27, updated_at = CURRENT_TIMESTAMP
-            WHERE id = $28
+                ssl_alpn = $13, ssl_npn = $14, ssl_ciphers = $15, ssl_ciphersuites = $16, ssl_min_ver = $17, ssl_max_ver = $18, ssl_strict_sni = $19,
+                acl_rules = $20, redirect_rules = $21, use_backend_rules = $22,
+                request_headers = $23, response_headers = $24, options = $25, tcp_request_rules = $26, timeout_client = $27, timeout_http_request = $28,
+                rate_limit = $29, compression = $30, log_separate = $31, monitor_uri = $32,
+                cluster_id = $33, maxconn = $34, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $35
         """, frontend.name, frontend.bind_address, frontend.bind_port, 
             frontend.default_backend, frontend.mode, ssl_enabled,
             ssl_certificate_id, ssl_cert_ids_json, ssl_port, ssl_cert_path, ssl_cert, ssl_verify,
+            frontend.ssl_alpn, frontend.ssl_npn, frontend.ssl_ciphers, frontend.ssl_ciphersuites,
+            frontend.ssl_min_ver, frontend.ssl_max_ver, frontend.ssl_strict_sni,
             json.dumps(frontend.acl_rules or []), json.dumps(frontend.redirect_rules or []), json.dumps(frontend.use_backend_rules or []),
             frontend.request_headers, frontend.response_headers, filtered_options, frontend.tcp_request_rules, frontend.timeout_client, frontend.timeout_http_request,
             frontend.rate_limit, frontend.compression, frontend.log_separate, frontend.monitor_uri,

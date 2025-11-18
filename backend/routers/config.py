@@ -1579,10 +1579,11 @@ async def bulk_create_entities(
                                 INSERT INTO backend_servers (
                                 backend_id, backend_name, server_name, server_address, 
                                 server_port, weight, maxconn, check_enabled, check_port,
-                                backup_server, ssl_enabled, ssl_verify, ssl_certificate_id, cookie_value,
-                                inter, fall, rise, cluster_id
+                                backup_server, ssl_enabled, ssl_verify, ssl_certificate_id,
+                                ssl_sni, ssl_min_ver, ssl_max_ver, ssl_ciphers,
+                                cookie_value, inter, fall, rise, cluster_id
                             ) 
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) 
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) 
                             RETURNING id
                         """, 
                             backend_id,
@@ -1598,6 +1599,10 @@ async def bulk_create_entities(
                             server_data.get("ssl_enabled", False),
                             server_data.get("ssl_verify"),
                             server_data.get("ssl_certificate_id"),  # CRITICAL: Auto-assigned SSL ID
+                            server_data.get("ssl_sni"),  # SSL advanced options
+                            server_data.get("ssl_min_ver"),
+                            server_data.get("ssl_max_ver"),
+                            server_data.get("ssl_ciphers"),
                             server_data.get("cookie_value"),
                             server_data.get("inter"),
                             server_data.get("fall"),
@@ -1807,7 +1812,7 @@ async def bulk_create_entities(
                     continue
                 
                 else:
-                    # CREATE MODE: Insert new frontend
+                    # CREATE MODE: Insert new frontend (including SSL advanced options)
                     # CRITICAL: Convert ssl_certificate_ids to JSON for database
                     ssl_cert_ids_json = json.dumps(frontend_data.get("ssl_certificate_ids", []))
                     
@@ -1816,12 +1821,13 @@ async def bulk_create_entities(
                             name, bind_address, bind_port, default_backend, mode,
                             ssl_enabled, ssl_certificate_id, ssl_certificate_ids, ssl_port, 
                             ssl_cert_path, ssl_cert, ssl_verify,
+                            ssl_alpn, ssl_npn, ssl_ciphers, ssl_ciphersuites, ssl_min_ver, ssl_max_ver, ssl_strict_sni,
                             timeout_client, timeout_http_request, maxconn,
                             request_headers, response_headers, tcp_request_rules, options,
                             rate_limit, compression, log_separate, monitor_uri,
                             cluster_id, acl_rules, use_backend_rules, redirect_rules, updated_at
                         ) 
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, CURRENT_TIMESTAMP) 
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, CURRENT_TIMESTAMP) 
                         RETURNING id
                     """, 
                         frontend_data["name"],
@@ -1836,6 +1842,13 @@ async def bulk_create_entities(
                         frontend_data.get("ssl_cert_path"),
                         frontend_data.get("ssl_cert"),
                         frontend_data.get("ssl_verify", "optional"),
+                        frontend_data.get("ssl_alpn"),  # SSL advanced options
+                        frontend_data.get("ssl_npn"),
+                        frontend_data.get("ssl_ciphers"),
+                        frontend_data.get("ssl_ciphersuites"),
+                        frontend_data.get("ssl_min_ver"),
+                        frontend_data.get("ssl_max_ver"),
+                        frontend_data.get("ssl_strict_sni", False),
                         frontend_data.get("timeout_client"),
                         frontend_data.get("timeout_http_request"),
                         frontend_data.get("maxconn"),

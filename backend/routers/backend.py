@@ -663,16 +663,19 @@ async def add_server_to_backend(backend_id: int, server: ServerConfig):
             await close_database_connection(conn)
             raise HTTPException(status_code=400, detail=f"Server '{server.server_name}' already exists in backend '{backend['name']}' within this cluster")
         
-        # Add server with cluster_id from backend
+        # Add server with cluster_id from backend (including SSL advanced options)
         server_id = await conn.fetchval("""
             INSERT INTO backend_servers 
             (backend_id, backend_name, server_name, server_address, server_port, weight, 
              maxconn, check_enabled, check_port, backup_server, ssl_enabled, ssl_verify, ssl_certificate_id,
+             ssl_sni, ssl_min_ver, ssl_max_ver, ssl_ciphers,
              cookie_value, inter, fall, rise, cluster_id) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING id
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) RETURNING id
         """, backend_id, backend["name"], server.server_name, server.server_address, server.server_port, server.weight,
             server.max_connections, server.check_enabled, server.check_port, server.backup_server, 
-            server.ssl_enabled, server.ssl_verify, server.ssl_certificate_id, server.cookie_value, server.inter, server.fall, server.rise,
+            server.ssl_enabled, server.ssl_verify, server.ssl_certificate_id,
+            server.ssl_sni, server.ssl_min_ver, server.ssl_max_ver, server.ssl_ciphers,
+            server.cookie_value, server.inter, server.fall, server.rise,
             backend["cluster_id"])
         
         # If backend has cluster_id, create new config version for agents
@@ -1364,9 +1367,10 @@ async def update_server(server_id: int, server_data: dict, request: Request, aut
         update_values = []
         param_idx = 1
         
-        # Allow updating these fields
+        # Allow updating these fields (including SSL advanced options)
         allowed_fields = ['server_name', 'server_address', 'server_port', 'weight', 'max_connections', 
                          'check_enabled', 'check_port', 'backup_server', 'ssl_enabled', 'ssl_verify', 'ssl_certificate_id',
+                         'ssl_sni', 'ssl_min_ver', 'ssl_max_ver', 'ssl_ciphers',
                          'cookie_value', 'inter', 'fall', 'rise', 'is_active']
         
         for field in allowed_fields:
