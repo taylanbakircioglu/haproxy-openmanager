@@ -4465,21 +4465,51 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
             be_ids = []
             srv_ids = []
             ssl_ids = []
+            bulk_import_entity_ids = {"frontends": [], "backends": [], "servers": []}
             import re
             for v in pending_versions:
-                m1 = re.search(r'^frontend-(\d+)-', v['version_name'])
-                if m1:
-                    fe_ids.append(int(m1.group(1)))
-                m2 = re.search(r'^backend-(\d+)-', v['version_name'])
-                if m2:
-                    be_ids.append(int(m2.group(1)))
-                # CRITICAL FIX: Also extract server IDs from version names
-                m3 = re.search(r'^server-(\d+)-', v['version_name'])
-                if m3:
-                    srv_ids.append(int(m3.group(1)))
-                m4 = re.search(r'^ssl-(\d+)-', v['version_name'])
-                if m4:
-                    ssl_ids.append(int(m4.group(1)))
+                # CRITICAL FIX: Detect bulk import versions (bulk-import-*, restore-*)
+                is_bulk_version = (
+                    v['version_name'].startswith('bulk-import-') or 
+                    v['version_name'].startswith('restore-')
+                )
+                
+                if is_bulk_version:
+                    # Extract entity IDs from metadata bulk_snapshots
+                    metadata = json_module.loads(v['metadata']) if v['metadata'] else {}
+                    bulk_snapshots = metadata.get('bulk_snapshots', [])
+                    
+                    logger.info(f"REJECT: Bulk version '{v['version_name']}' has {len(bulk_snapshots)} snapshots")
+                    
+                    for snapshot_wrapper in bulk_snapshots:
+                        entity_snap = snapshot_wrapper.get('entity_snapshot')
+                        if entity_snap:
+                            entity_type = entity_snap.get('entity_type')
+                            entity_id = entity_snap.get('entity_id')
+                            operation = entity_snap.get('operation')
+                            
+                            # Track bulk import entities for verification
+                            if entity_type == "frontend":
+                                bulk_import_entity_ids["frontends"].append(entity_id)
+                            elif entity_type == "backend":
+                                bulk_import_entity_ids["backends"].append(entity_id)
+                            elif entity_type == "server":
+                                bulk_import_entity_ids["servers"].append(entity_id)
+                else:
+                    # Normal entity-specific version (frontend-5-update, backend-3-create, etc.)
+                    m1 = re.search(r'^frontend-(\d+)-', v['version_name'])
+                    if m1:
+                        fe_ids.append(int(m1.group(1)))
+                    m2 = re.search(r'^backend-(\d+)-', v['version_name'])
+                    if m2:
+                        be_ids.append(int(m2.group(1)))
+                    # CRITICAL FIX: Also extract server IDs from version names
+                    m3 = re.search(r'^server-(\d+)-', v['version_name'])
+                    if m3:
+                        srv_ids.append(int(m3.group(1)))
+                    m4 = re.search(r'^ssl-(\d+)-', v['version_name'])
+                    if m4:
+                        ssl_ids.append(int(m4.group(1)))
             
             # CRITICAL: Only update entities that belong to THIS cluster (multi-cluster isolation)
             # Status = APPLIED because entities were rolled back to their old values
@@ -4507,8 +4537,66 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                     WHERE id = ANY($1)
                 """, ssl_ids)
                 logger.info(f"REJECT: Updated {len(ssl_ids)} SSL certificates status to APPLIED (rolled back)")
+            
+            # CRITICAL FIX: Verify bulk import entities were properly rolled back (deleted)
+            if bulk_import_entity_ids["frontends"] or bulk_import_entity_ids["backends"] or bulk_import_entity_ids["servers"]:
+                # Check if bulk import entities still exist (rollback failed)
+                remaining_fe = await conn.fetchval("""
+                    SELECT COUNT(*) FROM frontends 
+                    WHERE id = ANY($1) AND cluster_id = $2
+                """, bulk_import_entity_ids["frontends"], cluster_id) if bulk_import_entity_ids["frontends"] else 0
+                
+                remaining_be = await conn.fetchval("""
+                    SELECT COUNT(*) FROM backends 
+                    WHERE id = ANY($1) AND cluster_id = $2
+                """, bulk_import_entity_ids["backends"], cluster_id) if bulk_import_entity_ids["backends"] else 0
+                
+                remaining_srv = await conn.fetchval("""
+                    SELECT COUNT(*) FROM backend_servers 
+                    WHERE id = ANY($1) AND cluster_id = $2
+                """, bulk_import_entity_ids["servers"], cluster_id) if bulk_import_entity_ids["servers"] else 0
+                
+                total_remaining = remaining_fe + remaining_be + remaining_srv
+                
+                if total_remaining > 0:
+                    # CRITICAL: Bulk import entities were NOT deleted by rollback!
+                    # This is a data corruption - entities should have been deleted
+                    logger.error(
+                        f"REJECT ROLLBACK FAILED: {total_remaining} bulk import entities still exist "
+                        f"(fe={remaining_fe}, be={remaining_be}, srv={remaining_srv}). "
+                        f"Expected 0 after rollback DELETE. This indicates rollback failure."
+                    )
+                    
+                    # Force delete the entities since rollback failed
+                    if bulk_import_entity_ids["frontends"]:
+                        deleted_fe = await conn.execute("""
+                            DELETE FROM frontends 
+                            WHERE id = ANY($1) AND cluster_id = $2
+                        """, bulk_import_entity_ids["frontends"], cluster_id)
+                        logger.warning(f"REJECT CLEANUP: Force deleted {deleted_fe} frontends from failed bulk import")
+                    
+                    if bulk_import_entity_ids["backends"]:
+                        deleted_be = await conn.execute("""
+                            DELETE FROM backends 
+                            WHERE id = ANY($1) AND cluster_id = $2
+                        """, bulk_import_entity_ids["backends"], cluster_id)
+                        logger.warning(f"REJECT CLEANUP: Force deleted {deleted_be} backends (+ cascade servers) from failed bulk import")
+                    
+                    # Servers are cascade deleted with backends, but clean any orphans
+                    if bulk_import_entity_ids["servers"]:
+                        deleted_srv = await conn.execute("""
+                            DELETE FROM backend_servers 
+                            WHERE id = ANY($1) AND cluster_id = $2
+                        """, bulk_import_entity_ids["servers"], cluster_id)
+                        logger.warning(f"REJECT CLEANUP: Force deleted {deleted_srv} orphan servers from failed bulk import")
+                else:
+                    logger.info(
+                        f"REJECT ROLLBACK SUCCESS: All {len(bulk_import_entity_ids['frontends']) + len(bulk_import_entity_ids['backends']) + len(bulk_import_entity_ids['servers'])} "
+                        f"bulk import entities were properly deleted"
+                    )
+                    
         except Exception as e:
-            logger.warning(f"Failed to update entity statuses during reject: {e}")
+            logger.error(f"Failed to update entity statuses during reject: {e}", exc_info=True)
             pass
         
         # FINAL CLEANUP: Remove orphan entity statuses without corresponding config versions
@@ -4526,26 +4614,41 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
             # Only run orphan cleanup if NO pending versions exist
             # This prevents cleaning entities from bulk-import or other non-ID-specific versions
             if not any_pending_versions:
-                # Clean all PENDING backends (safe because no versions exist)
-                cleaned_be = await conn.execute("""
-                    UPDATE backends 
-                    SET last_config_status = 'APPLIED'
-                    WHERE cluster_id = $1 AND last_config_status = 'PENDING'
-                """, cluster_id)
+                # ADDITIONAL SAFETY: Check if we just rejected bulk import versions
+                # If yes, DO NOT run final cleanup (bulk entities should already be deleted)
+                has_bulk_versions = any(
+                    v['version_name'].startswith('bulk-import-') or v['version_name'].startswith('restore-')
+                    for v in pending_versions
+                )
                 
-                # Clean all PENDING frontends
-                cleaned_fe = await conn.execute("""
-                    UPDATE frontends 
-                    SET last_config_status = 'APPLIED'
-                    WHERE cluster_id = $1 AND last_config_status = 'PENDING'
-                """, cluster_id)
-                
-                logger.info(f"REJECT: Final orphan cleanup - cleaned {cleaned_be} backends, {cleaned_fe} frontends (no pending versions)")
+                if has_bulk_versions:
+                    logger.info("REJECT: Skipping final cleanup (bulk import was rejected - entities already handled)")
+                else:
+                    # Safe to clean orphan entities (no bulk import, no pending versions)
+                    cleaned_be = await conn.execute("""
+                        UPDATE backends 
+                        SET last_config_status = 'APPLIED'
+                        WHERE cluster_id = $1 AND last_config_status = 'PENDING'
+                    """, cluster_id)
+                    
+                    cleaned_fe = await conn.execute("""
+                        UPDATE frontends 
+                        SET last_config_status = 'APPLIED'
+                        WHERE cluster_id = $1 AND last_config_status = 'PENDING'
+                    """, cluster_id)
+                    
+                    cleaned_srv = await conn.execute("""
+                        UPDATE backend_servers 
+                        SET last_config_status = 'APPLIED'
+                        WHERE cluster_id = $1 AND last_config_status = 'PENDING'
+                    """, cluster_id)
+                    
+                    logger.info(f"REJECT: Final orphan cleanup - cleaned {cleaned_be} backends, {cleaned_fe} frontends, {cleaned_srv} servers (no pending versions)")
             else:
-                logger.debug("REJECT: Skipping final cleanup (pending versions still exist - may include bulk-import)")
+                logger.debug("REJECT: Skipping final cleanup (pending versions still exist)")
                 
         except Exception as cleanup_error:
-            logger.warning(f"Final orphan entity cleanup failed (non-critical): {cleanup_error}")
+            logger.error(f"Final orphan entity cleanup failed: {cleanup_error}", exc_info=True)
         
         await close_database_connection(conn)
         
