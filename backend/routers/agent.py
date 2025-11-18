@@ -1232,6 +1232,21 @@ async def agent_heartbeat_by_name(
                 if placeholder_agent:
                     # Create new agent instead of updating placeholder (allows multiple agents per token)
                     logger.info(f"Creating new agent '{agent_name}' using token '{placeholder_agent['name']}'")
+                    
+                    # Get pool_id from cluster_id if provided in heartbeat
+                    pool_id_from_cluster = None
+                    if heartbeat_dict.get('cluster_id'):
+                        logger.info(f"AUTO-REGISTER DEBUG: Querying cluster_id {heartbeat_dict['cluster_id']} for pool_id")
+                        cluster_pool = await conn.fetchrow("""
+                            SELECT pool_id FROM haproxy_clusters WHERE id = $1
+                        """, heartbeat_dict['cluster_id'])
+                        logger.info(f"AUTO-REGISTER DEBUG: Cluster query result: {cluster_pool}")
+                        if cluster_pool:
+                            pool_id_from_cluster = cluster_pool['pool_id']
+                            logger.info(f"Auto-register: Got pool_id {pool_id_from_cluster} from cluster_id {heartbeat_dict['cluster_id']}")
+                    else:
+                        logger.warning(f"AUTO-REGISTER DEBUG: No cluster_id in heartbeat for agent '{agent_name}'")
+                    
                     agent_id = await conn.fetchval("""
                         INSERT INTO agents (
                             name, api_key, api_key_name, api_key_created_at, 
@@ -1240,11 +1255,12 @@ async def agent_heartbeat_by_name(
                         ) 
                         SELECT $1, api_key, api_key_name, api_key_created_at,
                                api_key_expires_at, api_key_created_by, 'online',
-                               TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, pool_id
+                               TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $3
                         FROM agents WHERE id = $2
                         RETURNING id
-                    """, agent_name, placeholder_agent['id'])
-                    agent = {'id': agent_id, 'pool_id': placeholder_agent['pool_id']}
+                    """, agent_name, placeholder_agent['id'], pool_id_from_cluster)
+                    logger.info(f"Auto-registered new agent '{agent_name}' with ID {agent_id} and pool_id {pool_id_from_cluster}")
+                    agent = {'id': agent_id, 'pool_id': pool_id_from_cluster}
                 else:
                     # Auto-register new agent
                     logger.info(f"Agent '{agent_name}' not found. Auto-registering...")
