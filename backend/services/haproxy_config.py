@@ -215,9 +215,27 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     
                     if cert_paths:
                         # Generate single bind with SSL and multiple certificates
-                        # Format: bind :443 ssl crt file1.pem crt file2.pem crt file3.pem
+                        # Format: bind :443 ssl crt file1.pem crt file2.pem crt file3.pem [alpn h2,http/1.1] [ciphers ...]
                         crt_clause = ' '.join([f"crt {path}" for path in cert_paths])
-                        config_lines.append(f"    bind {frontend['bind_address']}:{frontend['bind_port']} ssl {crt_clause}")
+                        bind_line = f"    bind {frontend['bind_address']}:{frontend['bind_port']} ssl {crt_clause}"
+                        
+                        # Add SSL advanced options if present
+                        if frontend.get('ssl_alpn'):
+                            bind_line += f" alpn {frontend['ssl_alpn']}"
+                        if frontend.get('ssl_npn'):
+                            bind_line += f" npn {frontend['ssl_npn']}"
+                        if frontend.get('ssl_ciphers'):
+                            bind_line += f" ciphers {frontend['ssl_ciphers']}"
+                        if frontend.get('ssl_ciphersuites'):
+                            bind_line += f" ciphersuites {frontend['ssl_ciphersuites']}"
+                        if frontend.get('ssl_min_ver'):
+                            bind_line += f" ssl-min-ver {frontend['ssl_min_ver']}"
+                        if frontend.get('ssl_max_ver'):
+                            bind_line += f" ssl-max-ver {frontend['ssl_max_ver']}"
+                        if frontend.get('ssl_strict_sni'):
+                            bind_line += " strict-sni"
+                        
+                        config_lines.append(bind_line)
                         bind_added = True
                         logger.info(f"SSL NEW MODE: Added {len(cert_paths)} certificate(s) on port {frontend['bind_port']}")
                     else:
@@ -230,7 +248,25 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     if ssl_cert_path:
                         # Use explicit SSL port or default to 443
                         https_port = frontend.get('ssl_port') or 443
-                        config_lines.append(f"    bind {frontend['bind_address']}:{https_port} ssl crt {ssl_cert_path}")
+                        bind_line = f"    bind {frontend['bind_address']}:{https_port} ssl crt {ssl_cert_path}"
+                        
+                        # Add SSL advanced options if present (OLD MODE support)
+                        if frontend.get('ssl_alpn'):
+                            bind_line += f" alpn {frontend['ssl_alpn']}"
+                        if frontend.get('ssl_npn'):
+                            bind_line += f" npn {frontend['ssl_npn']}"
+                        if frontend.get('ssl_ciphers'):
+                            bind_line += f" ciphers {frontend['ssl_ciphers']}"
+                        if frontend.get('ssl_ciphersuites'):
+                            bind_line += f" ciphersuites {frontend['ssl_ciphersuites']}"
+                        if frontend.get('ssl_min_ver'):
+                            bind_line += f" ssl-min-ver {frontend['ssl_min_ver']}"
+                        if frontend.get('ssl_max_ver'):
+                            bind_line += f" ssl-max-ver {frontend['ssl_max_ver']}"
+                        if frontend.get('ssl_strict_sni'):
+                            bind_line += " strict-sni"
+                        
+                        config_lines.append(bind_line)
                         bind_added = True
                         logger.info(f"SSL OLD MODE: Separate HTTPS port {https_port} with single cert")
                     else:
@@ -606,6 +642,16 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                             cert_path = f"/etc/ssl/haproxy/{cert_filename}"
                             server_line += f" ca-file {cert_path}"
                             logger.info(f"🔒 CONFIG SSL: Added ca-file for server {server_name}: {cert_path}")
+                    
+                    # Add SSL advanced options if present
+                    if server.get('ssl_sni'):
+                        server_line += f" sni {server['ssl_sni']}"
+                    if server.get('ssl_min_ver'):
+                        server_line += f" ssl-min-ver {server['ssl_min_ver']}"
+                    if server.get('ssl_max_ver'):
+                        server_line += f" ssl-max-ver {server['ssl_max_ver']}"
+                    if server.get('ssl_ciphers'):
+                        server_line += f" ciphers {server['ssl_ciphers']}"
                 
                 # Health Check (with new field: check_port)
                 if server.get('check_enabled', True):

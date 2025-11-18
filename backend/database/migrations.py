@@ -1557,6 +1557,8 @@ async def run_all_migrations():
     await add_ssl_certificate_id_to_backend_servers()
     await add_options_to_backends()
     await add_options_to_frontends()
+    await add_ssl_advanced_options_to_frontends()
+    await add_ssl_advanced_options_to_servers()
     
     logger.info("Database migrations completed successfully.")
 
@@ -2823,4 +2825,93 @@ async def add_options_to_frontends():
         if conn:
             await close_database_connection(conn)
         logger.error(f"❌ Error adding options to frontends: {e}")
+        # Don't raise - we'll try to proceed
+
+async def add_ssl_advanced_options_to_frontends():
+    """Add SSL advanced options columns to frontends table for bind SSL parameters"""
+    conn = None
+    try:
+        conn = await get_database_connection()
+        
+        # List of SSL parameters to add
+        ssl_columns = [
+            ('ssl_alpn', 'TEXT'),  # Application-Layer Protocol Negotiation (e.g., "h2,http/1.1")
+            ('ssl_npn', 'TEXT'),   # Next Protocol Negotiation (legacy, before ALPN)
+            ('ssl_ciphers', 'TEXT'),  # Cipher suite list (e.g., "ECDHE-RSA-AES128-GCM-SHA256:...")
+            ('ssl_ciphersuites', 'TEXT'),  # TLS 1.3 cipher suites
+            ('ssl_min_ver', 'VARCHAR(20)'),  # Minimum TLS version (TLSv1.2, TLSv1.3)
+            ('ssl_max_ver', 'VARCHAR(20)'),  # Maximum TLS version
+            ('ssl_strict_sni', 'BOOLEAN DEFAULT FALSE'),  # Strict SNI requirement
+        ]
+        
+        for column_name, column_type in ssl_columns:
+            # Check if column already exists
+            column_exists = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'frontends' 
+                    AND column_name = $1
+                )
+            """, column_name)
+            
+            if not column_exists:
+                # Add column
+                await conn.execute(f"""
+                    ALTER TABLE frontends 
+                    ADD COLUMN {column_name} {column_type}
+                """)
+                
+                logger.info(f"✅ Added {column_name} column to frontends table")
+            else:
+                logger.info(f"ℹ️  {column_name} column already exists in frontends table")
+        
+        await close_database_connection(conn)
+        
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"❌ Error adding SSL advanced options to frontends: {e}")
+        # Don't raise - we'll try to proceed
+
+async def add_ssl_advanced_options_to_servers():
+    """Add SSL advanced options columns to backend_servers table for server SSL parameters"""
+    conn = None
+    try:
+        conn = await get_database_connection()
+        
+        # List of SSL parameters to add
+        ssl_columns = [
+            ('ssl_sni', 'VARCHAR(255)'),  # SNI hostname for backend SSL connections
+            ('ssl_min_ver', 'VARCHAR(20)'),  # Minimum TLS version (TLSv1.2, TLSv1.3)
+            ('ssl_max_ver', 'VARCHAR(20)'),  # Maximum TLS version
+            ('ssl_ciphers', 'TEXT'),  # Cipher suite list for backend connections
+        ]
+        
+        for column_name, column_type in ssl_columns:
+            # Check if column already exists
+            column_exists = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'backend_servers' 
+                    AND column_name = $1
+                )
+            """, column_name)
+            
+            if not column_exists:
+                # Add column
+                await conn.execute(f"""
+                    ALTER TABLE backend_servers 
+                    ADD COLUMN {column_name} {column_type}
+                """)
+                
+                logger.info(f"✅ Added {column_name} column to backend_servers table")
+            else:
+                logger.info(f"ℹ️  {column_name} column already exists in backend_servers table")
+        
+        await close_database_connection(conn)
+        
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"❌ Error adding SSL advanced options to servers: {e}")
         # Don't raise - we'll try to proceed

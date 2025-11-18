@@ -13,6 +13,13 @@ class ServerConfig(BaseModel):
     ssl_enabled: bool = False
     ssl_verify: Optional[str] = None
     ssl_certificate_id: Optional[int] = None  # SSL certificate for backend server
+    
+    # SSL Advanced Options (server SSL parameters)
+    ssl_sni: Optional[str] = None  # SNI hostname for backend SSL connections
+    ssl_min_ver: Optional[str] = None  # Minimum TLS version (TLSv1.2, TLSv1.3)
+    ssl_max_ver: Optional[str] = None  # Maximum TLS version
+    ssl_ciphers: Optional[str] = None  # Cipher suite list for backend connections
+    
     cookie_value: Optional[str] = None
     inter: Optional[int] = None
     fall: Optional[int] = None

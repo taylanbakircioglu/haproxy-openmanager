@@ -24,6 +24,13 @@ class ParsedServer:
     backup_server: bool = False
     ssl_enabled: bool = False
     ssl_verify: Optional[str] = None  # SSL verification (none, required)
+    
+    # SSL Advanced Options (server SSL parameters)
+    ssl_sni: Optional[str] = None  # SNI hostname for backend SSL connections
+    ssl_min_ver: Optional[str] = None  # Minimum TLS version
+    ssl_max_ver: Optional[str] = None  # Maximum TLS version
+    ssl_ciphers: Optional[str] = None  # Cipher suite list
+    
     cookie_value: Optional[str] = None  # Cookie value for session persistence
     inter: Optional[int] = None  # Health check interval
     fall: Optional[int] = None  # Number of failed checks before marking down
@@ -72,6 +79,16 @@ class ParsedFrontend:
     ssl_cert_path: Optional[str] = None
     ssl_cert: Optional[str] = None
     ssl_verify: Optional[str] = None
+    
+    # SSL Advanced Options (bind SSL parameters)
+    ssl_alpn: Optional[str] = None  # Application-Layer Protocol Negotiation (e.g., "h2,http/1.1")
+    ssl_npn: Optional[str] = None   # Next Protocol Negotiation (legacy)
+    ssl_ciphers: Optional[str] = None  # Cipher suite list
+    ssl_ciphersuites: Optional[str] = None  # TLS 1.3 cipher suites
+    ssl_min_ver: Optional[str] = None  # Minimum TLS version
+    ssl_max_ver: Optional[str] = None  # Maximum TLS version
+    ssl_strict_sni: Optional[bool] = False  # Strict SNI requirement
+    
     timeout_client: Optional[int] = None
     timeout_http_request: Optional[int] = None
     maxconn: Optional[int] = None
@@ -263,18 +280,20 @@ class HAProxyConfigParser:
                         # Check if SSL certificate path is specified in bind directive
                         if 'crt ' in line:
                             ssl_cert_found = True
-                            # Extract certificate paths for warning
+                            # Extract certificate paths and SSL parameters
                             # CRITICAL FIX: Parse multiple crt paths even with alpn/other params after them
-                            # Old regex: r'crt\s+([^\s]+)' - stops at first whitespace
-                            # New regex: Parse the bind line properly to extract all crt paths before alpn/npn/other SSL params
                             cert_paths = []
                             ssl_params_detected = []
                             parts = line.split()
-                            for i, part in enumerate(parts):
+                            
+                            i = 0
+                            while i < len(parts):
+                                part = parts[i]
+                                
+                                # Extract SSL certificate paths
                                 if part == 'crt' and i + 1 < len(parts):
-                                    # Next part is the cert path
                                     cert_path = parts[i + 1]
-                                    # Stop if we hit SSL parameters (alpn, npn, ca-file, etc.)
+                                    # Stop if we hit SSL parameters
                                     if not cert_path.startswith(('alpn', 'npn', 'ca-file', 'ca-ignore-err', 'ca-sign-file', 
                                                                   'ciphers', 'ciphersuites', 'crl-file', 'curves', 
                                                                   'ecdhe', 'force-sslv3', 'force-tlsv10', 'force-tlsv11',
@@ -284,11 +303,37 @@ class HAProxyConfigParser:
                                                                   'ssl-max-ver', 'ssl-min-ver', 'strict-sni', 'tls-ticket-keys',
                                                                   'verify', 'accept-proxy', 'v4v6', 'v6only')):
                                         cert_paths.append(cert_path)
-                                # Detect SSL parameters for warning (alpn, npn, ciphers, etc.)
-                                if part in ('alpn', 'npn', 'ciphers', 'ciphersuites'):
-                                    # Get the value for this parameter
-                                    if i + 1 < len(parts):
-                                        ssl_params_detected.append(f"{part} {parts[i + 1]}")
+                                
+                                # Parse SSL parameters and store them in frontend object
+                                if part == 'alpn' and i + 1 < len(parts):
+                                    frontend.ssl_alpn = parts[i + 1]
+                                    ssl_params_detected.append(f"alpn {parts[i + 1]}")
+                                    i += 1  # Skip the value
+                                elif part == 'npn' and i + 1 < len(parts):
+                                    frontend.ssl_npn = parts[i + 1]
+                                    ssl_params_detected.append(f"npn {parts[i + 1]}")
+                                    i += 1
+                                elif part == 'ciphers' and i + 1 < len(parts):
+                                    frontend.ssl_ciphers = parts[i + 1]
+                                    ssl_params_detected.append(f"ciphers {parts[i + 1]}")
+                                    i += 1
+                                elif part == 'ciphersuites' and i + 1 < len(parts):
+                                    frontend.ssl_ciphersuites = parts[i + 1]
+                                    ssl_params_detected.append(f"ciphersuites {parts[i + 1]}")
+                                    i += 1
+                                elif part == 'ssl-min-ver' and i + 1 < len(parts):
+                                    frontend.ssl_min_ver = parts[i + 1]
+                                    ssl_params_detected.append(f"ssl-min-ver {parts[i + 1]}")
+                                    i += 1
+                                elif part == 'ssl-max-ver' and i + 1 < len(parts):
+                                    frontend.ssl_max_ver = parts[i + 1]
+                                    ssl_params_detected.append(f"ssl-max-ver {parts[i + 1]}")
+                                    i += 1
+                                elif part == 'strict-sni':
+                                    frontend.ssl_strict_sni = True
+                                    ssl_params_detected.append("strict-sni")
+                                
+                                i += 1
                             
                             if cert_paths:
                                 # CRITICAL: Store first cert path for SSL auto-matching in bulk import
@@ -299,12 +344,11 @@ class HAProxyConfigParser:
                                     "SSL certificates should be managed through the SSL Management page, not in the config file."
                                 )
                             
-                            # Warn about SSL parameters that won't be imported (alpn, npn, ciphers)
+                            # Info message about SSL parameters that WERE imported
                             if ssl_params_detected:
                                 self.warnings.append(
-                                    f"Frontend '{name}': SSL parameters detected but NOT imported: {', '.join(ssl_params_detected)}. "
-                                    "These advanced SSL options should be configured manually in Frontend Management after import or "
-                                    "added to the cluster's global/defaults configuration."
+                                    f"Frontend '{name}': SSL parameters imported: {', '.join(ssl_params_detected)}. "
+                                    "You can edit these in Frontend Management after import."
                                 )
                     else:
                         # This is a regular HTTP bind - only set if not already set
@@ -794,6 +838,23 @@ class HAProxyConfigParser:
                 f"SSL: Server '{name}' has ca-file '{ca_file_path}' which has been REMOVED. "
                 f"SSL verify set to 'none'. After import, select SSL certificate and configure verify."
             )
+        
+        # Parse SSL Advanced Options (server SSL parameters)
+        sni_match = re.search(r'sni\s+(\S+)', options, re.IGNORECASE)
+        if sni_match:
+            server.ssl_sni = sni_match.group(1)
+        
+        ssl_min_ver_match = re.search(r'ssl-min-ver\s+(\S+)', options, re.IGNORECASE)
+        if ssl_min_ver_match:
+            server.ssl_min_ver = ssl_min_ver_match.group(1)
+        
+        ssl_max_ver_match = re.search(r'ssl-max-ver\s+(\S+)', options, re.IGNORECASE)
+        if ssl_max_ver_match:
+            server.ssl_max_ver = ssl_max_ver_match.group(1)
+        
+        ciphers_match = re.search(r'ciphers\s+([^\s]+)', options, re.IGNORECASE)
+        if ciphers_match:
+            server.ssl_ciphers = ciphers_match.group(1)
         
         # Parse cookie value
         cookie_match = re.search(r'cookie\s+(\S+)', options, re.IGNORECASE)

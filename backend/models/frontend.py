@@ -18,6 +18,15 @@ class FrontendConfig(BaseModel):
     ssl_cert_path: Optional[str] = None
     ssl_cert: Optional[str] = None
     ssl_verify: Optional[str] = "optional"
+    
+    # SSL Advanced Options (bind SSL parameters)
+    ssl_alpn: Optional[str] = None  # Application-Layer Protocol Negotiation (e.g., "h2,http/1.1")
+    ssl_npn: Optional[str] = None   # Next Protocol Negotiation (legacy)
+    ssl_ciphers: Optional[str] = None  # Cipher suite list
+    ssl_ciphersuites: Optional[str] = None  # TLS 1.3 cipher suites
+    ssl_min_ver: Optional[str] = None  # Minimum TLS version (SSLv3, TLSv1.0, TLSv1.1, TLSv1.2, TLSv1.3)
+    ssl_max_ver: Optional[str] = None  # Maximum TLS version
+    ssl_strict_sni: Optional[bool] = False  # Strict SNI requirement
     acl_rules: Any = []
     redirect_rules: Any = []
     use_backend_rules: Any = []  # Changed from Optional[str] to Any for list support
