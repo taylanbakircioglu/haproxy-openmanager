@@ -264,7 +264,32 @@ class HAProxyConfigParser:
                         if 'crt ' in line:
                             ssl_cert_found = True
                             # Extract certificate paths for warning
-                            cert_paths = re.findall(r'crt\s+([^\s]+)', line)
+                            # CRITICAL FIX: Parse multiple crt paths even with alpn/other params after them
+                            # Old regex: r'crt\s+([^\s]+)' - stops at first whitespace
+                            # New regex: Parse the bind line properly to extract all crt paths before alpn/npn/other SSL params
+                            cert_paths = []
+                            ssl_params_detected = []
+                            parts = line.split()
+                            for i, part in enumerate(parts):
+                                if part == 'crt' and i + 1 < len(parts):
+                                    # Next part is the cert path
+                                    cert_path = parts[i + 1]
+                                    # Stop if we hit SSL parameters (alpn, npn, ca-file, etc.)
+                                    if not cert_path.startswith(('alpn', 'npn', 'ca-file', 'ca-ignore-err', 'ca-sign-file', 
+                                                                  'ciphers', 'ciphersuites', 'crl-file', 'curves', 
+                                                                  'ecdhe', 'force-sslv3', 'force-tlsv10', 'force-tlsv11',
+                                                                  'force-tlsv12', 'force-tlsv13', 'generate-certificates',
+                                                                  'no-sslv3', 'no-tls-tickets', 'no-tlsv10', 'no-tlsv11',
+                                                                  'no-tlsv12', 'no-tlsv13', 'prefer-client-ciphers',
+                                                                  'ssl-max-ver', 'ssl-min-ver', 'strict-sni', 'tls-ticket-keys',
+                                                                  'verify', 'accept-proxy', 'v4v6', 'v6only')):
+                                        cert_paths.append(cert_path)
+                                # Detect SSL parameters for warning (alpn, npn, ciphers, etc.)
+                                if part in ('alpn', 'npn', 'ciphers', 'ciphersuites'):
+                                    # Get the value for this parameter
+                                    if i + 1 < len(parts):
+                                        ssl_params_detected.append(f"{part} {parts[i + 1]}")
+                            
                             if cert_paths:
                                 # CRITICAL: Store first cert path for SSL auto-matching in bulk import
                                 frontend.ssl_cert_path = cert_paths[0]
@@ -272,6 +297,14 @@ class HAProxyConfigParser:
                                 self.warnings.append(
                                     f"Frontend '{name}': SSL certificates detected in config ({', '.join(cert_paths)}). "
                                     "SSL certificates should be managed through the SSL Management page, not in the config file."
+                                )
+                            
+                            # Warn about SSL parameters that won't be imported (alpn, npn, ciphers)
+                            if ssl_params_detected:
+                                self.warnings.append(
+                                    f"Frontend '{name}': SSL parameters detected but NOT imported: {', '.join(ssl_params_detected)}. "
+                                    "These advanced SSL options should be configured manually in Frontend Management after import or "
+                                    "added to the cluster's global/defaults configuration."
                                 )
                     else:
                         # This is a regular HTTP bind - only set if not already set

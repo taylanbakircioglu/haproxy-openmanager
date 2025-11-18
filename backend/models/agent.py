@@ -67,6 +67,9 @@ class AgentHeartbeat(BaseModel):
     # Config sync tracking (agent reports what it successfully applied)
     applied_config_version: Optional[str] = None
     
+    # System info collected by agent (JSON object)
+    system_info: Optional[Dict[str, Any]] = None
+    
     # Other optional fields
     last_config_update: Optional[str] = None
     errors: Optional[List[str]] = None
