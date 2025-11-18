@@ -1244,12 +1244,22 @@ async def agent_heartbeat_by_name(
                     # Auto-register new agent
                     logger.info(f"Agent '{agent_name}' not found. Auto-registering...")
                     try:
+                        # Get pool_id from cluster_id if provided in heartbeat
+                        pool_id_from_cluster = None
+                        if heartbeat_dict.get('cluster_id'):
+                            cluster_pool = await conn.fetchrow("""
+                                SELECT pool_id FROM haproxy_clusters WHERE id = $1
+                            """, heartbeat_dict['cluster_id'])
+                            if cluster_pool:
+                                pool_id_from_cluster = cluster_pool['pool_id']
+                                logger.info(f"Auto-register: Got pool_id {pool_id_from_cluster} from cluster_id {heartbeat_dict['cluster_id']}")
+                        
                         agent_id = await conn.fetchval("""
-                            INSERT INTO agents (name, status, last_seen, api_key) 
-                            VALUES ($1, 'online', CURRENT_TIMESTAMP, $2) RETURNING id
-                        """, agent_name, x_api_key)
-                        logger.info(f"Auto-registered new agent '{agent_name}' with ID {agent_id}")
-                        agent = {'id': agent_id, 'pool_id': None} 
+                            INSERT INTO agents (name, status, last_seen, api_key, pool_id) 
+                            VALUES ($1, 'online', CURRENT_TIMESTAMP, $2, $3) RETURNING id
+                        """, agent_name, x_api_key, pool_id_from_cluster)
+                        logger.info(f"Auto-registered new agent '{agent_name}' with ID {agent_id} and pool_id {pool_id_from_cluster}")
+                        agent = {'id': agent_id, 'pool_id': pool_id_from_cluster} 
                     except Exception as e:
                         await close_database_connection(conn)
                         logger.error(f"Failed to auto-register agent '{agent_name}': {e}", exc_info=True)
@@ -1258,12 +1268,22 @@ async def agent_heartbeat_by_name(
             # Auto-register new agent without API key
             logger.info(f"Agent '{agent_name}' not found. Auto-registering...")
             try:
+                # Get pool_id from cluster_id if provided in heartbeat
+                pool_id_from_cluster = None
+                if heartbeat_dict.get('cluster_id'):
+                    cluster_pool = await conn.fetchrow("""
+                        SELECT pool_id FROM haproxy_clusters WHERE id = $1
+                    """, heartbeat_dict['cluster_id'])
+                    if cluster_pool:
+                        pool_id_from_cluster = cluster_pool['pool_id']
+                        logger.info(f"Auto-register: Got pool_id {pool_id_from_cluster} from cluster_id {heartbeat_dict['cluster_id']}")
+                
                 agent_id = await conn.fetchval("""
-                    INSERT INTO agents (name, status, last_seen) 
-                    VALUES ($1, 'online', CURRENT_TIMESTAMP) RETURNING id
-                """, agent_name)
-                logger.info(f"Auto-registered new agent '{agent_name}' with ID {agent_id}")
-                agent = {'id': agent_id, 'pool_id': None} 
+                    INSERT INTO agents (name, status, last_seen, pool_id) 
+                    VALUES ($1, 'online', CURRENT_TIMESTAMP, $2) RETURNING id
+                """, agent_name, pool_id_from_cluster)
+                logger.info(f"Auto-registered new agent '{agent_name}' with ID {agent_id} and pool_id {pool_id_from_cluster}")
+                agent = {'id': agent_id, 'pool_id': pool_id_from_cluster} 
             except Exception as e:
                 await close_database_connection(conn)
                 logger.error(f"Failed to auto-register agent '{agent_name}': {e}", exc_info=True)
