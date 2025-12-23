@@ -659,9 +659,7 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 if server.get('ssl_enabled', False):
                     server_line += " ssl"
                     ssl_verify = server.get('ssl_verify', '').strip() if server.get('ssl_verify') else ''
-                    # Skip empty strings, "[]", or invalid values
-                    if ssl_verify and ssl_verify not in ('[]', '{}', 'null', 'None'):
-                        server_line += f" verify {ssl_verify}"
+                    has_ca_file = False
                     
                     # Add ca-file path if SSL certificate is selected
                     if server.get('ssl_certificate_id'):
@@ -676,7 +674,19 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                             cert_filename = f"{ssl_cert['name']}.pem"
                             cert_path = f"/etc/ssl/haproxy/{cert_filename}"
                             server_line += f" ca-file {cert_path}"
+                            has_ca_file = True
                             logger.info(f"🔒 CONFIG SSL: Added ca-file for server {server_name}: {cert_path}")
+                    
+                    # Handle ssl_verify option
+                    # Skip empty strings, "[]", or invalid values
+                    if ssl_verify and ssl_verify not in ('[]', '{}', 'null', 'None'):
+                        server_line += f" verify {ssl_verify}"
+                    elif not has_ca_file:
+                        # CRITICAL: If SSL is enabled but no CA file and no explicit verify option,
+                        # HAProxy 2.8+ defaults to 'verify required' which will fail without CA.
+                        # Default to 'verify none' to prevent validation errors.
+                        server_line += " verify none"
+                        logger.warning(f"⚠️ CONFIG SSL: Server {server_name} has SSL enabled but no CA file - defaulting to 'verify none'")
                     
                     # Add SSL advanced options if present
                     if server.get('ssl_sni'):
