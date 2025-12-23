@@ -1124,6 +1124,12 @@ send_heartbeat() {
     local haproxy_stats_csv=$(get_haproxy_stats_csv)
     local system_info=$(collect_system_info)
     
+    # Get HAProxy version for heartbeat (safe extraction, fallback to "unknown")
+    local haproxy_version="unknown"
+    if command -v haproxy &> /dev/null; then
+        haproxy_version=$(haproxy -v 2>/dev/null | head -1 | awk '{print $3}' || echo "unknown")
+    fi
+    
     # Ensure platform is available (global variable set during registration)
     [[ -z "$platform" ]] && platform=$(uname -s | tr '[:upper:]' '[:lower:]')
     
@@ -1141,6 +1147,7 @@ send_heartbeat() {
     "version": "{{AGENT_VERSION}}",
     $system_info,
     "haproxy_status": "$haproxy_status",
+    "haproxy_version": "$haproxy_version",
     "cluster_id": $CLUSTER_ID,
     "applied_config_version": "${last_applied_version}",
     "server_statuses": $server_statuses,
@@ -1160,6 +1167,7 @@ STATS_HEARTBEAT_EOF
     "version": "{{AGENT_VERSION}}",
     $system_info,
     "haproxy_status": "$haproxy_status",
+    "haproxy_version": "$haproxy_version",
     "cluster_id": $CLUSTER_ID,
     "applied_config_version": "${last_applied_version}",
     "server_statuses": $server_statuses
@@ -1178,6 +1186,7 @@ SIMPLE_HEARTBEAT_EOF
     "version": "{{AGENT_VERSION}}",
     $system_info,
     "haproxy_status": "$haproxy_status",
+    "haproxy_version": "$haproxy_version",
     "cluster_id": $CLUSTER_ID,
     "applied_config_version": "${last_applied_version}"
 }
@@ -2414,6 +2423,12 @@ SYSTEM_INFO_EOF
         local haproxy_stats_csv=$(get_haproxy_stats_csv)
         local system_info=$(collect_system_info)
 
+        # Get HAProxy version for heartbeat (safe extraction, fallback to "unknown")
+        local haproxy_version="unknown"
+        if command -v haproxy &> /dev/null; then
+            haproxy_version=$(haproxy -v 2>/dev/null | head -1 | awk '{print $3}' || echo "unknown")
+        fi
+
         # Ensure platform is available (global variable set during registration)
         if [[ -z "$platform" ]]; then
             platform=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -2428,6 +2443,7 @@ SYSTEM_INFO_EOF
             \"architecture\": \"$(uname -m)\",
             \"version\": \"{{AGENT_VERSION}}\",
             \"haproxy_status\": \"$haproxy_status\",
+            \"haproxy_version\": \"$haproxy_version\",
             \"cluster_id\": $CLUSTER_ID,
             \"server_statuses\": $server_statuses,
             \"system_info\": $system_info"

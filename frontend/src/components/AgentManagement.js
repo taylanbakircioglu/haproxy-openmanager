@@ -1113,6 +1113,11 @@ const AgentManagement = () => {
               IP: {record.ip_address}
             </Text>
           )}
+          {record.haproxy_version && record.haproxy_version !== 'unknown' && (
+            <Text type="secondary" style={{ fontSize: '11px', color: '#52c41a' }}>
+              HAProxy: {record.haproxy_version}
+            </Text>
+          )}
         </Space>
       ),
       width: 220,
