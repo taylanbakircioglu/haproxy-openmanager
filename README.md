@@ -993,7 +993,7 @@ Choose your preferred installation method:
 
 1. **Clone the Repository**
    ```bash
-   git clone https://github.com/yourusername/haproxy-openmanager.git
+   git clone https://github.com/taylanbakircioglu/haproxy-openmanager.git
    cd haproxy-openmanager
    ```
 
@@ -1763,7 +1763,7 @@ If you find this project useful, please consider giving it a star on GitHub!
 ## 🤝 Support
 
 - **Documentation**: This README and inline code documentation
-- **Issues**: [GitHub Issues](https://github.com/hub-burgan-com-tr/haproxy-openmanager/issues)
+- **Issues**: [GitHub Issues](https://github.com/taylanbakircioglu/haproxy-openmanager/issues)
 - **Pull Requests**: Contributions are welcome!
 
 ## ⭐ Contributing

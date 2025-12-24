@@ -29,8 +29,8 @@ jobs:
           file: ./backend/Dockerfile
           push: true
           tags: |
-            burganbank/haproxy-openmanager-backend:latest
-            burganbank/haproxy-openmanager-backend:${{ steps.version.outputs.TAG }}
+            taylanbakircioglu/haproxy-openmanager-backend:latest
+            taylanbakircioglu/haproxy-openmanager-backend:${{ steps.version.outputs.TAG }}
 
       - name: build & push frontend
         uses: docker/build-push-action@v4
@@ -39,6 +39,6 @@ jobs:
           file: ./frontend/Dockerfile
           push: true
           tags: |
-            burganbank/haproxy-openmanager-frontend:latest
-            burganbank/haproxy-openmanager-frontend:${{ steps.version.outputs.TAG }}
+            taylanbakircioglu/haproxy-openmanager-frontend:latest
+            taylanbakircioglu/haproxy-openmanager-frontend:${{ steps.version.outputs.TAG }}
 

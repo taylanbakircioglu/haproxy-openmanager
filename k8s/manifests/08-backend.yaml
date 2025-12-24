@@ -36,7 +36,7 @@ spec:
             name: postgres-secret
       containers:
       - name: backend
-        image: burganbank/haproxy-openmanager-backend:latest  # Public Docker Hub image
+        image: taylanbakircioglu/haproxy-openmanager-backend:latest  # Public Docker Hub image
         ports:
         - containerPort: 8000
           name: http
