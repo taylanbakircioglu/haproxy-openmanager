@@ -6,7 +6,7 @@ import {
 import {
   PlusOutlined, EditOutlined, DeleteOutlined,
   LoadingOutlined, CloudServerOutlined, DownloadOutlined, SettingOutlined,
-  SafetyCertificateOutlined, UsergroupAddOutlined, SearchOutlined
+  SafetyCertificateOutlined, UsergroupAddOutlined, SearchOutlined, WarningOutlined
 } from '@ant-design/icons';
 import { useCluster } from '../contexts/ClusterContext';
 
@@ -36,9 +36,58 @@ const ClusterManagement = () => {
   
   // Path Discovery
   const [pathDiscoveryVisible, setPathDiscoveryVisible] = useState(false);
+  
+  // Agent HAProxy versions per cluster
+  const [clusterAgents, setClusterAgents] = useState({});
+  const [loadingAgents, setLoadingAgents] = useState(false);
 
   const showPathDiscovery = () => {
     setPathDiscoveryVisible(true);
+  };
+  
+  // Fetch agents for all clusters to get haproxy_version info
+  const fetchAgentsForClusters = async (clusterList) => {
+    if (!clusterList || clusterList.length === 0) return;
+    
+    setLoadingAgents(true);
+    const agentsByCluster = {};
+    
+    try {
+      // Get unique pool_ids from clusters
+      const poolIds = [...new Set(clusterList.filter(c => c.pool_id).map(c => c.pool_id))];
+      
+      // Fetch agents for each pool
+      for (const poolId of poolIds) {
+        try {
+          const response = await fetch(`/api/agents?pool_id=${poolId}`, {
+            headers: {
+              'Authorization': `Bearer ${localStorage.getItem('authToken') || ''}`,
+            },
+          });
+          if (response.ok) {
+            const data = await response.json();
+            const agents = data.agents || [];
+            
+            // Map agents to clusters by pool_id
+            clusterList.filter(c => c.pool_id === poolId).forEach(cluster => {
+              agentsByCluster[cluster.id] = agents.map(a => ({
+                name: a.name,
+                haproxy_version: a.haproxy_version,
+                status: a.status
+              }));
+            });
+          }
+        } catch (err) {
+          console.error(`Error fetching agents for pool ${poolId}:`, err);
+        }
+      }
+      
+      setClusterAgents(agentsByCluster);
+    } catch (error) {
+      console.error('Error fetching agents for clusters:', error);
+    } finally {
+      setLoadingAgents(false);
+    }
   };
 
   useEffect(() => {
@@ -48,6 +97,10 @@ const ClusterManagement = () => {
 
   useEffect(() => {
     setFilteredClusters(clusters);
+    // Fetch agents for all clusters to display HAProxy versions
+    if (clusters && clusters.length > 0) {
+      fetchAgentsForClusters(clusters);
+    }
   }, [clusters]);
 
   // Fetch Agent Pools for Agent connection type
@@ -200,6 +253,44 @@ const ClusterManagement = () => {
     const config = statusConfig[status] || statusConfig['unknown'];
     return <Badge status={config.status} text={config.text} />;
   };
+  
+  // Get HAProxy version info for a cluster
+  const getHAProxyVersionInfo = (clusterId) => {
+    const agents = clusterAgents[clusterId] || [];
+    if (agents.length === 0) {
+      return { versions: [], versionDetails: [], hasVersionMismatch: false, totalAgents: 0 };
+    }
+    
+    // Get unique versions (excluding 'unknown' and empty values)
+    const validAgents = agents.filter(a => a.haproxy_version && a.haproxy_version !== 'unknown' && a.haproxy_version.trim() !== '');
+    
+    // Group agents by version
+    const versionMap = {};
+    validAgents.forEach(a => {
+      if (!versionMap[a.haproxy_version]) {
+        versionMap[a.haproxy_version] = [];
+      }
+      versionMap[a.haproxy_version].push(a.name);
+    });
+    
+    const uniqueVersions = Object.keys(versionMap);
+    const hasVersionMismatch = uniqueVersions.length > 1;
+    
+    // Create version details with agent names
+    const versionDetails = uniqueVersions.map(version => ({
+      version,
+      agents: versionMap[version],
+      count: versionMap[version].length
+    }));
+    
+    return {
+      versions: uniqueVersions,
+      versionDetails,
+      hasVersionMismatch,
+      totalAgents: agents.length,
+      validAgentsCount: validAgents.length
+    };
+  };
 
   const columns = [
     {
@@ -261,6 +352,61 @@ const ClusterManagement = () => {
           )}
         </div>
       ),
+    },
+    {
+      title: 'HAProxy Version',
+      key: 'haproxy_version',
+      width: 220,
+      render: (_, record) => {
+        const versionInfo = getHAProxyVersionInfo(record.id);
+        
+        if (loadingAgents) {
+          return (
+            <Space size={4}>
+              <LoadingOutlined style={{ fontSize: '12px', color: '#1890ff' }} spin />
+              <Text type="secondary" style={{ fontSize: '11px' }}>Loading...</Text>
+            </Space>
+          );
+        }
+        
+        if (!versionInfo.versions || versionInfo.versions.length === 0) {
+          if (record.total_agents === 0) {
+            return <Text type="secondary" style={{ fontSize: '11px' }}>No agents</Text>;
+          }
+          return <Text type="secondary" style={{ fontSize: '11px' }}>-</Text>;
+        }
+        
+        return (
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '6px' }}>
+            {versionInfo.hasVersionMismatch && (
+              <Tooltip title="Agents in this cluster have different HAProxy versions">
+                <WarningOutlined style={{ color: '#faad14', fontSize: '14px', marginTop: '2px' }} />
+              </Tooltip>
+            )}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              {versionInfo.versionDetails.map((detail, idx) => (
+                <div key={idx}>
+                  <Text 
+                    style={{ 
+                      fontSize: '11px', 
+                      color: versionInfo.hasVersionMismatch ? '#faad14' : '#52c41a',
+                      fontFamily: 'monospace',
+                      fontWeight: 500
+                    }}
+                  >
+                    {detail.version}
+                  </Text>
+                  <div style={{ marginLeft: '8px', marginTop: '1px' }}>
+                    <Text type="secondary" style={{ fontSize: '10px' }}>
+                      {detail.agents.join(', ')}
+                    </Text>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      },
     },
     {
       title: 'Actions',
