@@ -987,16 +987,39 @@ async def delete_frontend(frontend_id: int, request: Request, authorization: str
         if frontend['cluster_id']:
             await validate_user_cluster_access(current_user['id'], frontend['cluster_id'], conn)
         
-        if not frontend['is_active']:
-            await close_database_connection(conn)
-            raise HTTPException(status_code=400, detail="Frontend already deleted")
-        
         cluster_id = frontend['cluster_id']
-        logger.info(f"Frontend delete: frontend_id={frontend_id}, name={frontend['name']}, cluster_id={cluster_id}")
+        frontend_name = frontend['name']
+        is_already_inactive = not frontend['is_active']
+        
+        # CRITICAL FIX: If frontend is already inactive (soft-deleted), do HARD DELETE
+        # Problem: Soft-deleted frontends remain in DB and block unique constraint
+        # Solution: Hard delete inactive frontends and all related data
+        if is_already_inactive:
+            logger.warning(f"FRONTEND DELETE: Frontend '{frontend_name}' (id={frontend_id}) is already inactive. Performing HARD DELETE.")
+            
+            # Hard delete: Remove all traces from database
+            # 1. Delete WAF rule associations
+            await conn.execute("DELETE FROM frontend_waf_rules WHERE frontend_id = $1", frontend_id)
+            
+            # 2. Delete related config versions (optional - depends on your data retention policy)
+            if cluster_id is not None:
+                await conn.execute("""
+                    DELETE FROM config_versions 
+                    WHERE cluster_id = $1 
+                    AND (version_name LIKE $2 OR config_content LIKE $3)
+                """, cluster_id, f"%frontend-{frontend_id}-%", f"%frontend {frontend_name}%")
+            
+            # 3. Delete the frontend itself (HARD DELETE)
+            await conn.execute("DELETE FROM frontends WHERE id = $1", frontend_id)
+            
+            await close_database_connection(conn)
+            
+            logger.info(f"FRONTEND DELETE: Hard deleted inactive frontend '{frontend_name}' and all related data")
+            return {"message": f"Inactive frontend '{frontend_name}' has been permanently deleted from database"}
+        
+        logger.info(f"Frontend delete: frontend_id={frontend_id}, name={frontend_name}, cluster_id={cluster_id}")
         
         # Handle dependencies properly before deletion
-        frontend_name = frontend["name"]
-        
         # Check if frontend has a default backend configured
         backend_dependency = None
         if frontend.get('default_backend'):

@@ -1373,7 +1373,8 @@ async def bulk_create_entities(
             # Track updated entities for user feedback
             updated_entities = {
                 "frontends": [],
-                "backends": []
+                "backends": [],
+                "servers": []  # BUGFIX: Track reactivated/updated servers
             }
             
             # PHASE 4: Track all entity snapshots for bulk rollback
@@ -1667,6 +1668,7 @@ async def bulk_create_entities(
                 
                 # SERVERS: Process servers for both CREATE and UPDATE modes
                 # MVP: Only add new servers, preserve existing ones (no deletion)
+                # BUGFIX: Handle soft-deleted servers - check for existing (including inactive) before INSERT
                 backend_has_new_servers = False  # Track if new servers were added
                 if backend_id:  # Only if we have a valid backend_id
                     for server_data in backend_data.get("servers", []):
@@ -1675,58 +1677,144 @@ async def bulk_create_entities(
                             logger.debug(f"Server '{server_data['server_name']}' already exists in backend '{backend_data['name']}', preserving")
                             continue
                         
-                        server_id = await conn.fetchval("""
-                                INSERT INTO backend_servers (
-                                backend_id, backend_name, server_name, server_address, 
-                                server_port, weight, maxconn, check_enabled, check_port,
-                                backup_server, ssl_enabled, ssl_verify, ssl_certificate_id,
-                                ssl_sni, ssl_min_ver, ssl_max_ver, ssl_ciphers,
-                                cookie_value, inter, fall, rise, cluster_id
-                            ) 
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) 
-                            RETURNING id
-                        """, 
-                            backend_id,
-                            backend_data["name"],
-                            server_data["server_name"],
-                            server_data["server_address"],
-                            server_data["server_port"],
-                            server_data.get("weight", 100),
-                            server_data.get("max_connections"),
-                            server_data.get("check_enabled", True),
-                            server_data.get("check_port"),
-                            server_data.get("backup_server", False),
-                            server_data.get("ssl_enabled", False),
-                            server_data.get("ssl_verify"),
-                            server_data.get("ssl_certificate_id"),  # CRITICAL: Auto-assigned SSL ID
-                            server_data.get("ssl_sni"),  # SSL advanced options
-                            server_data.get("ssl_min_ver"),
-                            server_data.get("ssl_max_ver"),
-                            server_data.get("ssl_ciphers"),
-                            server_data.get("cookie_value"),
-                            server_data.get("inter"),
-                            server_data.get("fall"),
-                            server_data.get("rise"),
-                            request.cluster_id
-                        )
+                        # BUGFIX: Check if server already exists (including soft-deleted)
+                        # This prevents unique constraint violation when re-importing after soft delete
+                        existing_server = await conn.fetchrow("""
+                            SELECT id, is_active FROM backend_servers
+                            WHERE backend_id = $1 AND server_name = $2
+                        """, backend_id, server_data["server_name"])
                         
-                        created_entities["servers"].append({
-                            "id": server_id,
-                            "name": server_data["server_name"],
-                            "backend": backend_data["name"]
-                        })
-                        backend_has_new_servers = True
-                        
-                        # PHASE 4: Create snapshot for new server (CREATE operation)
-                        snapshot = await save_entity_snapshot(
-                            conn=conn,
-                            entity_type="server",
-                            entity_id=server_id,
-                            old_values={},  # No old values for CREATE
-                            operation="CREATE"
-                        )
-                        if snapshot:
-                            bulk_snapshots.append(snapshot)
+                        if existing_server:
+                            # Server exists - UPDATE instead of INSERT (reactivate if soft-deleted)
+                            server_id = existing_server['id']
+                            was_inactive = not existing_server['is_active']
+                            
+                            # Log warning if active server is being overwritten (unexpected state)
+                            # This helps debug when frontend incorrectly marks existing server as new
+                            if not was_inactive:
+                                logger.warning(f"BULK IMPORT: Server '{server_data['server_name']}' in backend '{backend_data['name']}' already exists and is ACTIVE, will be overwritten")
+                            
+                            # PHASE 4: Create snapshot BEFORE update for rollback support
+                            # This allows reject to restore server to previous state
+                            # CRITICAL: Create snapshot for BOTH inactive and active servers
+                            existing_server_full = await conn.fetchrow(
+                                "SELECT * FROM backend_servers WHERE id = $1", server_id
+                            )
+                            snapshot = await save_entity_snapshot(
+                                conn=conn,
+                                entity_type="server",
+                                entity_id=server_id,
+                                old_values=dict(existing_server_full) if existing_server_full else {},
+                                new_values=server_data,
+                                operation="UPDATE"
+                            )
+                            if snapshot:
+                                bulk_snapshots.append(snapshot)
+                            
+                            await conn.execute("""
+                                UPDATE backend_servers SET
+                                    backend_name = $1, server_address = $2, server_port = $3, weight = $4, maxconn = $5,
+                                    check_enabled = $6, check_port = $7, backup_server = $8,
+                                    ssl_enabled = $9, ssl_verify = $10, ssl_certificate_id = $11,
+                                    ssl_sni = $12, ssl_min_ver = $13, ssl_max_ver = $14, ssl_ciphers = $15,
+                                    cookie_value = $16, inter = $17, fall = $18, rise = $19,
+                                    is_active = TRUE, last_config_status = 'PENDING', updated_at = CURRENT_TIMESTAMP
+                                WHERE id = $20
+                            """,
+                                backend_data["name"],  # backend_name - keep consistent
+                                server_data["server_address"],
+                                server_data["server_port"],
+                                server_data.get("weight", 100),
+                                server_data.get("max_connections"),
+                                server_data.get("check_enabled", True),
+                                server_data.get("check_port"),
+                                server_data.get("backup_server", False),
+                                server_data.get("ssl_enabled", False),
+                                server_data.get("ssl_verify"),
+                                server_data.get("ssl_certificate_id"),
+                                server_data.get("ssl_sni"),
+                                server_data.get("ssl_min_ver"),
+                                server_data.get("ssl_max_ver"),
+                                server_data.get("ssl_ciphers"),
+                                server_data.get("cookie_value"),
+                                server_data.get("inter"),
+                                server_data.get("fall"),
+                                server_data.get("rise"),
+                                server_id
+                            )
+                            
+                            if was_inactive:
+                                logger.info(f"Reactivated soft-deleted server '{server_data['server_name']}' in backend '{backend_data['name']}'")
+                                updated_entities["servers"].append({
+                                    "id": server_id,
+                                    "name": server_data["server_name"],
+                                    "backend": backend_data["name"],
+                                    "reactivated": True
+                                })
+                            else:
+                                logger.info(f"Updated existing active server '{server_data['server_name']}' in backend '{backend_data['name']}'")
+                                updated_entities["servers"].append({
+                                    "id": server_id,
+                                    "name": server_data["server_name"],
+                                    "backend": backend_data["name"],
+                                    "overwritten": True
+                                })
+                            
+                            backend_has_new_servers = True
+                        else:
+                            # Server doesn't exist - INSERT new
+                            server_id = await conn.fetchval("""
+                                    INSERT INTO backend_servers (
+                                    backend_id, backend_name, server_name, server_address, 
+                                    server_port, weight, maxconn, check_enabled, check_port,
+                                    backup_server, ssl_enabled, ssl_verify, ssl_certificate_id,
+                                    ssl_sni, ssl_min_ver, ssl_max_ver, ssl_ciphers,
+                                    cookie_value, inter, fall, rise, cluster_id
+                                ) 
+                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) 
+                                RETURNING id
+                            """, 
+                                backend_id,
+                                backend_data["name"],
+                                server_data["server_name"],
+                                server_data["server_address"],
+                                server_data["server_port"],
+                                server_data.get("weight", 100),
+                                server_data.get("max_connections"),
+                                server_data.get("check_enabled", True),
+                                server_data.get("check_port"),
+                                server_data.get("backup_server", False),
+                                server_data.get("ssl_enabled", False),
+                                server_data.get("ssl_verify"),
+                                server_data.get("ssl_certificate_id"),  # CRITICAL: Auto-assigned SSL ID
+                                server_data.get("ssl_sni"),  # SSL advanced options
+                                server_data.get("ssl_min_ver"),
+                                server_data.get("ssl_max_ver"),
+                                server_data.get("ssl_ciphers"),
+                                server_data.get("cookie_value"),
+                                server_data.get("inter"),
+                                server_data.get("fall"),
+                                server_data.get("rise"),
+                                request.cluster_id
+                            )
+                            
+                            created_entities["servers"].append({
+                                "id": server_id,
+                                "name": server_data["server_name"],
+                                "backend": backend_data["name"]
+                            })
+                            backend_has_new_servers = True
+                            
+                            # PHASE 4: Create snapshot for new server (CREATE operation)
+                            snapshot = await save_entity_snapshot(
+                                conn=conn,
+                                entity_type="server",
+                                entity_id=server_id,
+                                old_values={},  # No old values for CREATE
+                                operation="CREATE"
+                            )
+                            if snapshot:
+                                bulk_snapshots.append(snapshot)
                     
                     # If backend wasn't updated but has new servers, add to updated_entities
                     # This ensures backend gets marked as PENDING for Apply Management
@@ -2134,15 +2222,16 @@ async def bulk_create_entities(
                 f"{len(created_entities['servers'])} servers"
             )
         
-        # Updated entities
-        updated_count = len(updated_entities["frontends"]) + len(updated_entities["backends"])
+        # Updated entities (including reactivated servers)
+        updated_count = len(updated_entities["frontends"]) + len(updated_entities["backends"]) + len(updated_entities["servers"])
         if updated_count > 0:
             message_parts.append(
                 f"Updated: {len(updated_entities['frontends'])} frontends, "
-                f"{len(updated_entities['backends'])} backends"
+                f"{len(updated_entities['backends'])} backends, "
+                f"{len(updated_entities['servers'])} servers"
             )
         
-        # Reactivated entities (were deleted)
+        # Reactivated entities (were deleted/soft-deleted)
         reactivated = []
         for fe in updated_entities["frontends"]:
             if fe.get("was_inactive"):
@@ -2150,6 +2239,9 @@ async def bulk_create_entities(
         for be in updated_entities["backends"]:
             if be.get("was_inactive"):
                 reactivated.append(f"backend '{be['name']}'")
+        for srv in updated_entities["servers"]:
+            if srv.get("reactivated"):
+                reactivated.append(f"server '{srv['name']}' in {srv['backend']}")
         
         if reactivated:
             message_parts.append(f"Reactivated: {', '.join(reactivated[:3])}")
@@ -2168,7 +2260,8 @@ async def bulk_create_entities(
                 "backends": len(created_entities["backends"]),
                 "servers": len(created_entities["servers"]),
                 "updated_frontends": len(updated_entities["frontends"]),
-                "updated_backends": len(updated_entities["backends"])
+                "updated_backends": len(updated_entities["backends"]),
+                "updated_servers": len(updated_entities["servers"])  # Reactivated/overwritten servers
             },
             "config_version": version_name,
             "requires_apply": True
