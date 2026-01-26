@@ -2803,10 +2803,33 @@ CONFIG_RESPONSE_EOF
                         echo "$daemon_config_content" > /tmp/haproxy-new-config.cfg 2>/dev/null
                     
                     if [[ -f "/tmp/haproxy-new-config.cfg" && -s "/tmp/haproxy-new-config.cfg" ]]; then
-                    # Get paths from config
-                    HAPROXY_BIN=$(jq -r '.haproxy.bin_path' "$CONFIG_FILE" 2>/dev/null || echo "{{HAPROXY_BIN_PATH}}")
-                    HAPROXY_CONFIG=$(jq -r '.haproxy.config_path' "$CONFIG_FILE" 2>/dev/null || echo "{{HAPROXY_CONFIG_PATH}}")
-                    STATS_SOCKET=$(jq -r '.haproxy.stats_socket_path' "$CONFIG_FILE" 2>/dev/null || echo "{{STATS_SOCKET_PATH}}")
+                    # Get paths DYNAMICALLY from API response first (cluster config can be changed without reinstall)
+                    # Fallback to local config file if not present in API response
+                    api_bin_path=$(echo "$config_response" | jq -r '.haproxy_bin_path // empty' 2>/dev/null)
+                    api_config_path=$(echo "$config_response" | jq -r '.haproxy_config_path // empty' 2>/dev/null)
+                    api_socket_path=$(echo "$config_response" | jq -r '.stats_socket_path // empty' 2>/dev/null)
+                    
+                    # Use API values if present, otherwise fallback to local config
+                    if [[ -n "$api_bin_path" && "$api_bin_path" != "null" ]]; then
+                        HAPROXY_BIN="$api_bin_path"
+                        log "DEBUG" "DAEMON: Using dynamic haproxy_bin_path from cluster: $HAPROXY_BIN"
+                    else
+                        HAPROXY_BIN=$(jq -r '.haproxy.bin_path' "$CONFIG_FILE" 2>/dev/null || echo "{{HAPROXY_BIN_PATH}}")
+                    fi
+                    
+                    if [[ -n "$api_config_path" && "$api_config_path" != "null" ]]; then
+                        HAPROXY_CONFIG="$api_config_path"
+                        log "DEBUG" "DAEMON: Using dynamic haproxy_config_path from cluster: $HAPROXY_CONFIG"
+                    else
+                        HAPROXY_CONFIG=$(jq -r '.haproxy.config_path' "$CONFIG_FILE" 2>/dev/null || echo "{{HAPROXY_CONFIG_PATH}}")
+                    fi
+                    
+                    if [[ -n "$api_socket_path" && "$api_socket_path" != "null" ]]; then
+                        STATS_SOCKET="$api_socket_path"
+                        log "DEBUG" "DAEMON: Using dynamic stats_socket_path from cluster: $STATS_SOCKET"
+                    else
+                        STATS_SOCKET=$(jq -r '.haproxy.stats_socket_path' "$CONFIG_FILE" 2>/dev/null || echo "{{STATS_SOCKET_PATH}}")
+                    fi
                     
                     # CRITICAL NEW FEATURE: Check if this is a partial config (only frontends/backends)
                     # Backend now generates partial configs to preserve global/defaults sections
