@@ -13,7 +13,7 @@ import {
   HistoryOutlined, ContainerOutlined
 } from '@ant-design/icons';
 import axios from 'axios';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useCluster } from '../contexts/ClusterContext';
 import { VersionHistory } from './VersionHistory';
 
@@ -60,6 +60,7 @@ const { Text, Title } = Typography;
 const BackendServers = () => {
   const { selectedCluster } = useCluster();
   const navigate = useNavigate();
+  const location = useLocation();
   const [backends, setBackends] = useState([]);
   const [frontends, setFrontends] = useState([]);
   const [sslCertificates, setSslCertificates] = useState([]);
@@ -126,6 +127,34 @@ const BackendServers = () => {
     fetchSSLCertificates();
     checkPendingChanges();
   }, [selectedCluster]);
+
+  // Handle URL parameters for quick edit navigation (from validation error modal)
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const editId = params.get('edit');
+    const highlightField = params.get('highlight');
+    
+    if (editId && backends.length > 0) {
+      const backendToEdit = backends.find(b => b.id === parseInt(editId));
+      if (backendToEdit) {
+        // Open edit modal for the backend
+        setEditingBackend(backendToEdit);
+        backendForm.setFieldsValue({
+          ...backendToEdit,
+          health_check_enabled: backendToEdit.health_check_enabled || false,
+        });
+        setBackendModalVisible(true);
+        
+        // Clear URL params after opening modal
+        navigate(location.pathname, { replace: true });
+        
+        // Show notification about which field to check
+        if (highlightField) {
+          message.info(`Please check the "${highlightField}" field - it may have caused a validation error.`, 5);
+        }
+      }
+    }
+  }, [location.search, backends]);
 
   const fetchBackends = async () => {
     // CRITICAL FIX: Don't fetch if no cluster selected to prevent race condition
