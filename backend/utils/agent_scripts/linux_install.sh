@@ -2824,6 +2824,28 @@ CONFIG_RESPONSE_EOF
                         log "ERROR" "DAEMON: Configuration content does not appear to be valid HAProxy config"
                         log "DEBUG" "DAEMON: Config preview: ${daemon_config_content:0:200}..."
                         config_is_valid=false
+                        
+                        # CRITICAL: Report this error to backend for UI display
+                        # This catches backend-side config generation errors (Python exceptions, etc.)
+                        config_error_preview="${daemon_config_content:0:500}"
+                        if [[ -n "$config_version" && "$config_version" != "$last_validation_failed_version" ]]; then
+                            log "INFO" "DAEMON: Reporting invalid config format to backend..."
+                            curl -k -s -X POST "$MANAGEMENT_URL/api/agents/$AGENT_NAME/config-validation-failed" \
+                                -H "Content-Type: application/json" \
+                                -H "X-API-Key: $CURRENT_AGENT_TOKEN" \
+                                -d "{\"status\": \"invalid_config_format\", \"version\": \"$config_version\", \"validation_error\": $(echo "Configuration does not appear to be valid HAProxy config. Content preview: $config_error_preview" | jq -Rs .)}" \
+                                >/dev/null 2>&1
+                            
+                            if [ $? -eq 0 ]; then
+                                log "INFO" "DAEMON: Invalid config notification sent to backend"
+                            else
+                                log "WARN" "DAEMON: Failed to send invalid config notification to backend"
+                            fi
+                            
+                            # Mark this version as validation failed to prevent repeated error logs
+                            # (same pattern as existing HAProxy validation failure at line ~3022)
+                            last_validation_failed_version="$config_version"
+                        fi
                     fi
                     
                     # Only process config if it's valid
