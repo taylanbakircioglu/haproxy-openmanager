@@ -996,6 +996,17 @@ async def agent_config_validation_failed(agent_name: str, notification_data: dic
         
         # Store validation error in config_versions table for UI display
         async with conn.transaction():
+            # CRITICAL DEBUG: Log exact version being searched
+            logger.info(f"VALIDATION-FAILED: Searching for version_name='{version}' in cluster_id={cluster_id}")
+            
+            # First, check what versions exist for this cluster (for debugging)
+            existing_versions = await conn.fetch("""
+                SELECT version_name, status, is_active FROM config_versions
+                WHERE cluster_id = $1 AND is_active = TRUE
+                ORDER BY created_at DESC LIMIT 3
+            """, cluster_id)
+            logger.info(f"VALIDATION-FAILED: Active versions in cluster: {[v['version_name'] for v in existing_versions]}")
+            
             # Update the config_version with validation error
             result = await conn.execute("""
                 UPDATE config_versions 
@@ -1004,6 +1015,23 @@ async def agent_config_validation_failed(agent_name: str, notification_data: dic
                     updated_at = CURRENT_TIMESTAMP
                 WHERE cluster_id = $2 AND version_name = $3
             """, validation_error, cluster_id, version)
+            
+            # CRITICAL: Check if UPDATE actually affected any rows
+            rows_affected = int(result.split()[-1]) if result else 0
+            if rows_affected == 0:
+                logger.error(f"VALIDATION-FAILED: UPDATE affected 0 rows! version_name '{version}' NOT FOUND in cluster {cluster_id}")
+                # Try to update the active version instead as fallback
+                fallback_result = await conn.execute("""
+                    UPDATE config_versions 
+                    SET validation_error = $1, 
+                        validation_error_reported_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE cluster_id = $2 AND is_active = TRUE
+                """, validation_error, cluster_id)
+                fallback_rows = int(fallback_result.split()[-1]) if fallback_result else 0
+                logger.info(f"VALIDATION-FAILED: Fallback UPDATE to active version affected {fallback_rows} rows")
+            else:
+                logger.info(f"VALIDATION-FAILED: UPDATE affected {rows_affected} rows for version '{version}'")
             
             # Also update agent status to indicate validation failure
             await conn.execute("""
