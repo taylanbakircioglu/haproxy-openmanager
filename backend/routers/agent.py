@@ -905,12 +905,35 @@ async def agent_config_applied_notification(agent_name: str, notification_data: 
                         return {"status": "error", "message": f"Agent {agent_name} not found"}
                     
                     # SIMPLIFIED: Direct UPDATE without column check (column should exist from migration)
+                    # ALSO: Clear last_validation_error when config is successfully applied
                     result = await conn.execute("""
-                        UPDATE agents SET applied_config_version = $1, updated_at = CURRENT_TIMESTAMP 
+                        UPDATE agents SET 
+                            applied_config_version = $1, 
+                            last_validation_error = NULL,
+                            last_validation_error_at = NULL,
+                            updated_at = CURRENT_TIMESTAMP 
                         WHERE name = $2
                     """, version, agent_name)
                     
                     logger.info(f"DEBUG: Database UPDATE result: {result}")
+                    
+                    # CRITICAL UX FIX: Clear validation_error on the config_version when successfully applied
+                    # This ensures UI doesn't show stale validation errors
+                    try:
+                        agent_cluster = await conn.fetchrow("""
+                            SELECT hc.id as cluster_id FROM agents a
+                            JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
+                            WHERE a.name = $1
+                        """, agent_name)
+                        if agent_cluster:
+                            await conn.execute("""
+                                UPDATE config_versions 
+                                SET validation_error = NULL, validation_error_reported_at = NULL
+                                WHERE cluster_id = $1 AND version_name = $2
+                            """, agent_cluster['cluster_id'], version)
+                            logger.info(f"CONFIG-APPLIED: Cleared validation error on version '{version}' after successful apply")
+                    except Exception as clear_err:
+                        logger.warning(f"CONFIG-APPLIED: Could not clear validation error: {clear_err}")
                     
                     # Verify the update was successful within the same transaction
                     updated_agent = await conn.fetchrow("SELECT applied_config_version FROM agents WHERE name = $1", agent_name)
@@ -1777,6 +1800,9 @@ async def get_agent_config(agent_name: str, x_api_key: Optional[str] = Header(No
                 "status": "no_cluster"
             }
         
+        # CRITICAL SECURITY: ONLY return APPLIED versions to agents
+        # NEVER return PENDING, REJECTED, or VALIDATION_FAILED versions
+        # Agents should only receive configurations that have been explicitly approved
         config_version = await conn.fetchrow("""
             SELECT version_name, config_content, checksum, is_active
             FROM config_versions 
@@ -1785,14 +1811,19 @@ async def get_agent_config(agent_name: str, x_api_key: Optional[str] = Header(No
             LIMIT 1
         """, cluster_id)
         
+        # CRITICAL: Fallback also MUST require status = 'APPLIED'
+        # Previous code had a security gap where fallback could return PENDING versions
         if not config_version:
             config_version = await conn.fetchrow("""
                 SELECT version_name, config_content, checksum, is_active
                 FROM config_versions 
-                WHERE cluster_id = $1 AND is_active = TRUE
+                WHERE cluster_id = $1 AND status = 'APPLIED'
                 ORDER BY created_at DESC
                 LIMIT 1
             """, cluster_id)
+            
+            if config_version:
+                logger.warning(f"GET CONFIG: Using inactive APPLIED version for cluster {cluster_id} (no active version found)")
         
         if not config_version:
             await close_database_connection(conn)

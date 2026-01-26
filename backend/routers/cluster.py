@@ -1349,12 +1349,18 @@ async def apply_pending_changes(
             # Global SSL: Tüm cluster'lar, Cluster-specific SSL: İlgili cluster'lar
             await apply_ssl_related_configs(conn, cluster_id)
             
-            # Mark all current active versions as inactive
+            # Mark all current active versions as inactive AND clear validation errors
+            # CRITICAL UX FIX: Clear validation_error when creating new version
+            # This ensures UI doesn't show stale validation errors from previous apply attempts
+            # Each Apply creates a fresh start - if validation fails again, agent will report new error
             await conn.execute("""
                 UPDATE config_versions 
-                SET is_active = FALSE 
+                SET is_active = FALSE,
+                    validation_error = NULL,
+                    validation_error_reported_at = NULL
                 WHERE cluster_id = $1 AND is_active = TRUE
             """, cluster_id)
+            logger.info(f"APPLY: Cleared validation errors from previous active versions for cluster {cluster_id}")
             
             # Determine config content to apply
             # Check if any pending version is a restore operation with existing config content
