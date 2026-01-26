@@ -176,6 +176,10 @@ cleanup_agent_data() {
         "/opt/homebrew/etc/haproxy-agent"
         "/usr/local/etc/haproxy-agent"
         "/var/lib/haproxy-agent"
+        "/usr/local/share/haproxy-agent"
+        "/usr/local/share/haproxy-agent-backups"
+        "/opt/homebrew/share/haproxy-agent"
+        "/opt/homebrew/share/haproxy-agent-backups"
     )
     
     for config_dir in "${config_dirs[@]}"; do
@@ -219,6 +223,13 @@ cleanup_temp_files() {
         "/tmp/agent-startup-with-config.sh"
         "/tmp/daemon-test-agent*.sh"
         "/var/tmp/haproxy-agent-*"
+        "/tmp/haproxy-failed-*.cfg"
+        "/tmp/haproxy_new_*.cfg"
+        "/tmp/haproxy-new-config.cfg"
+        "/tmp/haproxy-merged*.cfg"
+        "/tmp/haproxy-global*.cfg"
+        "/tmp/haproxy-defaults*.cfg"
+        "/tmp/haproxy-listen*.cfg"
     )
     
     for pattern in "${temp_patterns[@]}"; do
@@ -236,6 +247,27 @@ cleanup_temp_files() {
             fi
         else
             safe_remove "$pattern" "agent temp file ($(basename "$pattern"))"
+        fi
+    done
+    
+    # Clean up agent upgrade markers and PID files
+    echo "🧹 Cleaning up agent upgrade markers..."
+    local marker_patterns=(
+        "/tmp/haproxy-agent-upgrade-complete-*"
+        "/tmp/haproxy-agent-upgrade-test-*"
+        "/tmp/haproxy-agent-*.pid"
+    )
+    
+    for pattern in "${marker_patterns[@]}"; do
+        local marker_dir=$(dirname "$pattern")
+        local marker_name=$(basename "$pattern")
+        if [[ -d "$marker_dir" ]]; then
+            local found_markers=$(find "$marker_dir" -maxdepth 1 -name "$marker_name" -type f 2>/dev/null || true)
+            if [[ -n "$found_markers" ]]; then
+                while IFS= read -r marker; do
+                    [[ -f "$marker" ]] && safe_remove "$marker" "agent marker file ($marker)"
+                done <<< "$found_markers"
+            fi
         fi
     done
     
