@@ -650,6 +650,92 @@ async def generate_install_script(req_data: AgentScriptRequest, request: Request
         logger.error(f"Failed to generate install script: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate install script: {str(e)}")
 
+@router.get("/generate-uninstall-script/{platform}", summary="Generate Agent Uninstall Script", response_description="Uninstall script")
+async def generate_uninstall_script(platform: str, authorization: str = Header(None), x_api_key: Optional[str] = Header(None)):
+    """
+    # Generate Agent Uninstall Script
+    
+    Generate platform-specific uninstall script for completely removing agent from HAProxy servers.
+    This script removes ONLY agent-related files and services - HAProxy itself remains untouched.
+    
+    ## Path Parameters
+    - **platform**: Platform type: "macos" or "linux" (required)
+    
+    ## What Gets Removed
+    - Agent service (systemd/launchd)
+    - Agent binary (/usr/local/bin/haproxy-agent)
+    - Agent configuration (/etc/haproxy-agent)
+    - Agent logs (/var/log/haproxy-agent)
+    - Agent temp files and upgrade markers
+    - Agent backup files
+    
+    ## What Is NOT Touched
+    - HAProxy service
+    - HAProxy configuration (/etc/haproxy/haproxy.cfg)
+    - HAProxy logs
+    - Any other HAProxy-related files
+    
+    ## Example Request
+    ```bash
+    curl -X GET "{BASE_URL}/api/agents/generate-uninstall-script/linux" \\
+      -H "Authorization: Bearer eyJhbGciOiJIUz..."
+    ```
+    
+    ## Usage on Remote Server
+    ```bash
+    # Save the script
+    curl -o uninstall-agent.sh "{BASE_URL}/api/agents/generate-uninstall-script/linux"
+    chmod +x uninstall-agent.sh
+    sudo ./uninstall-agent.sh
+    ```
+    """
+    try:
+        # Validate platform
+        platform_lower = platform.lower()
+        if platform_lower not in ['linux', 'macos']:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid platform: {platform}. Must be 'linux' or 'macos'"
+            )
+        
+        # Read uninstall script from utils directory
+        import os
+        script_filename = f"uninstall-agent-{platform_lower}.sh"
+        
+        # Try multiple possible paths
+        possible_paths = [
+            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "utils", script_filename),
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "utils", script_filename),
+            f"/app/utils/{script_filename}",
+        ]
+        
+        script_content = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                with open(path, 'r') as f:
+                    script_content = f.read()
+                break
+        
+        if not script_content:
+            logger.error(f"Uninstall script not found for platform: {platform_lower}")
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Uninstall script not found for platform: {platform_lower}"
+            )
+        
+        return {
+            "platform": platform_lower,
+            "script": script_content,
+            "filename": script_filename,
+            "usage": f"chmod +x {script_filename} && sudo ./{script_filename}"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to generate uninstall script: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate uninstall script: {str(e)}")
+
 @router.delete("/{agent_id}", summary="Delete Agent", response_description="Agent deleted successfully")
 async def delete_agent(agent_id: int, authorization: str = Header(None)):
     """

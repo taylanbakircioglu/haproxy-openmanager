@@ -157,7 +157,15 @@ const AgentManagement = () => {
   const [poolClusters, setPoolClusters] = useState([]);
   const [selectedClusterId, setSelectedClusterId] = useState(null);
   const [installScript, setInstallScript] = useState('');
+  const [uninstallScript, setUninstallScript] = useState('');
   const [scriptGenerating, setScriptGenerating] = useState(false);
+  
+  // Delete Agent Modal state
+  const [deleteModalVisible, setDeleteModalVisible] = useState(false);
+  const [agentToDelete, setAgentToDelete] = useState(null);
+  const [deleteUninstallScript, setDeleteUninstallScript] = useState('');
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleting, setDeleting] = useState(false);
   
   // Pools state for the setup wizard
   const [supportedPlatforms, setSupportedPlatforms] = useState({});
@@ -457,6 +465,20 @@ const AgentManagement = () => {
       });
       
       setInstallScript(response.data.script);
+      
+      // Also fetch uninstall script for this platform
+      try {
+        const uninstallResponse = await axios.get(`/api/agents/generate-uninstall-script/${selectedPlatform}`, {
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('authToken') || ''}`,
+          },
+        });
+        setUninstallScript(uninstallResponse.data.script);
+      } catch (uninstallError) {
+        console.warn('Failed to fetch uninstall script:', uninstallError);
+        setUninstallScript(''); // Clear on error
+      }
+      
       setCurrentStep(3); // Move to script step
       
       notification.success({
@@ -488,6 +510,7 @@ const AgentManagement = () => {
     setPoolClusters([]);
     setSelectedClusterId(null);
     setInstallScript('');
+    setUninstallScript('');
   };
 
   // Generate random hostname
@@ -529,9 +552,42 @@ const AgentManagement = () => {
     }
   };
 
+  // Open delete agent modal with uninstall script
+  const openDeleteModal = async (agent) => {
+    setAgentToDelete(agent);
+    setDeleteConfirmText('');
+    setDeleteModalVisible(true);
+    
+    // Fetch uninstall script for agent's platform
+    const platform = agent.platform || 'linux';
+    try {
+      const response = await axios.get(`/api/agents/generate-uninstall-script/${platform}`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('authToken') || ''}`,
+        },
+      });
+      setDeleteUninstallScript(response.data.script);
+    } catch (error) {
+      console.warn('Failed to fetch uninstall script:', error);
+      setDeleteUninstallScript('');
+    }
+  };
+
+  // Close delete modal
+  const closeDeleteModal = () => {
+    setDeleteModalVisible(false);
+    setAgentToDelete(null);
+    setDeleteUninstallScript('');
+    setDeleteConfirmText('');
+  };
+
   // Enhanced delete agent
-  const deleteAgent = async (agentId, agentName) => {
-    const hide = message.loading(`Deleting agent ${agentName}...`);
+  const deleteAgent = async () => {
+    if (!agentToDelete) return;
+    
+    const { id: agentId, name: agentName } = agentToDelete;
+    setDeleting(true);
+    
     try {
       // Optimistic update: Remove agent from local state immediately
       const updatedAgents = agents.filter(agent => agent.id !== agentId);
@@ -547,9 +603,11 @@ const AgentManagement = () => {
       
       notification.success({
         message: 'Agent Deleted',
-        description: `Agent "${agentName}" has been successfully removed.`,
+        description: `Agent "${agentName}" has been successfully removed from the system.`,
         duration: 4
       });
+      
+      closeDeleteModal();
       
       // Refresh from server to ensure consistency (force=true to bypass throttling)
       await fetchAgents(true);
@@ -564,7 +622,7 @@ const AgentManagement = () => {
       // Revert optimistic update on error (force=true to bypass throttling)
       await fetchAgents(true);
     } finally {
-      hide();
+      setDeleting(false);
     }
   };
 
@@ -1346,24 +1404,15 @@ const AgentManagement = () => {
               onClick={() => showAgentDetails(record)}
             />
           </Tooltip>
-          <Popconfirm
-            title={`Delete Agent "${record.name}"?`}
-            description="This action cannot be undone. The agent will need to be reinstalled."
-            onConfirm={() => deleteAgent(record.id, record.name)}
-            okText="Delete"
-            cancelText="Cancel"
-            okButtonProps={{ danger: true }}
-            icon={<ExclamationCircleOutlined style={{ color: 'red' }} />}
-          >
-            <Tooltip title="Delete Agent">
-              <Button
-                type="primary"
-                danger
-                size="small"
-                icon={<DeleteOutlined />}
-              />
-            </Tooltip>
-          </Popconfirm>
+          <Tooltip title="Delete Agent">
+            <Button
+              type="primary"
+              danger
+              size="small"
+              icon={<DeleteOutlined />}
+              onClick={() => openDeleteModal(record)}
+            />
+          </Tooltip>
         </Space>
       ),
       width: 220,
@@ -2164,15 +2213,112 @@ const AgentManagement = () => {
                 Copy and run the script below on your target server with root/administrator privileges.
               </Paragraph>
               
-              <Alert
-                message="Installation Script Ready"
-                description={`Script generated for ${agentName} on a server with prefix '${hostnamePrefix}' (${platformConfig[selectedPlatform].name})`}
-                type="success"
-                showIcon
-                style={{ marginBottom: '24px' }}
-              />
+              {/* Success Banner */}
+              <div style={{ 
+                background: 'linear-gradient(135deg, #f6ffed 0%, #d9f7be 100%)',
+                border: '1px solid #b7eb8f',
+                borderRadius: '12px',
+                padding: '20px',
+                marginBottom: '24px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '16px'
+              }}>
+                <div style={{ 
+                  width: '48px', 
+                  height: '48px', 
+                  borderRadius: '12px', 
+                  background: 'linear-gradient(135deg, #73d13d 0%, #52c41a 100%)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  boxShadow: '0 4px 12px rgba(82, 196, 26, 0.3)'
+                }}>
+                  <CheckCircleOutlined style={{ color: '#fff', fontSize: '24px' }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <Text strong style={{ fontSize: '16px', color: '#389e0d', display: 'block' }}>
+                    Installation Script Ready
+                  </Text>
+                  <Text type="secondary">
+                    {agentName} • {hostnamePrefix} • {platformConfig[selectedPlatform].name}
+                  </Text>
+                </div>
+                <Tag color="success" style={{ fontSize: '12px' }}>Ready to deploy</Tag>
+              </div>
 
-              <div style={{ position: 'relative', marginBottom: '24px' }}>
+              {/* Install Script Box */}
+              <div style={{ 
+                borderRadius: '12px',
+                overflow: 'hidden',
+                border: '1px solid #d9d9d9',
+                marginBottom: '24px',
+                boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)'
+              }}>
+                {/* Header Bar */}
+                <div style={{ 
+                  background: 'linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%)',
+                  borderBottom: '1px solid #d9d9d9',
+                  padding: '12px 16px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between'
+                }}>
+                  <Space size={8}>
+                    <div style={{ 
+                      width: '28px', 
+                      height: '28px', 
+                      borderRadius: '6px', 
+                      background: selectedPlatform === 'macos' 
+                        ? 'linear-gradient(135deg, #8c8c8c 0%, #595959 100%)'
+                        : 'linear-gradient(135deg, #ffc53d 0%, #faad14 100%)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center'
+                    }}>
+                      {selectedPlatform === 'macos' 
+                        ? <AppleOutlined style={{ color: '#fff', fontSize: '14px' }} />
+                        : <LinuxOutlined style={{ color: '#fff', fontSize: '14px' }} />
+                      }
+                    </div>
+                    <div>
+                      <Text strong style={{ fontSize: '13px' }}>install-haproxy-agent.sh</Text>
+                      <Text type="secondary" style={{ fontSize: '11px', display: 'block' }}>
+                        Run with sudo on target server
+                      </Text>
+                    </div>
+                  </Space>
+                  <Space size={8}>
+                    <Button
+                      size="small"
+                      type="text"
+                      icon={<CopyOutlined />}
+                      onClick={() => {
+                        navigator.clipboard.writeText(installScript);
+                        message.success('Script copied to clipboard');
+                      }}
+                    >
+                      Copy
+                    </Button>
+                    <Button
+                      size="small"
+                      type="primary"
+                      icon={<DownloadOutlined />}
+                      onClick={() => {
+                        const element = document.createElement('a');
+                        const file = new Blob([installScript], { type: 'text/plain' });
+                        element.href = URL.createObjectURL(file);
+                        element.download = `install-haproxy-agent-${selectedPlatform}.sh`;
+                        document.body.appendChild(element);
+                        element.click();
+                        document.body.removeChild(element);
+                        message.success('Script downloaded');
+                      }}
+                    >
+                      Download
+                    </Button>
+                  </Space>
+                </div>
                 <TextArea
                   value={installScript}
                   rows={12}
@@ -2180,26 +2326,157 @@ const AgentManagement = () => {
                   style={{ 
                     fontFamily: 'Monaco, Menlo, "Ubuntu Mono", monospace', 
                     fontSize: '12px',
-                    lineHeight: '1.4'
+                    lineHeight: '1.5',
+                    border: 'none',
+                    borderRadius: '0',
+                    resize: 'none'
                   }}
                 />
-                <Button
-                  size="small"
-                  icon={<CopyOutlined />}
-                  style={{ 
-                    position: 'absolute', 
-                    top: '8px', 
-                    right: '8px', 
-                    zIndex: 1 
-                  }}
-                  onClick={() => {
-                    navigator.clipboard.writeText(installScript);
-                    message.success('Script copied to clipboard');
-                  }}
-                >
-                  Copy
-                </Button>
               </div>
+
+              {/* Uninstall Script Section - Collapsible Card */}
+              {uninstallScript && (
+                <Collapse 
+                  style={{ marginBottom: '24px' }}
+                  expandIconPosition="end"
+                  items={[
+                    {
+                      key: 'uninstall',
+                      label: (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                          <div style={{ 
+                            width: '32px', 
+                            height: '32px', 
+                            borderRadius: '8px', 
+                            background: 'linear-gradient(135deg, #ff7875 0%, #ff4d4f 100%)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            boxShadow: '0 2px 8px rgba(255, 77, 79, 0.3)'
+                          }}>
+                            <DeleteOutlined style={{ color: '#fff', fontSize: '16px' }} />
+                          </div>
+                          <div>
+                            <Text strong style={{ fontSize: '14px' }}>Uninstall Script</Text>
+                            <div style={{ fontSize: '12px', color: '#8c8c8c' }}>
+                              Remove agent from server (keeps HAProxy intact)
+                            </div>
+                          </div>
+                          <Tag color="volcano" style={{ marginLeft: 'auto', marginRight: '8px' }}>Optional</Tag>
+                        </div>
+                      ),
+                      children: (
+                        <div>
+                          {/* Info Card */}
+                          <div style={{ 
+                            background: 'linear-gradient(135deg, #fffbe6 0%, #fff7e6 100%)',
+                            border: '1px solid #ffe58f',
+                            borderRadius: '8px',
+                            padding: '16px',
+                            marginBottom: '16px'
+                          }}>
+                            <div style={{ display: 'flex', gap: '12px' }}>
+                              <WarningOutlined style={{ color: '#faad14', fontSize: '20px', marginTop: '2px' }} />
+                              <div>
+                                <Text strong style={{ color: '#ad6800', display: 'block', marginBottom: '8px' }}>
+                                  What this script does
+                                </Text>
+                                <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap' }}>
+                                  <div>
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>Removes:</Text>
+                                    <ul style={{ margin: '4px 0 0 0', paddingLeft: '16px', fontSize: '13px' }}>
+                                      <li>Agent service & daemon</li>
+                                      <li>Agent binary & config</li>
+                                      <li>Logs & temp files</li>
+                                    </ul>
+                                  </div>
+                                  <div>
+                                    <Text type="secondary" style={{ fontSize: '12px' }}>Keeps intact:</Text>
+                                    <ul style={{ margin: '4px 0 0 0', paddingLeft: '16px', fontSize: '13px', color: '#52c41a' }}>
+                                      <li>HAProxy service</li>
+                                      <li>HAProxy configuration</li>
+                                      <li>HAProxy logs</li>
+                                    </ul>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Script Box */}
+                          <div style={{ 
+                            position: 'relative',
+                            borderRadius: '8px',
+                            overflow: 'hidden',
+                            border: '1px solid #f0f0f0'
+                          }}>
+                            {/* Header Bar */}
+                            <div style={{ 
+                              background: '#fafafa',
+                              borderBottom: '1px solid #f0f0f0',
+                              padding: '8px 12px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between'
+                            }}>
+                              <Space size={4}>
+                                <CodeOutlined style={{ color: '#8c8c8c' }} />
+                                <Text type="secondary" style={{ fontSize: '12px' }}>
+                                  uninstall-haproxy-agent-{selectedPlatform}.sh
+                                </Text>
+                              </Space>
+                              <Space size={8}>
+                                <Button
+                                  size="small"
+                                  type="text"
+                                  icon={<CopyOutlined />}
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(uninstallScript);
+                                    message.success('Uninstall script copied to clipboard');
+                                  }}
+                                >
+                                  Copy
+                                </Button>
+                                <Button
+                                  size="small"
+                                  type="primary"
+                                  ghost
+                                  icon={<DownloadOutlined />}
+                                  onClick={() => {
+                                    const element = document.createElement('a');
+                                    const file = new Blob([uninstallScript], { type: 'text/plain' });
+                                    element.href = URL.createObjectURL(file);
+                                    element.download = `uninstall-haproxy-agent-${selectedPlatform}.sh`;
+                                    document.body.appendChild(element);
+                                    element.click();
+                                    document.body.removeChild(element);
+                                    message.success('Uninstall script downloaded');
+                                  }}
+                                >
+                                  Download
+                                </Button>
+                              </Space>
+                            </div>
+                            <TextArea
+                              value={uninstallScript}
+                              rows={8}
+                              readOnly
+                              style={{ 
+                                fontFamily: 'Monaco, Menlo, "Ubuntu Mono", monospace', 
+                                fontSize: '11px',
+                                lineHeight: '1.5',
+                                border: 'none',
+                                borderRadius: '0',
+                                resize: 'none'
+                              }}
+                            />
+                          </div>
+                        </div>
+                      )
+                    }
+                  ]}
+                />
+              )}
 
               <div style={{ marginBottom: '24px' }}>
                 <Title level={5}>Next Steps:</Title>
@@ -2222,33 +2499,17 @@ const AgentManagement = () => {
               </div>
 
               <div style={{ textAlign: 'right' }}>
-                <Space>
-                  <Button
-                    type="default"
-                    icon={<DownloadOutlined />}
-                    onClick={() => {
-                      const element = document.createElement('a');
-                      const file = new Blob([installScript], { type: 'text/plain' });
-                      element.href = URL.createObjectURL(file);
-                      element.download = `install-haproxy-agent-${selectedPlatform}.sh`;
-                      document.body.appendChild(element);
-                      element.click();
-                      document.body.removeChild(element);
-                      message.success('Script downloaded successfully');
-                    }}
-                  >
-                    Download Script
-                  </Button>
-                  <Button 
-                    type="primary" 
-                    onClick={() => {
-                      setSetupModalVisible(false);
-                      fetchAgents(true); // Refresh agents list
-                    }}
-                  >
-                    Finish Setup
-                  </Button>
-                </Space>
+                <Button 
+                  type="primary" 
+                  size="large"
+                  icon={<CheckCircleOutlined />}
+                  onClick={() => {
+                    setSetupModalVisible(false);
+                    fetchAgents(true); // Refresh agents list
+                  }}
+                >
+                  Finish Setup
+                </Button>
               </div>
             </div>
           )}
@@ -2693,6 +2954,228 @@ const AgentManagement = () => {
                   );
                 })}
               </Timeline>
+            </div>
+          )}
+        </Modal>
+
+        {/* Delete Agent Modal */}
+        <Modal
+          title={null}
+          open={deleteModalVisible}
+          onCancel={closeDeleteModal}
+          footer={null}
+          width={700}
+          destroyOnClose
+        >
+          {agentToDelete && (
+            <div>
+              {/* Header */}
+              <div style={{ 
+                display: 'flex', 
+                alignItems: 'center', 
+                gap: '16px',
+                marginBottom: '24px',
+                paddingBottom: '16px',
+                borderBottom: '1px solid #f0f0f0'
+              }}>
+                <div style={{ 
+                  width: '56px', 
+                  height: '56px', 
+                  borderRadius: '12px', 
+                  background: 'linear-gradient(135deg, #ff7875 0%, #ff4d4f 100%)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  boxShadow: '0 4px 12px rgba(255, 77, 79, 0.3)'
+                }}>
+                  <DeleteOutlined style={{ color: '#fff', fontSize: '28px' }} />
+                </div>
+                <div>
+                  <Title level={4} style={{ margin: 0, color: '#cf1322' }}>
+                    Delete Agent: {agentToDelete.name}
+                  </Title>
+                  <Text type="secondary">
+                    {agentToDelete.hostname || 'Unknown host'} • {agentToDelete.platform === 'macos' ? 'macOS' : 'Linux'}
+                  </Text>
+                </div>
+              </div>
+
+              {/* Step 1: Uninstall from Server */}
+              <div style={{ 
+                background: 'linear-gradient(135deg, #fff7e6 0%, #fffbe6 100%)',
+                border: '1px solid #ffd591',
+                borderRadius: '12px',
+                padding: '20px',
+                marginBottom: '20px'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+                  <div style={{ 
+                    width: '28px', 
+                    height: '28px', 
+                    borderRadius: '50%', 
+                    background: '#fa8c16',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: '#fff',
+                    fontWeight: 'bold',
+                    fontSize: '14px',
+                    flexShrink: 0
+                  }}>1</div>
+                  <div style={{ flex: 1 }}>
+                    <Text strong style={{ fontSize: '15px', color: '#ad4e00', display: 'block', marginBottom: '8px' }}>
+                      First, remove agent from the server (optional but recommended)
+                    </Text>
+                    <Paragraph style={{ margin: 0, color: '#8c8c8c', fontSize: '13px' }}>
+                      Run the uninstall script on <Text code>{agentToDelete.hostname || 'the server'}</Text> to cleanly remove the agent service and files.
+                      HAProxy will continue running normally. Skip this step if the server is no longer accessible.
+                    </Paragraph>
+                  </div>
+                </div>
+              </div>
+
+              {/* Uninstall Script */}
+              {deleteUninstallScript ? (
+                <div style={{ 
+                  borderRadius: '10px',
+                  overflow: 'hidden',
+                  border: '1px solid #d9d9d9',
+                  marginBottom: '20px'
+                }}>
+                  <div style={{ 
+                    background: '#fafafa',
+                    borderBottom: '1px solid #d9d9d9',
+                    padding: '10px 14px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between'
+                  }}>
+                    <Space size={8}>
+                      <CodeOutlined style={{ color: '#8c8c8c' }} />
+                      <Text type="secondary" style={{ fontSize: '12px' }}>
+                        uninstall-haproxy-agent-{agentToDelete.platform || 'linux'}.sh
+                      </Text>
+                    </Space>
+                    <Space size={8}>
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<CopyOutlined />}
+                        onClick={() => {
+                          navigator.clipboard.writeText(deleteUninstallScript);
+                          message.success('Uninstall script copied');
+                        }}
+                      >
+                        Copy
+                      </Button>
+                      <Button
+                        size="small"
+                        type="primary"
+                        ghost
+                        icon={<DownloadOutlined />}
+                        onClick={() => {
+                          const element = document.createElement('a');
+                          const file = new Blob([deleteUninstallScript], { type: 'text/plain' });
+                          element.href = URL.createObjectURL(file);
+                          element.download = `uninstall-haproxy-agent-${agentToDelete.platform || 'linux'}.sh`;
+                          document.body.appendChild(element);
+                          element.click();
+                          document.body.removeChild(element);
+                          message.success('Script downloaded');
+                        }}
+                      >
+                        Download
+                      </Button>
+                    </Space>
+                  </div>
+                  <TextArea
+                    value={deleteUninstallScript}
+                    rows={6}
+                    readOnly
+                    style={{ 
+                      fontFamily: 'Monaco, Menlo, "Ubuntu Mono", monospace', 
+                      fontSize: '11px',
+                      lineHeight: '1.4',
+                      border: 'none',
+                      borderRadius: '0',
+                      resize: 'none'
+                    }}
+                  />
+                </div>
+              ) : (
+                <div style={{ 
+                  background: '#f5f5f5', 
+                  padding: '16px', 
+                  borderRadius: '8px',
+                  marginBottom: '20px',
+                  textAlign: 'center'
+                }}>
+                  <Spin size="small" /> <Text type="secondary" style={{ marginLeft: '8px' }}>Loading uninstall script...</Text>
+                </div>
+              )}
+
+              {/* Step 2: Delete from System */}
+              <div style={{ 
+                background: 'linear-gradient(135deg, #fff1f0 0%, #ffccc7 100%)',
+                border: '1px solid #ffa39e',
+                borderRadius: '12px',
+                padding: '20px',
+                marginBottom: '20px'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+                  <div style={{ 
+                    width: '28px', 
+                    height: '28px', 
+                    borderRadius: '50%', 
+                    background: '#ff4d4f',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: '#fff',
+                    fontWeight: 'bold',
+                    fontSize: '14px',
+                    flexShrink: 0
+                  }}>2</div>
+                  <div style={{ flex: 1 }}>
+                    <Text strong style={{ fontSize: '15px', color: '#a8071a', display: 'block', marginBottom: '8px' }}>
+                      Then, delete agent from this system
+                    </Text>
+                    <Paragraph style={{ margin: 0, color: '#8c8c8c', fontSize: '13px' }}>
+                      This will remove the agent record from the database. The agent will no longer appear in the management console.
+                    </Paragraph>
+                  </div>
+                </div>
+              </div>
+
+              {/* Confirmation Input */}
+              <div style={{ marginBottom: '20px' }}>
+                <Text style={{ display: 'block', marginBottom: '8px' }}>
+                  Type <Text code strong>{agentToDelete.name}</Text> to confirm deletion:
+                </Text>
+                <Input
+                  value={deleteConfirmText}
+                  onChange={(e) => setDeleteConfirmText(e.target.value)}
+                  placeholder={`Type "${agentToDelete.name}" to confirm`}
+                  style={{ maxWidth: '300px' }}
+                />
+              </div>
+
+              {/* Action Buttons */}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
+                <Button onClick={closeDeleteModal}>
+                  Cancel
+                </Button>
+                <Button
+                  type="primary"
+                  danger
+                  icon={<DeleteOutlined />}
+                  loading={deleting}
+                  disabled={deleteConfirmText !== agentToDelete.name}
+                  onClick={deleteAgent}
+                >
+                  Delete Agent
+                </Button>
+              </div>
             </div>
           )}
         </Modal>
