@@ -563,10 +563,35 @@ class HAProxyConfigParser:
                 if mode_match:
                     backend.mode = mode_match.group(1).lower()
 
-                # Parse balance method
+                # Parse balance method with validation
                 balance_match = re.match(r'^balance\s+(\S+)', line, re.IGNORECASE)
                 if balance_match:
-                    backend.balance_method = balance_match.group(1)
+                    balance_value = balance_match.group(1).lower()
+                    
+                    # HAProxy supported balance algorithms
+                    supported_balance_methods = [
+                        'roundrobin',    # Each server used in turn
+                        'static-rr',     # Static round-robin (no dynamic weight)
+                        'leastconn',     # Server with least connections
+                        'first',         # First server with available slots
+                        'source',        # Based on source IP hash
+                        'uri',           # Based on URI hash
+                        'url_param',     # Based on URL parameter
+                        'hdr',           # Based on HTTP header
+                        'random',        # Random server selection (HAProxy 1.9+)
+                        'rdp-cookie',    # Based on RDP cookie
+                    ]
+                    
+                    if balance_value in supported_balance_methods:
+                        backend.balance_method = balance_value
+                    else:
+                        # Unknown balance method - use default and warn
+                        self.warnings.append(
+                            f"Backend '{name}': Unknown balance method '{balance_value}' detected. "
+                            f"Supported methods: {', '.join(supported_balance_methods)}. "
+                            f"Using default 'roundrobin' instead."
+                        )
+                        backend.balance_method = 'roundrobin'
 
                 # Parse timeout directives
                 timeout_connect_match = re.match(r'^timeout\s+connect\s+(\d+)(ms|s|m|h)?', line, re.IGNORECASE)

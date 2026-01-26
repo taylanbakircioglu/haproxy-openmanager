@@ -1614,6 +1614,8 @@ const BackendServers = () => {
                   <Option value="source">Source IP</Option>
                   <Option value="uri">URI</Option>
                   <Option value="static-rr">Static Round Robin</Option>
+                  <Option value="random">Random</Option>
+                  <Option value="first">First Available</Option>
                 </Select>
               </Form.Item>
             </Col>

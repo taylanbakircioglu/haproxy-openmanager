@@ -193,10 +193,13 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
     ```
     
     ## Load Balancing Methods
-    - **roundrobin**: Each server used in turn
+    - **roundrobin**: Each server used in turn (default)
     - **leastconn**: Server with least connections
     - **source**: Based on source IP hash
     - **uri**: Based on URI hash
+    - **static-rr**: Static round-robin (no dynamic weight)
+    - **random**: Random server selection (HAProxy 1.9+)
+    - **first**: First server with available slots
     """
     try:
         conn = await get_database_connection()
