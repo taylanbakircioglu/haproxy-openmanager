@@ -1217,7 +1217,41 @@ async def agent_heartbeat_by_name(
             logger.warning(f"Invalid API key provided by agent '{agent_name}'")
             raise HTTPException(status_code=401, detail="Invalid API key")
 
-        agent = await conn.fetchrow("SELECT id, pool_id FROM agents WHERE name = $1", agent_name)
+        agent = await conn.fetchrow("SELECT id, pool_id, api_key FROM agents WHERE name = $1", agent_name)
+        
+        # If agent exists and is using a different API key, update the token association
+        # This handles: 1) agent switching to different token, 2) agent getting token for first time
+        current_agent_api_key = agent['api_key'] if agent else None
+        if agent and x_api_key and agent_auth and current_agent_api_key != x_api_key:
+            # Get token info from the new API key (from placeholder or another agent)
+            token_info = await conn.fetchrow("""
+                SELECT api_key_name, api_key_created_at, api_key_expires_at, api_key_created_by
+                FROM agents WHERE api_key = $1 LIMIT 1
+            """, x_api_key)
+            
+            if token_info:
+                # Update agent's token association
+                await conn.execute("""
+                    UPDATE agents SET 
+                        api_key = $1,
+                        api_key_name = $2,
+                        api_key_created_at = $3,
+                        api_key_expires_at = $4,
+                        api_key_created_by = $5,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $6
+                """, x_api_key, token_info['api_key_name'], token_info['api_key_created_at'],
+                     token_info['api_key_expires_at'], token_info['api_key_created_by'], agent['id'])
+                logger.info(f"TOKEN UPDATE: Agent '{agent_name}' token updated to '{token_info['api_key_name']}' (previously used different token)")
+            else:
+                # Token not found in system, just update the api_key
+                await conn.execute("""
+                    UPDATE agents SET 
+                        api_key = $1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $2
+                """, x_api_key, agent['id'])
+                logger.info(f"TOKEN UPDATE: Agent '{agent_name}' api_key updated (token info not found)")
         
         if not agent and x_api_key and agent_auth:
             # Check if there's a placeholder agent with this API key

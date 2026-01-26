@@ -132,7 +132,7 @@ const Security = () => {
         } else {
           return (
             <Space>
-              <Badge count={agent_count} size="small">
+              <Badge count={agent_count} size="small" color="#1890ff">
                 <SecurityScanOutlined style={{ color: '#1890ff', fontSize: '16px' }} />
               </Badge>
               <Tooltip title={`Agents: ${agent_names?.join(', ')}`}>
