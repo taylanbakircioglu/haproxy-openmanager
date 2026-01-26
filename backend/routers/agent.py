@@ -698,26 +698,34 @@ async def generate_uninstall_script(platform: str, authorization: str = Header(N
                 detail=f"Invalid platform: {platform}. Must be 'linux' or 'macos'"
             )
         
-        # Read uninstall script from utils directory
+        # Read uninstall script from agent_scripts directory (same as install scripts)
         import os
         script_filename = f"uninstall-agent-{platform_lower}.sh"
         
-        # Try multiple possible paths
+        # Try multiple possible paths - prioritize agent_scripts directory
         possible_paths = [
+            # Primary: Same directory as install scripts
+            os.path.join(os.path.dirname(__file__), "..", "utils", "agent_scripts", script_filename),
+            # Container path
+            f"/app/backend/utils/agent_scripts/{script_filename}",
+            f"/app/utils/agent_scripts/{script_filename}",
+            # Fallback: Legacy utils directory at project root
             os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "utils", script_filename),
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), "utils", script_filename),
-            f"/app/utils/{script_filename}",
         ]
         
         script_content = None
+        script_path_used = None
         for path in possible_paths:
-            if os.path.exists(path):
-                with open(path, 'r') as f:
+            normalized_path = os.path.normpath(path)
+            if os.path.exists(normalized_path):
+                with open(normalized_path, 'r') as f:
                     script_content = f.read()
+                script_path_used = normalized_path
+                logger.info(f"Uninstall script found at: {normalized_path}")
                 break
         
         if not script_content:
-            logger.error(f"Uninstall script not found for platform: {platform_lower}")
+            logger.error(f"Uninstall script not found for platform: {platform_lower}. Searched paths: {possible_paths}")
             raise HTTPException(
                 status_code=404, 
                 detail=f"Uninstall script not found for platform: {platform_lower}"
