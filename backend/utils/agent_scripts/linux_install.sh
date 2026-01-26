@@ -1715,8 +1715,10 @@ check_config_updates() {
         
         # Extract global and defaults sections from current haproxy.cfg
         if [[ -f "$HAPROXY_CONFIG_PATH" ]]; then
-            # Extract global section (everything from start until 'defaults' keyword)
-            awk '/^defaults[[:space:]]*$/{exit} {print}' "$HAPROXY_CONFIG_PATH" > /tmp/haproxy-global-$$.cfg 2>/dev/null
+            # Extract global section only (from start until any section: defaults/listen/frontend/backend)
+            # CRITICAL FIX: Stop at ANY section header, not just 'defaults'
+            # This prevents including 'listen stats' in global when it comes before defaults
+            awk '/^(defaults|listen|frontend|backend)[[:space:]]/{exit} {print}' "$HAPROXY_CONFIG_PATH" > /tmp/haproxy-global-$$.cfg 2>/dev/null
             
             # Extract defaults section (from 'defaults' until first 'frontend/backend/listen')
             awk '/^defaults[[:space:]]*$/{flag=1} /^(frontend|backend|listen)[[:space:]]/{if(flag && !/^defaults/) exit} flag{print}' "$HAPROXY_CONFIG_PATH" > /tmp/haproxy-defaults-$$.cfg 2>/dev/null
@@ -2890,8 +2892,10 @@ CONFIG_RESPONSE_EOF
                         
                         # Extract global section from current haproxy.cfg
                         if [[ -f "$HAPROXY_CONFIG" ]]; then
-                            # Extract everything from start until 'defaults' section
-                            awk '/^defaults[[:space:]]*$/{exit} {print}' "$HAPROXY_CONFIG" > /tmp/haproxy-global.cfg 2>/dev/null
+                            # Extract global section only (from 'global' until any other section: defaults/listen/frontend/backend)
+                            # CRITICAL FIX: Stop at ANY section header, not just 'defaults'
+                            # This prevents including 'listen stats' in global when it comes before defaults
+                            awk '/^(defaults|listen|frontend|backend)[[:space:]]/{exit} {print}' "$HAPROXY_CONFIG" > /tmp/haproxy-global.cfg 2>/dev/null
                             
                             # Extract defaults section (from 'defaults' to first 'frontend/backend/listen')
                             # CRITICAL FIX: Exit BEFORE printing the frontend/backend/listen line
