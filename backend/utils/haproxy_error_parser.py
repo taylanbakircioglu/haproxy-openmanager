@@ -56,16 +56,16 @@ ERROR_TYPE_FIELD_HINTS = {
 
 # Suggestion templates for each error type
 SUGGESTION_TEMPLATES = {
-    ErrorType.UNKNOWN_BACKEND: "Backend '{related_entity}' bulunamadı. Bu backend'i oluşturun veya '{entity_name}' frontend'indeki use_backend/default_backend kurallarını düzeltin.",
-    ErrorType.UNKNOWN_FRONTEND: "Frontend '{related_entity}' bulunamadı. Bu frontend'i oluşturun veya referansı düzeltin.",
-    ErrorType.DUPLICATE_NAME: "'{entity_name}' ismi zaten kullanılıyor (muhtemelen agent'ın local listen block'u). Farklı bir isim seçin.",
-    ErrorType.MODE_MISMATCH: "'{entity_name}' frontend'inin mode'u ({mode}) backend ile uyumsuz. Frontend veya backend mode'unu değiştirin.",
-    ErrorType.INVALID_KEYWORD: "'{keyword}' keyword'ü {mode} mode'da geçersiz. HTTP mode için http-request, TCP mode için tcp-request kullanın.",
-    ErrorType.SYNTAX_ERROR: "Syntax hatası tespit edildi. İlgili satırı kontrol edin.",
-    ErrorType.MISSING_SERVER: "'{entity_name}' backend'inde en az bir server tanımlı olmalı.",
-    ErrorType.ACL_ERROR: "ACL tanımında hata var. Doğru format: 'acl name condition value'",
-    ErrorType.BIND_ERROR: "Port {port} zaten kullanımda veya erişilemez. Farklı bir port deneyin.",
-    ErrorType.UNKNOWN: "Lütfen ham hata mesajını inceleyin ve ilgili entity'yi kontrol edin.",
+    ErrorType.UNKNOWN_BACKEND: "Backend '{related_entity}' not found. Create this backend or fix the use_backend/default_backend rules in frontend '{entity_name}'.",
+    ErrorType.UNKNOWN_FRONTEND: "Frontend '{related_entity}' not found. Create this frontend or fix the reference.",
+    ErrorType.DUPLICATE_NAME: "Name '{entity_name}' is already in use (possibly by agent's local listen block). Choose a different name.",
+    ErrorType.MODE_MISMATCH: "Frontend '{entity_name}' mode ({mode}) is incompatible with the backend. Change the frontend or backend mode.",
+    ErrorType.INVALID_KEYWORD: "Keyword '{keyword}' is invalid in {mode} mode. Use http-request for HTTP mode, tcp-request for TCP mode.",
+    ErrorType.SYNTAX_ERROR: "Syntax error detected. Check the affected line.",
+    ErrorType.MISSING_SERVER: "Backend '{entity_name}' must have at least one server defined.",
+    ErrorType.ACL_ERROR: "ACL definition error. Correct format: 'acl name condition value'",
+    ErrorType.BIND_ERROR: "Port {port} is already in use or inaccessible. Try a different port.",
+    ErrorType.UNKNOWN: "Please review the raw error message and check the related entity.",
 }
 
 

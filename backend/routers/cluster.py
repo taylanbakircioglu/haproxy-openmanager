@@ -670,7 +670,7 @@ async def get_cluster_agent_sync_status(cluster_id: int, authorization: str = He
                 parsed_error = {
                     "parse_success": False,
                     "raw_message": validation_error,
-                    "suggestion": "Hata mesajı parse edilemedi. Ham mesajı inceleyin."
+                    "suggestion": "Error message could not be parsed. Please review the raw message."
                 }
 
         # Agents under this cluster (via pool relationship)
@@ -1177,7 +1177,7 @@ async def list_cluster_config_versions(cluster_id: int, authorization: str = Hea
                     parsed_error = {
                         "parse_success": False,
                         "raw_message": validation_error,
-                        "suggestion": "Hata mesajı parse edilemedi. Ham mesajı inceleyin."
+                        "suggestion": "Error message could not be parsed. Please review the raw message."
                     }
             
             formatted_versions.append({
