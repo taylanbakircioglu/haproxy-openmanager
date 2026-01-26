@@ -935,11 +935,55 @@ async def agent_config_sync(agent_name: str, sync_data: dict, x_api_key: Optiona
             return {"status": "error", "message": "Agent or cluster not found"}
         
         cluster_id = agent_info['cluster_id']
+        agent_id = agent_info['id']
         config_content = sync_data.get('config_content', '')
         
         if not config_content:
             await close_database_connection(conn)
             return {"status": "error", "message": "No config content provided"}
+        
+        # ========================================================================
+        # COLLISION PREVENTION: Extract and save listen block names
+        # Agent's local listen blocks can conflict with frontend/backend names
+        # By storing them, we can detect collisions BEFORE entity creation
+        # ========================================================================
+        preserved_listen_blocks = []
+        
+        for line in config_content.split('\n'):
+            line_stripped = line.strip()
+            # Parse listen block definitions (e.g., "listen stats")
+            if line_stripped.startswith('listen '):
+                listen_name = line_stripped.split()[1] if len(line_stripped.split()) > 1 else None
+                if listen_name:
+                    preserved_listen_blocks.append(listen_name)
+                    logger.debug(f"CONFIG-SYNC: Found listen block '{listen_name}' in agent {agent_name}")
+        
+        # Save preserved listen blocks to agents table for collision detection
+        if preserved_listen_blocks:
+            try:
+                import json
+                await conn.execute("""
+                    UPDATE agents 
+                    SET preserved_listen_blocks = $1::jsonb
+                    WHERE id = $2
+                """, json.dumps(preserved_listen_blocks), agent_id)
+                logger.info(f"CONFIG-SYNC: Agent '{agent_name}' has {len(preserved_listen_blocks)} listen blocks: {preserved_listen_blocks}")
+            except Exception as e:
+                logger.warning(f"CONFIG-SYNC: Failed to save listen blocks for agent {agent_name}: {e}")
+        else:
+            # Clear listen blocks if agent has none
+            try:
+                await conn.execute("""
+                    UPDATE agents 
+                    SET preserved_listen_blocks = '[]'::jsonb
+                    WHERE id = $1
+                """, agent_id)
+            except:
+                pass
+        
+        # ========================================================================
+        # END COLLISION PREVENTION
+        # ========================================================================
         
         # Parse config content to extract all configuration entities
         active_servers = []

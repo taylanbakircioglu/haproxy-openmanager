@@ -410,6 +410,54 @@ async def create_frontend(frontend: FrontendConfig, request: Request, authorizat
         if frontend.cluster_id:
             await validate_user_cluster_access(current_user['id'], frontend.cluster_id, conn)
         
+        # CRITICAL: Check for reserved names that conflict with common HAProxy listen sections
+        # Agent preserves existing listen blocks (e.g., 'listen stats') from local config
+        # Creating frontends with these names causes "proxy has same name" errors
+        reserved_names = {'stats', 'haproxy-stats', 'haproxy_stats', 'monitoring', 'admin', 'health', 'status'}
+        if frontend.name.lower() in reserved_names:
+            await close_database_connection(conn)
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Frontend name '{frontend.name}' is reserved. It conflicts with common HAProxy "
+                       f"listen sections (e.g., 'listen stats'). Please choose a different name."
+            )
+        
+        # DYNAMIC COLLISION CHECK: Check against agents' preserved listen blocks
+        # Agents report their local listen blocks via config-sync, we check for conflicts here
+        # NOTE: Wrapped in try-except for backwards compatibility (column may not exist before migration)
+        if frontend.cluster_id:
+            try:
+                collision_check = await conn.fetch("""
+                    SELECT a.name as agent_name, a.preserved_listen_blocks
+                    FROM agents a
+                    JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
+                    WHERE hc.id = $1 AND a.preserved_listen_blocks IS NOT NULL
+                """, frontend.cluster_id)
+                
+                for agent in collision_check:
+                    listen_blocks = agent['preserved_listen_blocks'] or []
+                    if isinstance(listen_blocks, str):
+                        try:
+                            listen_blocks = json.loads(listen_blocks)
+                        except:
+                            listen_blocks = []
+                    
+                    # Case-insensitive comparison (HAProxy proxy names are case-insensitive)
+                    listen_blocks_lower = [lb.lower() for lb in listen_blocks if isinstance(lb, str)]
+                    if frontend.name.lower() in listen_blocks_lower:
+                        await close_database_connection(conn)
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Frontend name '{frontend.name}' conflicts with an existing 'listen {frontend.name}' "
+                                   f"block on agent '{agent['agent_name']}'. Either rename this frontend or remove the "
+                                   f"listen block from the agent's local HAProxy configuration."
+                        )
+            except HTTPException:
+                raise  # Re-raise HTTP exceptions (collision detected)
+            except Exception as e:
+                # Column may not exist yet (before migration) - skip check gracefully
+                logger.debug(f"Dynamic collision check skipped: {e}")
+        
         # Check if frontend name already exists in the same cluster (only active frontends)
         existing = await conn.fetchrow("""
             SELECT id FROM frontends 
@@ -637,6 +685,49 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
         
         # Check if name is being changed and if new name already exists
         if frontend.name != existing["name"]:
+            # CRITICAL: Check for reserved names on rename
+            reserved_names = {'stats', 'haproxy-stats', 'haproxy_stats', 'monitoring', 'admin', 'health', 'status'}
+            if frontend.name.lower() in reserved_names:
+                await close_database_connection(conn)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Frontend name '{frontend.name}' is reserved. It conflicts with common HAProxy "
+                           f"listen sections (e.g., 'listen stats'). Please choose a different name."
+                )
+            
+            # CRITICAL: Check for collision with agent listen blocks on rename
+            # NOTE: Wrapped in try-except for backwards compatibility
+            if cluster_id:
+                try:
+                    collision_check = await conn.fetch("""
+                        SELECT a.name as agent_name, a.preserved_listen_blocks
+                        FROM agents a
+                        JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
+                        WHERE hc.id = $1 AND a.preserved_listen_blocks IS NOT NULL
+                    """, cluster_id)
+                    
+                    for agent in collision_check:
+                        listen_blocks = agent['preserved_listen_blocks'] or []
+                        if isinstance(listen_blocks, str):
+                            try:
+                                listen_blocks = json.loads(listen_blocks)
+                            except:
+                                listen_blocks = []
+                        
+                        # Case-insensitive comparison (HAProxy proxy names are case-insensitive)
+                        listen_blocks_lower = [lb.lower() for lb in listen_blocks if isinstance(lb, str)]
+                        if frontend.name.lower() in listen_blocks_lower:
+                            await close_database_connection(conn)
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Frontend name '{frontend.name}' conflicts with an existing 'listen' block "
+                                       f"on agent '{agent['agent_name']}'. Choose a different name."
+                            )
+                except HTTPException:
+                    raise  # Re-raise HTTP exceptions
+                except Exception as e:
+                    logger.debug(f"Dynamic collision check skipped on update: {e}")
+            
             name_exists = await conn.fetchrow("SELECT id FROM frontends WHERE name = $1 AND id != $2", frontend.name, frontend_id)
             if name_exists:
                 await close_database_connection(conn)
