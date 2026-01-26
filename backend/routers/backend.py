@@ -525,6 +525,54 @@ async def create_backend(backend: BackendConfig, authorization: str = Header(Non
             await conn.execute("DELETE FROM backends WHERE id = $1", inactive_backend['id'])
             logger.info(f"BACKEND CREATE: Cleaned up inactive backend '{backend.name}' and all related data")
         
+        # CRITICAL: Check for reserved names that conflict with common HAProxy listen sections
+        # Agent preserves existing listen blocks (e.g., 'listen stats') from local config
+        # Creating backends with these names causes "proxy has same name" errors
+        reserved_names = {'stats', 'haproxy-stats', 'haproxy_stats', 'monitoring', 'admin', 'health', 'status'}
+        if backend.name.lower() in reserved_names:
+            await close_database_connection(conn)
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Backend name '{backend.name}' is reserved. It conflicts with common HAProxy "
+                       f"listen sections (e.g., 'listen stats'). Please choose a different name."
+            )
+        
+        # DYNAMIC COLLISION CHECK: Check against agents' preserved listen blocks
+        # Agents report their local listen blocks via config-sync, we check for conflicts here
+        # NOTE: Wrapped in try-except for backwards compatibility (column may not exist before migration)
+        if backend.cluster_id:
+            try:
+                collision_check = await conn.fetch("""
+                    SELECT a.name as agent_name, a.preserved_listen_blocks
+                    FROM agents a
+                    JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
+                    WHERE hc.id = $1 AND a.preserved_listen_blocks IS NOT NULL
+                """, backend.cluster_id)
+                
+                for agent in collision_check:
+                    listen_blocks = agent['preserved_listen_blocks'] or []
+                    if isinstance(listen_blocks, str):
+                        try:
+                            listen_blocks = json.loads(listen_blocks)
+                        except:
+                            listen_blocks = []
+                    
+                    # Case-insensitive comparison (HAProxy proxy names are case-insensitive)
+                    listen_blocks_lower = [lb.lower() for lb in listen_blocks if isinstance(lb, str)]
+                    if backend.name.lower() in listen_blocks_lower:
+                        await close_database_connection(conn)
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Backend name '{backend.name}' conflicts with an existing 'listen {backend.name}' "
+                                   f"block on agent '{agent['agent_name']}'. Either rename this backend or remove the "
+                                   f"listen block from the agent's local HAProxy configuration."
+                        )
+            except HTTPException:
+                raise  # Re-raise HTTP exceptions (collision detected)
+            except Exception as e:
+                # Column may not exist yet (before migration) - skip check gracefully
+                logger.debug(f"Dynamic collision check skipped: {e}")
+        
         # Check if backend name already exists in the same cluster (only active backends)
         existing = await conn.fetchrow("""
             SELECT id FROM backends 
@@ -873,6 +921,60 @@ async def update_backend(backend_id: int, backend_update: BackendConfigUpdate, r
         old_backend_name = existing_backend['name']
         new_backend_name = update_data.get('name', old_backend_name)
         backend_name_changed = old_backend_name != new_backend_name
+        
+        # CRITICAL: Validate new name if backend is being renamed
+        if backend_name_changed:
+            # Check for reserved names
+            reserved_names = {'stats', 'haproxy-stats', 'haproxy_stats', 'monitoring', 'admin', 'health', 'status'}
+            if new_backend_name.lower() in reserved_names:
+                await close_database_connection(conn)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Backend name '{new_backend_name}' is reserved. It conflicts with common HAProxy "
+                           f"listen sections (e.g., 'listen stats'). Please choose a different name."
+                )
+            
+            # Check for collision with agent listen blocks
+            # NOTE: Wrapped in try-except for backwards compatibility
+            if cluster_id:
+                try:
+                    collision_check = await conn.fetch("""
+                        SELECT a.name as agent_name, a.preserved_listen_blocks
+                        FROM agents a
+                        JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
+                        WHERE hc.id = $1 AND a.preserved_listen_blocks IS NOT NULL
+                    """, cluster_id)
+                    
+                    for agent in collision_check:
+                        listen_blocks = agent['preserved_listen_blocks'] or []
+                        if isinstance(listen_blocks, str):
+                            try:
+                                listen_blocks = json.loads(listen_blocks)
+                            except:
+                                listen_blocks = []
+                        
+                        # Case-insensitive comparison (HAProxy proxy names are case-insensitive)
+                        listen_blocks_lower = [lb.lower() for lb in listen_blocks if isinstance(lb, str)]
+                        if new_backend_name.lower() in listen_blocks_lower:
+                            await close_database_connection(conn)
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Backend name '{new_backend_name}' conflicts with an existing 'listen' block "
+                                       f"on agent '{agent['agent_name']}'. Choose a different name."
+                            )
+                except HTTPException:
+                    raise  # Re-raise HTTP exceptions
+                except Exception as e:
+                    logger.debug(f"Dynamic collision check skipped on update: {e}")
+            
+            # Check if new name already exists
+            name_exists = await conn.fetchrow(
+                "SELECT id FROM backends WHERE name = $1 AND id != $2", 
+                new_backend_name, backend_id
+            )
+            if name_exists:
+                await close_database_connection(conn)
+                raise HTTPException(status_code=400, detail=f"Backend name '{new_backend_name}' already exists")
         
         # Filter out 'option httpchk' from options field if present (should use health_check_uri instead)
         if 'options' in update_data and update_data['options']:

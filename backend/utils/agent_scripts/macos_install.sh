@@ -1831,7 +1831,24 @@ check_config_updates() {
         done
         
         log "ERROR" "Configuration validation failed after 3 attempts"
-        rm -f "$TEMP_CONFIG"
+        
+        # CRITICAL DEBUG: Keep failed config for inspection instead of deleting
+        # Move to a debug location so admin can inspect what went wrong
+        DEBUG_CONFIG="/tmp/haproxy-failed-${CONFIG_VERSION}-$(date +%Y%m%d-%H%M%S).cfg"
+        mv "$TEMP_CONFIG" "$DEBUG_CONFIG" 2>/dev/null || true
+        log "ERROR" "Failed config saved to: $DEBUG_CONFIG (for debugging - delete manually after inspection)"
+        log "ERROR" "To validate manually: $HAPROXY_BIN_PATH -c -f $DEBUG_CONFIG"
+        
+        # Clean up old failed configs (keep last 5) to prevent disk space issues
+        ls -t /tmp/haproxy-failed-*.cfg 2>/dev/null | tail -n +6 | xargs rm -f 2>/dev/null || true
+        
+        # Send validation failure notification to backend
+        VALIDATION_ERROR_JSON=$(echo "$RETRY_VALIDATION_OUTPUT" | jq -Rs . 2>/dev/null || echo "\"$RETRY_VALIDATION_OUTPUT\"")
+        "$CURL_BIN" -k -s -X POST "$MANAGEMENT_URL/api/agents/$AGENT_NAME/config-validation-failed" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: $AGENT_TOKEN" \
+            -d "{\"version\":\"$CONFIG_VERSION\",\"validation_error\":$VALIDATION_ERROR_JSON}" > /dev/null 2>&1 || true
+        
         return 1
     fi
 }

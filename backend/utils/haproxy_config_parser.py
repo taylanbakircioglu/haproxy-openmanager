@@ -946,10 +946,34 @@ class HAProxyConfigParser:
         Post-parse validation of parsed configuration
         Removes invalid entities and adds warnings for skipped items
         """
+        # CRITICAL: Reserved names that conflict with common HAProxy listen sections
+        # Agent preserves existing listen blocks (e.g., 'listen stats') from local config
+        # Creating frontends/backends with these names causes "proxy has same name" errors
+        reserved_names = {
+            'stats',           # Conflicts with common 'listen stats' monitoring section
+            'haproxy-stats',   # Alternative stats name
+            'haproxy_stats',   # Alternative stats name with underscore
+            'monitoring',      # Common monitoring section name
+            'admin',           # Admin interface
+            'health',          # Health check endpoint
+            'status',          # Status page
+        }
+        
         # Check for duplicate frontend names - remove duplicates keeping first occurrence
+        # Also check for reserved names that conflict with listen sections
         frontend_names_seen = set()
         valid_frontends = []
         for frontend in self.frontends:
+            # Check for reserved names first
+            if frontend.name.lower() in reserved_names:
+                self.warnings.append(
+                    f"⚠️ SKIPPED: Frontend '{frontend.name}' uses a reserved name that conflicts with "
+                    f"common HAProxy listen sections (e.g., 'listen stats'). Agent preserves existing "
+                    f"listen blocks from local config, so creating a frontend with this name would cause "
+                    f"'proxy has same name' errors. Rename this frontend to avoid conflicts."
+                )
+                continue
+            
             if frontend.name in frontend_names_seen:
                 self.warnings.append(
                     f"⚠️ SKIPPED: Duplicate frontend '{frontend.name}' - keeping first occurrence only."
@@ -959,9 +983,18 @@ class HAProxyConfigParser:
                 valid_frontends.append(frontend)
         
         # Check for duplicate backend names - remove duplicates keeping first occurrence
+        # Also check for reserved names
         backend_names_seen = set()
         valid_backends = []
         for backend in self.backends:
+            # Check for reserved names first
+            if backend.name.lower() in reserved_names:
+                self.warnings.append(
+                    f"⚠️ SKIPPED: Backend '{backend.name}' uses a reserved name that conflicts with "
+                    f"common HAProxy listen sections. Rename this backend to avoid conflicts."
+                )
+                continue
+            
             if backend.name in backend_names_seen:
                 self.warnings.append(
                     f"⚠️ SKIPPED: Duplicate backend '{backend.name}' - keeping first occurrence only."

@@ -341,17 +341,30 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             # ACL Rules
             if frontend.get('acl_rules'):
                 acl_rules = frontend['acl_rules']
+                
+                # CRITICAL DEBUG: Log type and raw value for troubleshooting
+                logger.info(f"ACL_RULES DEBUG: Frontend '{frontend['name']}' acl_rules type: {type(acl_rules)}, repr: {repr(acl_rules)}")
+                
                 # Parse JSON string if needed
                 if isinstance(acl_rules, str):
                     try:
                         acl_rules = json.loads(acl_rules)
+                        logger.info(f"ACL_RULES DEBUG: Parsed as JSON list with {len(acl_rules) if isinstance(acl_rules, list) else 'N/A'} items")
                     except:
+                        logger.warning(f"ACL_RULES DEBUG: JSON parse failed, setting to empty list")
                         acl_rules = []
                 
                 if isinstance(acl_rules, list):
-                    for acl in acl_rules:
-                        if acl and acl.strip():
+                    for idx, acl in enumerate(acl_rules):
+                        if acl and isinstance(acl, str) and acl.strip():
                             acl_text = acl.strip()
+                            
+                            # CRITICAL FIX: Remove any stray JSON characters that might have leaked
+                            acl_text = acl_text.strip('[]"\'')
+                            acl_text = acl_text.strip()
+                            
+                            logger.info(f"ACL_RULES DEBUG: Rule {idx}: original={repr(acl)}, cleaned={repr(acl_text)}")
+                            
                             # Skip empty strings, "[]", or invalid ACL rules
                             if acl_text and acl_text not in ('[]', '{}', 'null', 'None'):
                                 # CRITICAL FIX: ACL rules from parser already include "acl" keyword
@@ -412,8 +425,8 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             if frontend.get('use_backend_rules'):
                 use_backend_rules = frontend['use_backend_rules']
                 
-                # DEBUG: Log type and value
-                logger.debug(f"Frontend '{frontend['name']}' use_backend_rules type: {type(use_backend_rules)}, value: {use_backend_rules}")
+                # CRITICAL DEBUG: Log type and raw value for troubleshooting
+                logger.info(f"USE_BACKEND DEBUG: Frontend '{frontend['name']}' use_backend_rules type: {type(use_backend_rules)}, repr: {repr(use_backend_rules)}")
                 
                 # Normalize to list
                 rules_list = None
@@ -424,15 +437,18 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                         parsed = json.loads(use_backend_rules)
                         if isinstance(parsed, list):
                             rules_list = parsed
+                            logger.info(f"USE_BACKEND DEBUG: Parsed as JSON list with {len(rules_list)} items")
                         else:
                             logger.warning(f"Frontend '{frontend['name']}' use_backend_rules parsed to non-list: {type(parsed)}")
-                    except:
+                    except json.JSONDecodeError as e:
                         # Legacy format: newline-separated string
+                        logger.info(f"USE_BACKEND DEBUG: JSON parse failed ({e}), trying newline split")
                         rules_list = [r.strip() for r in use_backend_rules.split('\n') if r.strip()]
                 
                 elif isinstance(use_backend_rules, (list, tuple)):
-                    # Already a sequence
+                    # Already a sequence (asyncpg auto-converts JSONB to Python list)
                     rules_list = list(use_backend_rules)
+                    logger.info(f"USE_BACKEND DEBUG: Already a list with {len(rules_list)} items")
                 
                 else:
                     # Unexpected type - try to convert to string and log warning
@@ -449,9 +465,18 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 
                 # Write rules if we successfully parsed them
                 if rules_list:
-                    for rule in rules_list:
+                    for idx, rule in enumerate(rules_list):
                         if rule and isinstance(rule, str):
                             rule_text = rule.strip()
+                            
+                            # CRITICAL FIX: Remove any stray JSON characters that might have leaked
+                            # This can happen due to serialization issues or database corruption
+                            # Remove leading/trailing brackets and quotes that shouldn't be there
+                            rule_text = rule_text.strip('[]"\'')
+                            rule_text = rule_text.strip()
+                            
+                            logger.info(f"USE_BACKEND DEBUG: Rule {idx}: original={repr(rule)}, cleaned={repr(rule_text)}")
+                            
                             # Skip empty strings, "[]", or invalid use_backend rules
                             if rule_text and rule_text not in ('[]', '{}', 'null', 'None', '""', "''"):
                                 # CRITICAL FIX: use_backend rules from parser already include "use_backend" keyword

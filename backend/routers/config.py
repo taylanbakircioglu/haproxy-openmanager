@@ -1381,7 +1381,50 @@ async def bulk_create_entities(
             
             # BULK IMPORT MVP: Process backends with UPSERT (merge strategy)
             # Create or update backends first (frontends may reference them)
+            
+            # CRITICAL: Reserved names that conflict with common HAProxy listen sections
+            # Agent preserves existing listen blocks (e.g., 'listen stats') from local config
+            # Creating entities with these names causes "proxy has same name" errors
+            reserved_names = {'stats', 'haproxy-stats', 'haproxy_stats', 'monitoring', 'admin', 'health', 'status'}
+            
+            # DYNAMIC COLLISION CHECK: Get agent listen blocks for this cluster
+            # NOTE: Wrapped in try-except for backwards compatibility (column may not exist before migration)
+            agent_listen_blocks = set()
+            try:
+                collision_check = await conn.fetch("""
+                    SELECT a.name as agent_name, a.preserved_listen_blocks
+                    FROM agents a
+                    JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
+                    WHERE hc.id = $1 AND a.preserved_listen_blocks IS NOT NULL
+                """, request.cluster_id)
+                
+                for agent in collision_check:
+                    listen_blocks = agent['preserved_listen_blocks'] or []
+                    if isinstance(listen_blocks, str):
+                        try:
+                            listen_blocks = json.loads(listen_blocks)
+                        except:
+                            listen_blocks = []
+                    # Store as lowercase for case-insensitive comparison (HAProxy proxy names are case-insensitive)
+                    agent_listen_blocks.update(lb.lower() for lb in listen_blocks if isinstance(lb, str))
+                
+                if agent_listen_blocks:
+                    logger.info(f"BULK IMPORT: Cluster {request.cluster_id} agents have listen blocks: {agent_listen_blocks}")
+            except Exception as e:
+                # Column may not exist yet (before migration) - skip dynamic check gracefully
+                logger.debug(f"BULK IMPORT: Dynamic collision check skipped: {e}")
+            
             for backend_data in request.backends:
+                # Check for reserved names first (case-insensitive)
+                if backend_data["name"].lower() in reserved_names:
+                    logger.warning(f"BULK IMPORT: Skipping backend '{backend_data['name']}' - reserved name")
+                    continue
+                
+                # Check for dynamic collision with agent listen blocks (case-insensitive)
+                if backend_data["name"].lower() in agent_listen_blocks:
+                    logger.warning(f"BULK IMPORT: Skipping backend '{backend_data['name']}' - conflicts with agent listen block")
+                    continue
+                
                 # Check if backend already exists (check both active AND inactive)
                 existing = await conn.fetchrow("""
                     SELECT id, is_active FROM backends 
@@ -1698,6 +1741,16 @@ async def bulk_create_entities(
             
             # BULK IMPORT MVP: Process frontends with UPSERT (merge strategy)
             for frontend_data in request.frontends:
+                # Check for reserved names first (case-insensitive)
+                if frontend_data["name"].lower() in reserved_names:
+                    logger.warning(f"BULK IMPORT: Skipping frontend '{frontend_data['name']}' - reserved name")
+                    continue
+                
+                # Check for dynamic collision with agent listen blocks (case-insensitive)
+                if frontend_data["name"].lower() in agent_listen_blocks:
+                    logger.warning(f"BULK IMPORT: Skipping frontend '{frontend_data['name']}' - conflicts with agent listen block")
+                    continue
+                
                 # Check if frontend already exists (check both active AND inactive)
                 existing = await conn.fetchrow("""
                     SELECT id, is_active FROM frontends 

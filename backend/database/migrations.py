@@ -1559,6 +1559,7 @@ async def run_all_migrations():
     await add_options_to_frontends()
     await add_ssl_advanced_options_to_frontends()
     await add_ssl_advanced_options_to_servers()
+    await add_preserved_listen_blocks_to_agents()
     
     logger.info("Database migrations completed successfully.")
 
@@ -2915,3 +2916,47 @@ async def add_ssl_advanced_options_to_servers():
             await close_database_connection(conn)
         logger.error(f"❌ Error adding SSL advanced options to servers: {e}")
         # Don't raise - we'll try to proceed
+
+async def add_preserved_listen_blocks_to_agents():
+    """
+    Add preserved_listen_blocks column to agents table.
+    This stores the listen block names from agent's local haproxy.cfg
+    so backend can detect potential naming collisions before entity creation.
+    
+    COLLISION PREVENTION:
+    - Agent sends its current config via config-sync
+    - Backend parses listen blocks and stores their names here
+    - When creating frontend/backend, check against this list for collisions
+    - Prevents HAProxy "proxy has same name" errors at runtime
+    """
+    conn = None
+    try:
+        conn = await get_database_connection()
+        
+        # Check if preserved_listen_blocks column exists
+        column_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'agents' 
+                AND column_name = 'preserved_listen_blocks'
+            )
+        """)
+        
+        if not column_exists:
+            await conn.execute("""
+                ALTER TABLE agents 
+                ADD COLUMN preserved_listen_blocks JSONB DEFAULT '[]'::jsonb
+            """)
+            logger.info("✅ Added preserved_listen_blocks column to agents table")
+            logger.info("   This column stores listen block names from agent's local config")
+            logger.info("   Used for collision detection when creating new entities")
+        else:
+            logger.info("ℹ️  preserved_listen_blocks column already exists in agents table")
+        
+        await close_database_connection(conn)
+        
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"❌ Error adding preserved_listen_blocks column: {e}")
+        # Don't raise - not critical for system operation
