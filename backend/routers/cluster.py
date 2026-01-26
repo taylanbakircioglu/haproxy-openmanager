@@ -646,6 +646,32 @@ async def get_cluster_agent_sync_status(cluster_id: int, authorization: str = He
         latest_created_at = latest["created_at"].isoformat().replace('+00:00', 'Z') if latest and latest.get("created_at") else None
         validation_error = latest.get("validation_error") if latest else None
         validation_error_reported_at = latest["validation_error_reported_at"].isoformat().replace('+00:00', 'Z') if latest and latest.get("validation_error_reported_at") else None
+        
+        # Parse validation error if present
+        parsed_error = None
+        if validation_error:
+            try:
+                from utils.haproxy_error_parser import parse_haproxy_error, find_affected_entity
+                parsed_error = parse_haproxy_error(validation_error)
+                
+                # Try to find affected entity for quick fix URL
+                if parsed_error.get('parse_success') and parsed_error.get('entity_name'):
+                    try:
+                        entity_info = await find_affected_entity(parsed_error, cluster_id, conn)
+                        if entity_info.get('entity_verified'):
+                            parsed_error['entity_id'] = entity_info.get('entity_id')
+                            parsed_error['entity_verified'] = True
+                            parsed_error['quick_fix_url'] = entity_info.get('edit_url')
+                            parsed_error['quick_fix_available'] = True
+                    except Exception as entity_err:
+                        logger.debug(f"Failed to find affected entity in agent-sync: {entity_err}")
+            except Exception as parse_err:
+                logger.warning(f"Failed to parse validation error in agent-sync: {parse_err}")
+                parsed_error = {
+                    "parse_success": False,
+                    "raw_message": validation_error,
+                    "suggestion": "Hata mesajı parse edilemedi. Ham mesajı inceleyin."
+                }
 
         # Agents under this cluster (via pool relationship)
         agents = await conn.fetch(
@@ -714,6 +740,7 @@ async def get_cluster_agent_sync_status(cluster_id: int, authorization: str = He
             "latest_created_at": latest_created_at,
             "validation_error": validation_error,
             "validation_error_reported_at": validation_error_reported_at,
+            "parsed_error": parsed_error,
             "total_agents": total,
             "online_agents": online,
             "synced_agents": synced,
@@ -1070,10 +1097,11 @@ async def list_cluster_config_versions(cluster_id: int, authorization: str = Hea
         
         # Get all config versions for this cluster (with schema compatibility)
         try:
-            # Try with status column first
+            # Try with all columns including validation_error
             versions = await conn.fetch("""
                 SELECT cv.id, cv.version_name, cv.description, cv.status, cv.is_active,
                        cv.created_at, cv.file_size, cv.checksum,
+                       cv.validation_error, cv.validation_error_reported_at,
                        u.username as created_by_username
                 FROM config_versions cv
                 LEFT JOIN users u ON cv.created_by = u.id
@@ -1081,19 +1109,32 @@ async def list_cluster_config_versions(cluster_id: int, authorization: str = Hea
                 ORDER BY cv.created_at DESC
             """, cluster_id)
         except Exception as status_error:
-            logger.warning(f"Status column error in config-versions, using fallback: {status_error}")
-            # Fallback query without status column
-            versions = await conn.fetch("""
-                SELECT cv.id, cv.version_name, cv.description, cv.is_active,
-                       cv.created_at, cv.file_size, cv.checksum,
-                       u.username as created_by_username
-                FROM config_versions cv
-                LEFT JOIN users u ON cv.created_by = u.id
-                WHERE cv.cluster_id = $1
-                ORDER BY cv.created_at DESC
-            """, cluster_id)
+            logger.warning(f"Status/validation_error column error in config-versions, using fallback: {status_error}")
+            # Fallback query without validation_error columns
+            try:
+                versions = await conn.fetch("""
+                    SELECT cv.id, cv.version_name, cv.description, cv.status, cv.is_active,
+                           cv.created_at, cv.file_size, cv.checksum,
+                           u.username as created_by_username
+                    FROM config_versions cv
+                    LEFT JOIN users u ON cv.created_by = u.id
+                    WHERE cv.cluster_id = $1
+                    ORDER BY cv.created_at DESC
+                """, cluster_id)
+            except Exception:
+                # Final fallback without status column
+                versions = await conn.fetch("""
+                    SELECT cv.id, cv.version_name, cv.description, cv.is_active,
+                           cv.created_at, cv.file_size, cv.checksum,
+                           u.username as created_by_username
+                    FROM config_versions cv
+                    LEFT JOIN users u ON cv.created_by = u.id
+                    WHERE cv.cluster_id = $1
+                    ORDER BY cv.created_at DESC
+                """, cluster_id)
         
-        await close_database_connection(conn)
+        # Import error parser for parsing validation errors
+        from utils.haproxy_error_parser import parse_haproxy_error, find_affected_entity
         
         # Format the response
         formatted_versions = []
@@ -1111,6 +1152,34 @@ async def list_cluster_config_versions(cluster_id: int, authorization: str = Hea
             elif "ssl-" in version['version_name']:
                 version_type = "SSL Certificate"
             
+            # Parse validation error if present
+            validation_error = version.get("validation_error")
+            parsed_error = None
+            if validation_error:
+                try:
+                    parsed_error = parse_haproxy_error(validation_error)
+                    
+                    # Try to find affected entity in database for quick fix URL
+                    if parsed_error.get('parse_success') and parsed_error.get('entity_name'):
+                        try:
+                            entity_info = await find_affected_entity(parsed_error, cluster_id, conn)
+                            if entity_info.get('entity_verified'):
+                                parsed_error['entity_id'] = entity_info.get('entity_id')
+                                parsed_error['entity_verified'] = True
+                                parsed_error['quick_fix_url'] = entity_info.get('edit_url')
+                                parsed_error['quick_fix_available'] = True
+                        except Exception as entity_err:
+                            logger.debug(f"Failed to find affected entity: {entity_err}")
+                            # Continue without entity info - not critical
+                            
+                except Exception as parse_err:
+                    logger.warning(f"Failed to parse validation error for version {version['id']}: {parse_err}")
+                    parsed_error = {
+                        "parse_success": False,
+                        "raw_message": validation_error,
+                        "suggestion": "Hata mesajı parse edilemedi. Ham mesajı inceleyin."
+                    }
+            
             formatted_versions.append({
                 "id": version["id"],
                 "version_name": version["version_name"],
@@ -1121,8 +1190,14 @@ async def list_cluster_config_versions(cluster_id: int, authorization: str = Hea
                 "created_at": version["created_at"].isoformat().replace('+00:00', 'Z') if version.get("created_at") else None,
                 "created_by": version.get("created_by_username") or "System",
                 "file_size": version.get("file_size"),
-                "checksum": version["checksum"][:8] + "..." if version.get("checksum") else "No checksum"
+                "checksum": version["checksum"][:8] + "..." if version.get("checksum") else "No checksum",
+                # Validation error fields
+                "validation_error": validation_error,
+                "validation_error_reported_at": version["validation_error_reported_at"].isoformat().replace('+00:00', 'Z') if version.get("validation_error_reported_at") else None,
+                "parsed_error": parsed_error
             })
+        
+        await close_database_connection(conn)
         
         return {"config_versions": formatted_versions}
         

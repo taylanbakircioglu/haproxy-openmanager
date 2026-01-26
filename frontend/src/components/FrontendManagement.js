@@ -12,7 +12,7 @@ import {
   WarningOutlined, SearchOutlined, HistoryOutlined, PlayCircleOutlined, LoadingOutlined
 } from '@ant-design/icons';
 import axios from 'axios';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useCluster } from '../contexts/ClusterContext';
 import { VersionHistory } from './VersionHistory';
 
@@ -60,6 +60,7 @@ const { TextArea } = Input;
 const FrontendManagement = () => {
   const { selectedCluster } = useCluster();
   const navigate = useNavigate();
+  const location = useLocation();
   const [frontends, setFrontends] = useState([]);
   const [backends, setBackends] = useState([]);
   const [sslCertificates, setSslCertificates] = useState([]);
@@ -161,6 +162,37 @@ const FrontendManagement = () => {
     fetchSSLCertificates();
     checkPendingChanges();
   }, [selectedCluster]);
+
+  // Handle URL parameters for quick edit navigation (from validation error modal)
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const editId = params.get('edit');
+    const highlightField = params.get('highlight');
+    
+    if (editId && frontends.length > 0) {
+      const frontendToEdit = frontends.find(f => f.id === parseInt(editId));
+      if (frontendToEdit) {
+        // Open edit modal for the frontend
+        setEditingFrontend(frontendToEdit);
+        form.setFieldsValue({
+          ...frontendToEdit,
+          ssl_enabled: frontendToEdit.ssl_enabled || false,
+          ssl_certificate_ids: frontendToEdit.ssl_certificate_ids || [],
+          acl_rules: frontendToEdit.acl_rules || [],
+          use_backend_rules: frontendToEdit.use_backend_rules || [],
+        });
+        setModalVisible(true);
+        
+        // Clear URL params after opening modal
+        navigate(location.pathname, { replace: true });
+        
+        // Show notification about which field to check
+        if (highlightField) {
+          message.info(`Please check the "${highlightField}" field - it may have caused a validation error.`, 5);
+        }
+      }
+    }
+  }, [location.search, frontends]);
 
   const fetchFrontends = async () => {
     // CRITICAL FIX: Don't fetch if no cluster selected to prevent race condition

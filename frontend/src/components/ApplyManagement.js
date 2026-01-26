@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   Card, Button, Space, Row, Col, message, Alert, Spin, 
   Typography, Tag, Table, Modal, Divider, Badge, Empty,
-  Timeline, Descriptions, Tabs, Progress, Tooltip
+  Timeline, Descriptions, Tabs, Progress, Tooltip, Collapse, Steps, Input
 } from 'antd';
 import { getAgentSyncColor, getConfigStatusColor, COLORS } from '../utils/colors';
 import { useProgress } from '../contexts/ProgressContext';
@@ -12,12 +12,14 @@ import {
   CloudServerOutlined, GlobalOutlined, SecurityScanOutlined, 
   SafetyCertificateOutlined, InfoCircleOutlined, HistoryOutlined,
   EyeOutlined, CloseOutlined, CloseCircleOutlined, RedoOutlined,
-  UndoOutlined, CloudUploadOutlined
+  UndoOutlined, CloudUploadOutlined, WarningOutlined, CodeOutlined,
+  CopyOutlined, EditOutlined, RightOutlined
 } from '@ant-design/icons';
 import axios from 'axios';
 import { useCluster } from '../contexts/ClusterContext';
 import { Select } from 'antd';
 import { useNavigate } from 'react-router-dom';
+import ValidationErrorModal from './ValidationErrorModal';
 
 const { Title, Text, Paragraph } = Typography;
 const { TabPane } = Tabs;
@@ -46,6 +48,10 @@ const ApplyManagement = () => {
   const [syncProgress, setSyncProgress] = useState({ visible: false, step: '', progress: 0 });
   const { startProgress, updateProgress, updateEntityCounts, completeProgress, isProgressActive } = useProgress();
   const [entitySyncStates, setEntitySyncStates] = useState({});
+  
+  // Validation Error Modal state
+  const [validationErrorModalVisible, setValidationErrorModalVisible] = useState(false);
+  const [selectedValidationError, setSelectedValidationError] = useState(null);
 
   // Initial load on component mount
   useEffect(() => {
@@ -830,6 +836,86 @@ const ApplyManagement = () => {
         </Button>
       </div>
 
+      {/* Validation Error Banner - Shows when there's a validation error from agent */}
+      {agentSync?.validation_error && (
+        <Alert
+          type="error"
+          banner
+          showIcon
+          icon={<ExclamationCircleOutlined />}
+          style={{ 
+            marginBottom: 24, 
+            borderRadius: 8,
+            border: '1px solid #ffccc7',
+            boxShadow: '0 2px 8px rgba(255, 77, 79, 0.15)'
+          }}
+          message={
+            <Space size="middle">
+              <Text strong style={{ color: '#cf1322' }}>HAProxy Configuration Failed</Text>
+              {agentSync.parsed_error?.line_number && (
+                <Tag color="red">Line {agentSync.parsed_error.line_number}</Tag>
+              )}
+              {agentSync.parsed_error?.entity_name && (
+                <Tag color="orange">
+                  {agentSync.parsed_error.entity_type}: {agentSync.parsed_error.entity_name}
+                </Tag>
+              )}
+              {agentSync.parsed_error?.has_multiple_errors && (
+                <Tag color="volcano">+{agentSync.parsed_error.additional_errors_count} more errors</Tag>
+              )}
+            </Space>
+          }
+          description={
+            <div style={{ marginTop: 8 }}>
+              <Paragraph style={{ margin: 0, marginBottom: 12 }}>
+                {agentSync.parsed_error?.suggestion || 'Configuration validation failed on agent. Please check the error details.'}
+              </Paragraph>
+              <Space>
+                <Button 
+                  type="primary" 
+                  danger
+                  icon={<EyeOutlined />}
+                  onClick={() => {
+                    setSelectedValidationError({
+                      validation_error: agentSync.validation_error,
+                      validation_error_reported_at: agentSync.validation_error_reported_at,
+                      parsed_error: agentSync.parsed_error
+                    });
+                    setValidationErrorModalVisible(true);
+                  }}
+                >
+                  View Error Details
+                </Button>
+                {agentSync.parsed_error?.quick_fix_available && agentSync.parsed_error?.quick_fix_url && (
+                  <Button 
+                    type="primary"
+                    icon={<EditOutlined />}
+                    onClick={() => navigate(agentSync.parsed_error.quick_fix_url)}
+                  >
+                    Fix: {agentSync.parsed_error.entity_name}
+                  </Button>
+                )}
+                {agentSync.parsed_error?.entity_name && !agentSync.parsed_error?.quick_fix_available && (
+                  <Button 
+                    icon={<RightOutlined />}
+                    onClick={() => {
+                      const entityType = agentSync.parsed_error.entity_type;
+                      if (entityType === 'frontend') {
+                        navigate('/frontends');
+                      } else if (entityType === 'backend') {
+                        navigate('/backends');
+                      }
+                    }}
+                  >
+                    Go to {agentSync.parsed_error.entity_type === 'frontend' ? 'Frontends' : 'Backends'}
+                  </Button>
+                )}
+              </Space>
+            </div>
+          }
+        />
+      )}
+
       {/* Remove main tabs, only show Pending Changes */}
           <Row gutter={16}>
             {/* Pending Changes Card */}
@@ -1295,28 +1381,85 @@ const ApplyManagement = () => {
                     {agentSync.validation_error && (
                       <Descriptions.Item label="HAProxy Validation Error">
                         <Alert
-                          message="Configuration Validation Failed"
+                          message={
+                            <Space>
+                              <span>Configuration Validation Failed</span>
+                              {agentSync.parsed_error?.line_number && (
+                                <Tag color="red">Line {agentSync.parsed_error.line_number}</Tag>
+                              )}
+                              {agentSync.parsed_error?.entity_name && (
+                                <Tag color="orange">
+                                  {agentSync.parsed_error.entity_type}: {agentSync.parsed_error.entity_name}
+                                </Tag>
+                              )}
+                            </Space>
+                          }
                           description={
                             <div>
-                              <div style={{ marginBottom: 8 }}>
-                                <strong>Error Details:</strong>
-                              </div>
-                              <pre style={{
-                                backgroundColor: '#fff2f0',
-                                padding: '12px',
-                                borderRadius: '4px',
-                                border: '1px solid #ffccc7',
-                                fontSize: '12px',
-                                fontFamily: 'monospace',
-                                maxHeight: '200px',
-                                overflowY: 'auto',
-                                whiteSpace: 'pre-wrap',
-                                wordBreak: 'break-word'
-                              }}>
-                                {agentSync.validation_error}
-                              </pre>
+                              {/* Parsed suggestion */}
+                              {agentSync.parsed_error?.suggestion && (
+                                <div style={{ marginBottom: 12, padding: '8px 12px', background: '#fff7e6', borderRadius: 4, border: '1px solid #ffd591' }}>
+                                  <Text strong style={{ color: '#ad4e00' }}>Recommendation: </Text>
+                                  <Text>{agentSync.parsed_error.suggestion}</Text>
+                                </div>
+                              )}
+                              
+                              {/* Action buttons */}
+                              <Space style={{ marginBottom: 12 }}>
+                                <Button 
+                                  type="primary" 
+                                  size="small"
+                                  danger
+                                  icon={<EyeOutlined />}
+                                  onClick={() => {
+                                    setSelectedValidationError({
+                                      validation_error: agentSync.validation_error,
+                                      validation_error_reported_at: agentSync.validation_error_reported_at,
+                                      parsed_error: agentSync.parsed_error
+                                    });
+                                    setValidationErrorModalVisible(true);
+                                  }}
+                                >
+                                  View Full Details
+                                </Button>
+                                {agentSync.parsed_error?.quick_fix_available && agentSync.parsed_error?.quick_fix_url && (
+                                  <Button 
+                                    type="primary"
+                                    size="small"
+                                    icon={<EditOutlined />}
+                                    onClick={() => navigate(agentSync.parsed_error.quick_fix_url)}
+                                  >
+                                    Fix: {agentSync.parsed_error.entity_name}
+                                  </Button>
+                                )}
+                              </Space>
+                              
+                              {/* Truncated raw error */}
+                              <Collapse size="small" ghost>
+                                <Collapse.Panel header="Raw Error Output" key="raw">
+                                  <pre style={{
+                                    backgroundColor: '#1f1f1f',
+                                    color: '#ff6b6b',
+                                    padding: '12px',
+                                    borderRadius: '4px',
+                                    fontSize: '11px',
+                                    fontFamily: 'Monaco, Menlo, monospace',
+                                    maxHeight: '150px',
+                                    overflowY: 'auto',
+                                    whiteSpace: 'pre-wrap',
+                                    wordBreak: 'break-word',
+                                    margin: 0
+                                  }}>
+                                    {agentSync.validation_error.length > 500 
+                                      ? agentSync.validation_error.substring(0, 500) + '...\n[Click "View Full Details" to see complete error]'
+                                      : agentSync.validation_error
+                                    }
+                                  </pre>
+                                </Collapse.Panel>
+                              </Collapse>
+                              
                               {agentSync.validation_error_reported_at && (
-                                <div style={{ marginTop: 8, fontSize: '12px', color: '#666' }}>
+                                <div style={{ marginTop: 8, fontSize: '11px', color: '#8c8c8c' }}>
                                   Reported at: {new Date(agentSync.validation_error_reported_at).toLocaleString()}
                                 </div>
                               )}
@@ -1490,6 +1633,18 @@ const ApplyManagement = () => {
           </div>
         )}
       </Modal>
+
+      {/* Validation Error Modal */}
+      <ValidationErrorModal
+        visible={validationErrorModalVisible}
+        onClose={() => {
+          setValidationErrorModalVisible(false);
+          setSelectedValidationError(null);
+        }}
+        validationError={selectedValidationError?.validation_error}
+        validationErrorReportedAt={selectedValidationError?.validation_error_reported_at}
+        parsedError={selectedValidationError?.parsed_error}
+      />
     </div>
   );
 };
