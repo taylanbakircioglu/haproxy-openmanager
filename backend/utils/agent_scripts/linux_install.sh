@@ -1718,12 +1718,15 @@ check_config_updates() {
             # Extract global section only (from start until any section: defaults/listen/frontend/backend)
             # CRITICAL FIX: Stop at ANY section header, not just 'defaults'
             # This prevents including 'listen stats' in global when it comes before defaults
-            awk '/^(defaults|listen|frontend|backend)[[:space:]]/{exit} {print}' "$HAPROXY_CONFIG_PATH" > /tmp/haproxy-global-$$.cfg 2>/dev/null
+            # CRITICAL FIX: Match keywords followed by whitespace OR end of line
+            # 'defaults' without a name has no trailing whitespace, just newline
+            awk '/^(defaults|listen|frontend|backend)([[:space:]]|$)/{exit} {print}' "$HAPROXY_CONFIG_PATH" > /tmp/haproxy-global-$$.cfg 2>/dev/null
             
             # Extract defaults section (ONLY the FIRST defaults section)
             # CRITICAL FIX: Exit at ANY section header including another 'defaults'
             # This prevents capturing multiple defaults sections if config is malformed
-            awk 'BEGIN{started=0} /^defaults[[:space:]]*$/{if(started) exit; started=1} /^(frontend|backend|listen)[[:space:]]/{if(started) exit} started{print}' "$HAPROXY_CONFIG_PATH" > /tmp/haproxy-defaults-$$.cfg 2>/dev/null
+            # Also match keywords at end of line (no trailing whitespace)
+            awk 'BEGIN{started=0} /^defaults([[:space:]]|$)/{if(started) exit; started=1} /^(frontend|backend|listen)([[:space:]]|$)/{if(started) exit} started{print}' "$HAPROXY_CONFIG_PATH" > /tmp/haproxy-defaults-$$.cfg 2>/dev/null
             
             # Extract all listen sections (preserve existing listen blocks like stats monitoring)
             # This extracts ALL listen blocks from existing config to preserve them
@@ -2897,12 +2900,15 @@ CONFIG_RESPONSE_EOF
                             # Extract global section only (from 'global' until any other section: defaults/listen/frontend/backend)
                             # CRITICAL FIX: Stop at ANY section header, not just 'defaults'
                             # This prevents including 'listen stats' in global when it comes before defaults
-                            awk '/^(defaults|listen|frontend|backend)[[:space:]]/{exit} {print}' "$HAPROXY_CONFIG" > /tmp/haproxy-global.cfg 2>/dev/null
+                            # CRITICAL FIX: Match keywords followed by whitespace OR end of line
+                            # 'defaults' without a name has no trailing whitespace, just newline
+                            awk '/^(defaults|listen|frontend|backend)([[:space:]]|$)/{exit} {print}' "$HAPROXY_CONFIG" > /tmp/haproxy-global.cfg 2>/dev/null
                             
                             # Extract defaults section (ONLY the FIRST defaults section)
                             # CRITICAL FIX: Exit at ANY section header including another 'defaults'
                             # This prevents capturing multiple defaults sections if config is malformed
-                            awk 'BEGIN{started=0} /^defaults[[:space:]]*$/{if(started) exit; started=1} /^(frontend|backend|listen)[[:space:]]/{if(started) exit} started{print}' "$HAPROXY_CONFIG" > /tmp/haproxy-defaults.cfg 2>/dev/null
+                            # Also match keywords at end of line (no trailing whitespace)
+                            awk 'BEGIN{started=0} /^defaults([[:space:]]|$)/{if(started) exit; started=1} /^(frontend|backend|listen)([[:space:]]|$)/{if(started) exit} started{print}' "$HAPROXY_CONFIG" > /tmp/haproxy-defaults.cfg 2>/dev/null
                             
                             # Extract all listen sections (preserve existing listen blocks like stats monitoring)
                             # CRITICAL FIX: Extract ALL listen blocks from existing config to preserve them
