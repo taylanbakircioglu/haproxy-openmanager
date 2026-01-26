@@ -194,9 +194,8 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 # PostgreSQL returns JSONB as string: '[1, 2, 3]' → need to parse it
                 if ssl_cert_ids and isinstance(ssl_cert_ids, str):
                     try:
-                        import json
                         ssl_cert_ids = json.loads(ssl_cert_ids)
-                    except (json.JSONDecodeError, ValueError):
+                    except (ValueError, Exception):
                         logger.warning(f"Failed to parse ssl_certificate_ids for frontend '{frontend['name']}': {ssl_cert_ids}")
                         ssl_cert_ids = None
                 
@@ -512,8 +511,7 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 if cfg:
                     try:
                         if isinstance(cfg, str):
-                            import json as _json
-                            cfg = _json.loads(cfg)
+                            cfg = json.loads(cfg)
                     except Exception as e:
                         logger.warning(f"Config Generation: Failed to parse WAF rule {waf_rule['id']} config: {e}")
                         cfg = {}
