@@ -168,6 +168,53 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
         # CRITICAL: Build backend mode lookup for validation
         backend_modes = {backend['name']: backend['mode'] for backend in backends}
         
+        # ENTERPRISE COLLISION PREVENTION: Get DYNAMIC list of conflicting names
+        # 1. Query ALL agents in this cluster for their preserved_listen_blocks
+        # 2. Build union of all preserved block names
+        # 3. Skip entities that would conflict with ANY agent's preserved blocks
+        # This prevents "proxy has same name" errors during HAProxy validation
+        
+        # Static fallback list (used if no agent data available)
+        static_reserved_names = {'stats', 'haproxy-stats', 'haproxy_stats', 'monitoring', 'admin', 'health', 'status'}
+        
+        # Dynamic: Query agents' actual preserved_listen_blocks
+        agent_preserved_names = set()
+        try:
+            agent_blocks = await db_conn.fetch("""
+                SELECT a.name as agent_name, a.preserved_listen_blocks
+                FROM agents a
+                JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
+                WHERE hc.id = $1 AND a.preserved_listen_blocks IS NOT NULL AND a.is_active = TRUE
+            """, cluster_id)
+            
+            for agent in agent_blocks:
+                listen_blocks = agent['preserved_listen_blocks'] or []
+                if isinstance(listen_blocks, str):
+                    try:
+                        listen_blocks = json.loads(listen_blocks)
+                    except (ValueError, Exception):
+                        listen_blocks = []
+                
+                for block_name in listen_blocks:
+                    if isinstance(block_name, str):
+                        agent_preserved_names.add(block_name.lower())
+                        logger.debug(f"CONFIG GENERATION: Agent '{agent['agent_name']}' preserves listen block '{block_name}'")
+            
+            if agent_preserved_names:
+                logger.info(f"CONFIG GENERATION: Dynamic collision check - {len(agent_preserved_names)} preserved block names from agents: {agent_preserved_names}")
+        except Exception as e:
+            logger.warning(f"CONFIG GENERATION: Could not query agent preserved blocks (column may not exist): {e}")
+        
+        # Combine: Use dynamic names if available, otherwise use static fallback
+        # IMPORTANT: Only use static fallback if NO agent data available
+        # This allows users to create 'stats' frontend if their agents don't preserve it
+        if agent_preserved_names:
+            conflicting_names = agent_preserved_names
+            logger.info(f"CONFIG GENERATION: Using DYNAMIC collision list from agent data")
+        else:
+            conflicting_names = static_reserved_names
+            logger.info(f"CONFIG GENERATION: Using STATIC collision list (no agent preserved_listen_blocks data)")
+        
         # Add frontends with comprehensive configuration
         for frontend in frontends:
             # Validate required fields
@@ -176,6 +223,13 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 continue
             if not frontend.get('bind_port') or not frontend.get('bind_address'):
                 logger.error(f"Frontend '{frontend['name']}' has invalid bind configuration (address: {frontend.get('bind_address')}, port: {frontend.get('bind_port')}) - skipping")
+                continue
+            
+            # ENTERPRISE COLLISION CHECK: Skip entities that conflict with agent's preserved listen blocks
+            # This prevents HAProxy validation errors like "proxy has same name as proxy declared at..."
+            if frontend['name'].lower() in conflicting_names:
+                logger.warning(f"CONFIG GENERATION: Skipping frontend '{frontend['name']}' - name conflicts with agent's preserved listen block. "
+                              f"To use this frontend, remove the corresponding listen block from agent's local haproxy.cfg first.")
                 continue
             
             config_lines.append(f"frontend {frontend['name']}")
@@ -532,6 +586,12 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             # Validate required fields
             if not backend.get('name'):
                 logger.error("Backend with missing name detected - skipping")
+                continue
+            
+            # ENTERPRISE COLLISION CHECK: Skip backends that conflict with agent's preserved listen blocks
+            if backend['name'].lower() in conflicting_names:
+                logger.warning(f"CONFIG GENERATION: Skipping backend '{backend['name']}' - name conflicts with agent's preserved listen block. "
+                              f"To use this backend, remove the corresponding listen block from agent's local haproxy.cfg first.")
                 continue
             
             # CRITICAL PRE-CHECK: Get servers BEFORE starting backend config
