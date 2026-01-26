@@ -1720,9 +1720,12 @@ async def get_agent_config(agent_name: str, x_api_key: Optional[str] = Header(No
         conn = await get_database_connection()
         
         # Get agent info first to check pool
+        # CRITICAL: Include cluster's haproxy_bin_path, haproxy_config_path, stats_socket_path
+        # These are needed for dynamic validation - cluster admin can change paths without reinstalling agent
         agent_info = await conn.fetchrow("""
             SELECT a.id, a.name, a.pool_id, hc.id as cluster_id, hc.name as cluster_name,
-                   COALESCE(a.enabled, TRUE) as enabled
+                   COALESCE(a.enabled, TRUE) as enabled,
+                   hc.haproxy_bin_path, hc.haproxy_config_path, hc.stats_socket_path
             FROM agents a
             LEFT JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
             WHERE a.name = $1
@@ -1817,7 +1820,11 @@ async def get_agent_config(agent_name: str, x_api_key: Optional[str] = Header(No
             "config_content": config_version['config_content'],
             "version": config_version['version_name'],
             "checksum": config_version['checksum'],
-            "status": "available"
+            "status": "available",
+            # Dynamic paths from cluster configuration - agent should use these for validation
+            "haproxy_bin_path": agent_info.get('haproxy_bin_path', '/usr/sbin/haproxy'),
+            "haproxy_config_path": agent_info.get('haproxy_config_path', '/etc/haproxy/haproxy.cfg'),
+            "stats_socket_path": agent_info.get('stats_socket_path', '/var/run/haproxy/admin.sock')
         }
         
     except HTTPException:
