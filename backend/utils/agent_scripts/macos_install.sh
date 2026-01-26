@@ -1689,7 +1689,9 @@ check_config_updates() {
                 }
                 in_listen {
                     # Check if we hit another section (frontend, backend, listen, global, defaults)
-                    if (/^(frontend|backend|listen|global|defaults)[[:space:]]/) {
+                    # CRITICAL FIX: Match keywords followed by whitespace OR end of line
+                    # This handles "defaults" without trailing whitespace
+                    if (/^(frontend|backend|listen|global|defaults)([[:space:]]|$)/) {
                         # Print current listen block
                         gsub(/\n[[:space:]]*$/, "", listen_content)
                         print listen_content
@@ -2873,7 +2875,9 @@ CONFIG_RESPONSE_EOF
                                 }
                                 in_listen {
                                     # Check if we hit another section (frontend, backend, listen, global, defaults)
-                                    if (/^(frontend|backend|listen|global|defaults)[[:space:]]/) {
+                                    # CRITICAL FIX: Match keywords followed by whitespace OR end of line
+                                    # This handles "defaults" without trailing whitespace
+                                    if (/^(frontend|backend|listen|global|defaults)([[:space:]]|$)/) {
                                         # Print current listen block
                                         gsub(/\n[[:space:]]*$/, "", listen_content)
                                         print listen_content
