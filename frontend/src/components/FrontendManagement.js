@@ -1450,8 +1450,9 @@ const FrontendManagement = () => {
                   placeholder="Select default backend (optional)"
                   allowClear
                   showSearch
+                  optionLabelProp="label"
                   filterOption={(input, option) =>
-                    option.children.toLowerCase().indexOf(input.toLowerCase()) >= 0
+                    (option.label || '').toLowerCase().includes(input.toLowerCase())
                   }
                   onChange={(value) => {
                     if (value) {
@@ -1469,10 +1470,12 @@ const FrontendManagement = () => {
                   {backends.map(backend => {
                     const serverCount = backend.servers?.length || 0;
                     const hasServers = serverCount > 0;
+                    const backendLabel = `${backend.name} (${serverCount} server${serverCount !== 1 ? 's' : ''})${!hasServers ? ' - No servers' : ''}`;
                     return (
                       <Option 
                         key={backend.name} 
                         value={backend.name}
+                        label={backendLabel}
                         style={!hasServers ? { color: '#ff4d4f' } : {}}
                       >
                         {backend.name} ({serverCount} server{serverCount !== 1 ? 's' : ''})
