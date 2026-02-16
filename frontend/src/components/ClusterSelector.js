@@ -87,6 +87,7 @@ const ClusterSelector = () => {
       <CloudServerOutlined style={{ color: '#1890ff', flexShrink: 0 }} />
       <Select
         value={selectedCluster?.id}
+        showSearch
         style={{ 
           width: getSelectWidth(),
           minWidth: 180, 
@@ -98,6 +99,18 @@ const ClusterSelector = () => {
           if (cluster) {
             selectCluster(cluster);
           }
+        }}
+        filterOption={(input, option) => {
+          if (!input) return true;
+          const cluster = clusters.find(c => c.id === option?.value);
+          if (!cluster) return false;
+          const search = input.toLowerCase();
+          return (
+            (cluster.name || '').toLowerCase().includes(search) ||
+            (cluster.pool_name || '').toLowerCase().includes(search) ||
+            (cluster.connection_type || '').toLowerCase().includes(search) ||
+            (cluster.description || '').toLowerCase().includes(search)
+          );
         }}
         optionLabelProp="label"
         size="middle"
