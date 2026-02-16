@@ -29,6 +29,11 @@ export const verifyRealAgentSync = async (entities, selectedCluster) => {
           });
           
           const syncStatus = response.data.sync_status;
+          // If sync_status is null or has 0 enabled agents, consider as synced - nothing to wait for
+          if (!syncStatus || syncStatus.total_agents === 0) {
+            console.log(`🔍 REAL SYNC CHECK: ${entity.type}/${entity.id} - No enabled agents, considering as synced`);
+            return true;
+          }
           const isFullySynced = syncStatus?.synced_agents === syncStatus?.total_agents && 
                                syncStatus?.synced_agents > 0;
           

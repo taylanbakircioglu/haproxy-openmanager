@@ -70,7 +70,7 @@ const GlobalProgress = () => {
           </span>
         </div>
         
-        {progress.agentCounts.total > 0 && (
+        {(progress.agentCounts.total > 0 || progress.agentCounts.disabled > 0) && (
           <div style={{ 
             marginTop: 4, 
             fontSize: '12px',
@@ -79,7 +79,14 @@ const GlobalProgress = () => {
             display: 'flex',
             justifyContent: 'space-between'
           }}>
-            <span>Agents: {progress.agentCounts.synced}/{progress.agentCounts.total}</span>
+            <span>
+              Agents: {progress.agentCounts.synced}/{progress.agentCounts.total}
+              {progress.agentCounts.disabled > 0 && (
+                <span style={{ color: '#999', marginLeft: 4 }}>
+                  ({progress.agentCounts.disabled} off)
+                </span>
+              )}
+            </span>
             <span>Cluster: {progress.agentCounts.synced === progress.agentCounts.total ? '✓ Synced' : '⏳ Syncing'}</span>
           </div>
         )}

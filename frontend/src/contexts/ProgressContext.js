@@ -21,7 +21,7 @@ export const ProgressProvider = ({ children }) => {
     startTime: null,
     details: {},
     entityCounts: { synced: 0, total: 0 },
-    agentCounts: { synced: 0, total: 0 }
+    agentCounts: { synced: 0, total: 0, disabled: 0 }
   });
 
   // Auto-hide progress after completion
@@ -63,11 +63,11 @@ export const ProgressProvider = ({ children }) => {
     }));
   };
 
-  const updateEntityCounts = (syncedEntities, totalEntities, syncedAgents, totalAgents) => {
+  const updateEntityCounts = (syncedEntities, totalEntities, syncedAgents, totalAgents, disabledAgents = 0) => {
     setGlobalProgress(prev => ({
       ...prev,
       entityCounts: { synced: syncedEntities || 0, total: totalEntities || 0 },
-      agentCounts: { synced: syncedAgents || 0, total: totalAgents || 0 }
+      agentCounts: { synced: syncedAgents || 0, total: totalAgents || 0, disabled: disabledAgents || 0 }
     }));
   };
 
