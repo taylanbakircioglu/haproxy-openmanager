@@ -179,7 +179,13 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                                WHERE cv2.cluster_id = $1 
                                AND cv2.version_name LIKE 'ssl-' || s.id || '-%'
                                AND cv2.status = 'PENDING'
-                           ) as has_pending_config
+                           ) as has_pending_config,
+                           (SELECT COUNT(*) FROM frontends f
+                            WHERE f.is_active = TRUE AND (f.ssl_certificate_id = s.id OR f.ssl_certificate_ids @> to_jsonb(s.id)))
+                           +
+                           (SELECT COUNT(*) FROM backend_servers bs
+                            WHERE bs.is_active = TRUE AND bs.ssl_certificate_id = s.id)
+                           as usage_count
                     FROM ssl_certificates s
                     LEFT JOIN ssl_certificate_clusters scc ON s.id = scc.ssl_certificate_id
                     LEFT JOIN haproxy_clusters c ON scc.cluster_id = c.id
@@ -202,7 +208,13 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                 certificates = await conn.fetch(f"""
                     SELECT id, name, domain, expiry_date, issuer, fingerprint, status, 
                            days_until_expiry, all_domains, is_active, cluster_id, usage_type,
-                           created_at, updated_at
+                           created_at, updated_at,
+                           (SELECT COUNT(*) FROM frontends f
+                            WHERE f.is_active = TRUE AND (f.ssl_certificate_id = ssl_certificates.id OR f.ssl_certificate_ids @> to_jsonb(ssl_certificates.id)))
+                           +
+                           (SELECT COUNT(*) FROM backend_servers bs
+                            WHERE bs.is_active = TRUE AND bs.ssl_certificate_id = ssl_certificates.id)
+                           as usage_count
                     FROM ssl_certificates
                     WHERE {where_clause}
                     ORDER BY created_at DESC
@@ -241,6 +253,7 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                     'created_at': cert['created_at'].isoformat().replace('+00:00', 'Z') if cert['created_at'] else None,
                     'updated_at': cert['updated_at'].isoformat().replace('+00:00', 'Z') if cert['updated_at'] else None,
                     'is_active': cert['is_active'],
+                    'usage_count': cert.get('usage_count', 0),
                     'last_config_status': cert.get('last_config_status'),
                     'has_pending_config': cert.get('has_pending_config', False)
                 }
@@ -612,6 +625,27 @@ async def get_ssl_certificate(cert_id: int, authorization: str = Header(None)):
         # For now, assume no pending changes (SSL config versions need separate implementation)
         pending_versions = 0
         
+        # Query usage: which frontends reference this certificate
+        used_by_frontends = await conn.fetch("""
+            SELECT f.id, f.name, hc.name as cluster_name
+            FROM frontends f
+            LEFT JOIN haproxy_clusters hc ON f.cluster_id = hc.id
+            WHERE f.is_active = TRUE AND (
+                f.ssl_certificate_id = $1
+                OR f.ssl_certificate_ids @> to_jsonb($1)
+            )
+            ORDER BY f.name
+        """, cert_id)
+        
+        # Query usage: which backend servers reference this certificate
+        used_by_servers = await conn.fetch("""
+            SELECT bs.id, bs.server_name, bs.backend_name, hc.name as cluster_name
+            FROM backend_servers bs
+            LEFT JOIN haproxy_clusters hc ON bs.cluster_id = hc.id
+            WHERE bs.is_active = TRUE AND bs.ssl_certificate_id = $1
+            ORDER BY bs.backend_name, bs.server_name
+        """, cert_id)
+        
         await close_database_connection(conn)
         
         # Convert record to dict and handle JSON fields safely
@@ -628,6 +662,17 @@ async def get_ssl_certificate(cert_id: int, authorization: str = Header(None)):
             cert_dict['all_domains'] = []
         
         cert_dict['has_pending_config'] = pending_versions > 0
+        
+        cert_dict['usage_count'] = len(used_by_frontends) + len(used_by_servers)
+        cert_dict['used_by_frontends'] = [
+            {'id': f['id'], 'name': f['name'], 'cluster_name': f['cluster_name']}
+            for f in used_by_frontends
+        ]
+        cert_dict['used_by_servers'] = [
+            {'id': s['id'], 'server_name': s['server_name'],
+             'backend_name': s['backend_name'], 'cluster_name': s['cluster_name']}
+            for s in used_by_servers
+        ]
         
         return cert_dict
         

@@ -31,6 +31,7 @@ const SSLManagement = () => {
   const [viewModalVisible, setViewModalVisible] = useState(false);
   const [selectedCertificate, setSelectedCertificate] = useState(null);
   const [pendingChanges, setPendingChanges] = useState(false);
+  const [usageSearch, setUsageSearch] = useState('');
   const [form] = Form.useForm();
   
   // Filter states with localStorage persistence
@@ -232,6 +233,7 @@ const SSLManagement = () => {
     try {
       const response = await axios.get(`/api/ssl/certificates/${certificate.id}`);
       setSelectedCertificate(response.data);
+      setUsageSearch('');
       setViewModalVisible(true);
     } catch (error) {
       message.error('Failed to load certificate details: ' + error.message);
@@ -749,9 +751,9 @@ const SSLManagement = () => {
         <Col span={6}>
           <Card size="small" style={{ textAlign: 'center' }}>
             <div style={{ fontSize: 20, fontWeight: 'bold', color: '#1890ff' }}>
-              {certificates.filter(c => c.is_active).length}
+              {certificates.filter(c => c.usage_count > 0).length}
             </div>
-            <div>Active</div>
+            <div>In Use</div>
           </Card>
         </Col>
         <Col span={6}>
@@ -1017,10 +1019,12 @@ MIIEvgIBADANBgkqhkiG9w0BAQEF...
                   <Card size="small" title="Certificate Info">
                     <p><strong>Name:</strong> {selectedCertificate.name}</p>
                     <p><strong>Domain:</strong> {selectedCertificate.domain}</p>
-                    <p><strong>Status:</strong> 
+                    <p><strong>Usage:</strong> 
                       <Badge 
-                        status={selectedCertificate.is_active ? 'success' : 'error'} 
-                        text={selectedCertificate.is_active ? 'Active' : 'Inactive'} 
+                        status={selectedCertificate.usage_count > 0 ? 'success' : 'warning'} 
+                        text={selectedCertificate.usage_count > 0
+                          ? `In Use (${selectedCertificate.usage_count})`
+                          : 'Not In Use'} 
                         style={{ marginLeft: 8 }}
                       />
                     </p>
@@ -1102,6 +1106,90 @@ MIIEvgIBADANBgkqhkiG9w0BAQEF...
                 readOnly
                 style={{ fontFamily: 'monospace' }}
               />
+            </TabPane>
+            <TabPane tab={
+              <span>
+                Usage {selectedCertificate.usage_count > 0 &&
+                  <Badge count={selectedCertificate.usage_count} size="small"
+                    style={{ marginLeft: 4, backgroundColor: '#1890ff' }} />
+                }
+              </span>
+            } key="4">
+              {selectedCertificate.usage_count > 0 ? (
+                <div>
+                  <Alert
+                    message={`In Use — ${selectedCertificate.used_by_frontends?.length || 0} frontend(s), ${selectedCertificate.used_by_servers?.length || 0} server(s)`}
+                    type="success"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                  />
+                  <Input
+                    placeholder="Search by name, backend, or cluster..."
+                    prefix={<SearchOutlined />}
+                    allowClear
+                    onChange={e => setUsageSearch(e.target.value)}
+                    value={usageSearch}
+                    style={{ marginBottom: 16 }}
+                  />
+                  {selectedCertificate.used_by_frontends?.length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <Title level={5}>Frontends</Title>
+                      <Table
+                        dataSource={
+                          (selectedCertificate.used_by_frontends || []).filter(f => {
+                            if (!usageSearch) return true;
+                            const s = usageSearch.toLowerCase();
+                            return (f.name || '').toLowerCase().includes(s) ||
+                                   (f.cluster_name || '').toLowerCase().includes(s);
+                          })
+                        }
+                        columns={[
+                          { title: 'Frontend Name', dataIndex: 'name', key: 'name' },
+                          { title: 'Cluster', dataIndex: 'cluster_name', key: 'cluster_name',
+                            render: v => v || <Tag color="blue">Global</Tag> }
+                        ]}
+                        rowKey="id"
+                        size="small"
+                        pagination={{ pageSize: 5, hideOnSinglePage: true }}
+                        locale={{ emptyText: 'No matching frontends' }}
+                      />
+                    </div>
+                  )}
+                  {selectedCertificate.used_by_servers?.length > 0 && (
+                    <div>
+                      <Title level={5}>Backend Servers</Title>
+                      <Table
+                        dataSource={
+                          (selectedCertificate.used_by_servers || []).filter(sv => {
+                            if (!usageSearch) return true;
+                            const s = usageSearch.toLowerCase();
+                            return (sv.server_name || '').toLowerCase().includes(s) ||
+                                   (sv.backend_name || '').toLowerCase().includes(s) ||
+                                   (sv.cluster_name || '').toLowerCase().includes(s);
+                          })
+                        }
+                        columns={[
+                          { title: 'Server Name', dataIndex: 'server_name', key: 'server_name' },
+                          { title: 'Backend', dataIndex: 'backend_name', key: 'backend_name' },
+                          { title: 'Cluster', dataIndex: 'cluster_name', key: 'cluster_name',
+                            render: v => v || <Tag color="blue">Global</Tag> }
+                        ]}
+                        rowKey="id"
+                        size="small"
+                        pagination={{ pageSize: 5, hideOnSinglePage: true }}
+                        locale={{ emptyText: 'No matching servers' }}
+                      />
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <Alert
+                  message="Not In Use"
+                  description="This certificate is not referenced by any frontend or backend server."
+                  type="warning"
+                  showIcon
+                />
+              )}
             </TabPane>
           </Tabs>
         )}
