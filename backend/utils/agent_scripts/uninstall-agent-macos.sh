@@ -60,28 +60,58 @@ patterns=(
     "nohup.*haproxy-agent"
 )
 
+SELF_PID=$$
+
 for pattern in "${patterns[@]}"; do
     pids=$(pgrep -f "$pattern" 2>/dev/null || true)
     if [[ -n "$pids" ]]; then
-        echo "  Killing processes matching: $pattern (PIDs: $pids)"
-        kill -TERM $pids 2>/dev/null || true
-        sleep 2
-        # Force kill if still running
-        remaining=$(pgrep -f "$pattern" 2>/dev/null || true)
-        if [[ -n "$remaining" ]]; then
-            echo "  Force killing remaining: $remaining"
-            kill -KILL $remaining 2>/dev/null || true
-            sleep 1
+        # Filter out our own PID and parent PID to avoid killing ourselves
+        filtered_pids=""
+        for p in $pids; do
+            if [[ "$p" != "$SELF_PID" && "$p" != "$PPID" ]]; then
+                filtered_pids="$filtered_pids $p"
+            fi
+        done
+        filtered_pids=$(echo "$filtered_pids" | xargs)
+        if [[ -n "$filtered_pids" ]]; then
+            echo "  Killing processes matching: $pattern (PIDs: $filtered_pids)"
+            kill -TERM $filtered_pids 2>/dev/null || true
+            sleep 2
+            # Force kill if still running
+            remaining=$(pgrep -f "$pattern" 2>/dev/null || true)
+            if [[ -n "$remaining" ]]; then
+                rem_filtered=""
+                for p in $remaining; do
+                    if [[ "$p" != "$SELF_PID" && "$p" != "$PPID" ]]; then
+                        rem_filtered="$rem_filtered $p"
+                    fi
+                done
+                rem_filtered=$(echo "$rem_filtered" | xargs)
+                if [[ -n "$rem_filtered" ]]; then
+                    echo "  Force killing remaining: $rem_filtered"
+                    kill -KILL $rem_filtered 2>/dev/null || true
+                    sleep 1
+                fi
+            fi
+            killed_count=$((killed_count + $(echo "$filtered_pids" | wc -w)))
         fi
-        killed_count=$((killed_count + $(echo "$pids" | wc -w)))
     fi
 done
 
-# Final sweep
+# Final sweep (exclude self)
 final_pids=$(pgrep -f "haproxy-agent" 2>/dev/null || true)
 if [[ -n "$final_pids" ]]; then
-    echo "  Final cleanup: force killing PIDs $final_pids"
-    kill -KILL $final_pids 2>/dev/null || true
+    final_filtered=""
+    for p in $final_pids; do
+        if [[ "$p" != "$SELF_PID" && "$p" != "$PPID" ]]; then
+            final_filtered="$final_filtered $p"
+        fi
+    done
+    final_filtered=$(echo "$final_filtered" | xargs)
+    if [[ -n "$final_filtered" ]]; then
+        echo "  Final cleanup: force killing PIDs $final_filtered"
+        kill -KILL $final_filtered 2>/dev/null || true
+    fi
 fi
 
 if [[ $killed_count -gt 0 ]]; then
