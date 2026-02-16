@@ -310,6 +310,11 @@ const ApplyManagement = () => {
             });
             
             const syncStatus = response.data.sync_status;
+            // If sync_status is null or has 0 enabled agents, consider as synced - nothing to wait for
+            if (!syncStatus || syncStatus.total_agents === 0) {
+              console.log(`🔍 REAL SYNC CHECK: ${entity.type}/${entity.id} - No enabled agents, considering as synced`);
+              return true;
+            }
             const isFullySynced = syncStatus?.synced_agents === syncStatus?.total_agents && 
                                  syncStatus?.synced_agents > 0;
             
@@ -419,6 +424,7 @@ const ApplyManagement = () => {
       // Calculate entity and agent counts for progress display
       const totalEntities = appliedEntities.length;
       const totalAgents = agentSync?.total_agents || selectedCluster?.total_agents || 1;
+      const disabledAgents = agentSync?.disabled_agents || 0;
       
       // Detect if this is a restore operation (safe display-only check)
       const pendingVersions = configVersions.filter(v => v.status === 'PENDING');
@@ -428,12 +434,12 @@ const ApplyManagement = () => {
         // Restore operation: Show "Configuration" instead of "Entities"
         setSyncProgress({ visible: true, step: `Applying configuration restore... Configuration: 0/1, Agents: ⏳`, progress: 20 });
         startProgress('apply', `Applying configuration restore... Configuration: 0/1, Agents: ⏳`);
-        updateEntityCounts(0, 1, 0, totalAgents); // Show 1 configuration item
+        updateEntityCounts(0, 1, 0, totalAgents, disabledAgents); // Show 1 configuration item
       } else {
         // Normal operation: Show "Entities" as usual
         setSyncProgress({ visible: true, step: `Applying configuration changes... Entities: 0/${totalEntities}, Agents: ⏳`, progress: 20 });
         startProgress('apply', `Applying configuration changes... Entities: 0/${totalEntities}, Agents: ⏳`);
-        updateEntityCounts(0, totalEntities, 0, totalAgents);
+        updateEntityCounts(0, totalEntities, 0, totalAgents, disabledAgents);
       }
     
     try {
@@ -450,7 +456,7 @@ const ApplyManagement = () => {
       
       setSyncProgress({ visible: true, step: `Configuration applied, syncing agents... Entities: ${totalEntities}/${totalEntities}, Agents: 0/${totalAgents}`, progress: 60 });
       updateProgress(`Configuration applied, syncing agents... Entities: ${totalEntities}/${totalEntities}, Agents: 0/${totalAgents}`, 60);
-      updateEntityCounts(totalEntities, totalEntities, 0, totalAgents);
+      updateEntityCounts(totalEntities, totalEntities, 0, totalAgents, disabledAgents);
       
       // Refresh data immediately
       console.log('[REFRESHING DATA] after apply...');
@@ -478,8 +484,11 @@ const ApplyManagement = () => {
         
         // Additional check: Verify cluster-wide agent sync is also complete
         // Use fresh data instead of stale state
-        const clusterSyncComplete = freshAgentSync?.synced_agents === freshAgentSync?.total_agents && 
-                                   freshAgentSync?.synced_agents > 0;
+        // If no enabled agents exist (all disabled), cluster sync is inherently complete
+        const noEnabledAgents = freshAgentSync?.total_agents === 0 && freshAgentSync?.disabled_agents > 0;
+        const clusterSyncComplete = noEnabledAgents || 
+                                   (freshAgentSync?.synced_agents === freshAgentSync?.total_agents && 
+                                   freshAgentSync?.synced_agents > 0);
         
         
         // Check for restore operation completion
@@ -541,9 +550,9 @@ const ApplyManagement = () => {
           });
           
           if (isRestoreOperation) {
-            updateEntityCounts(clusterSyncComplete ? 1 : 0, 1, freshAgentSync?.synced_agents || 0, freshAgentSync?.total_agents || totalAgents);
+            updateEntityCounts(clusterSyncComplete ? 1 : 0, 1, freshAgentSync?.synced_agents || 0, freshAgentSync?.total_agents || totalAgents, freshAgentSync?.disabled_agents || disabledAgents);
           } else {
-            updateEntityCounts(syncedCount, appliedEntities.length, freshAgentSync?.synced_agents || 0, freshAgentSync?.total_agents || totalAgents);
+            updateEntityCounts(syncedCount, appliedEntities.length, freshAgentSync?.synced_agents || 0, freshAgentSync?.total_agents || totalAgents, freshAgentSync?.disabled_agents || disabledAgents);
           }
           setTimeout(checkAgentSync, 3000);
         } else {
@@ -565,12 +574,14 @@ const ApplyManagement = () => {
             'Cluster Status': clusterStatus === '✓' ? 'Synced' : 'Syncing',
             'Status': 'Monitoring continues...'
           });
-          updateEntityCounts(syncedCount, appliedEntities.length, freshAgentSync?.synced_agents || 0, freshAgentSync?.total_agents || totalAgents);
+          updateEntityCounts(syncedCount, appliedEntities.length, freshAgentSync?.synced_agents || 0, freshAgentSync?.total_agents || totalAgents, freshAgentSync?.disabled_agents || disabledAgents);
           
           // Check if we should complete the progress
           // CRITICAL: Recalculate clusterSyncComplete with fresh agentSync data
-          const freshClusterSyncComplete = freshAgentSync?.synced_agents === freshAgentSync?.total_agents && 
-                                          freshAgentSync?.synced_agents > 0;
+          const freshNoEnabledAgents = freshAgentSync?.total_agents === 0 && freshAgentSync?.disabled_agents > 0;
+          const freshClusterSyncComplete = freshNoEnabledAgents ||
+                                          (freshAgentSync?.synced_agents === freshAgentSync?.total_agents && 
+                                          freshAgentSync?.synced_agents > 0);
           console.log('🔍 FRESH CLUSTER SYNC CHECK:', { 
             isAllSynced, 
             freshClusterSyncComplete,
@@ -1375,7 +1386,10 @@ const ApplyManagement = () => {
                       <Space>
                         <Tag color="green">Synced: {agentSync.synced_agents || 0}</Tag>
                         <Tag color="red">Unsynced: {agentSync.unsynced_agents || 0}</Tag>
-                        <Tag>Total: {agentSync.total_agents || 0}</Tag>
+                        <Tag>Active: {agentSync.total_agents || 0}</Tag>
+                        {agentSync.disabled_agents > 0 && (
+                          <Tag color="default">Disabled: {agentSync.disabled_agents}</Tag>
+                        )}
                       </Space>
                     </Descriptions.Item>
                     {agentSync.validation_error && (
@@ -1479,21 +1493,37 @@ const ApplyManagement = () => {
                     rowKey={(r) => r.id}
                     dataSource={agentSync.agents || []}
                     columns={[
-                      { title: 'Agent', dataIndex: 'name', key: 'name' },
+                      { 
+                        title: 'Agent', 
+                        dataIndex: 'name', 
+                        key: 'name',
+                        render: (name, record) => (
+                          <span>
+                            {name}
+                            {record.sync_excluded && (
+                              <Tag color="default" style={{ marginLeft: 6, fontSize: '10px' }}>OFF</Tag>
+                            )}
+                          </span>
+                        )
+                      },
                       { 
                         title: 'Agent Status', 
                         dataIndex: 'status', 
                         key: 'status',
-                        render: (s) => (
-                          <Tag color={s === 'online' ? 'green' : 'default'}>{s || '-'}</Tag>
+                        render: (s, record) => (
+                          record.sync_excluded 
+                            ? <Tag color="default">disabled</Tag>
+                            : <Tag color={s === 'online' ? 'green' : 'default'}>{s || '-'}</Tag>
                         )
                       },
                       { 
                         title: 'HAProxy', 
                         dataIndex: 'haproxy_status', 
                         key: 'haproxy_status',
-                        render: (s) => (
-                          <Tag color={s === 'running' ? 'green' : 'default'}>{s || '-'}</Tag>
+                        render: (s, record) => (
+                          record.sync_excluded 
+                            ? <Tag color="default">-</Tag>
+                            : <Tag color={s === 'running' ? 'green' : 'default'}>{s || '-'}</Tag>
                         )
                       },
                       { title: 'Delivered Version', dataIndex: 'delivered_version', key: 'delivered_version', render: (v) => <Text code>{v || '-'}</Text> },
@@ -1501,8 +1531,10 @@ const ApplyManagement = () => {
                         title: 'In Sync', 
                         dataIndex: 'in_sync', 
                         key: 'in_sync',
-                        render: (val) => (
-                          <Tag color={val ? 'green' : 'red'}>{val ? 'Yes' : 'No'}</Tag>
+                        render: (val, record) => (
+                          record.sync_excluded 
+                            ? <Tag color="default">Excluded</Tag>
+                            : <Tag color={val ? 'green' : 'red'}>{val ? 'Yes' : 'No'}</Tag>
                         )
                       },
                       { title: 'Last Seen', dataIndex: 'last_seen', key: 'last_seen', render: (v) => v ? new Date(v).toLocaleString() : '-' },

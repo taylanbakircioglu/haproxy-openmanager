@@ -688,20 +688,43 @@ async def get_cluster_agent_sync_status(cluster_id: int, authorization: str = He
 
         await close_database_connection(conn)
 
-        # Compute sync stats
+        # Compute sync stats - only count enabled agents for sync tracking
         agent_items = []
-        total = len(agents)
+        total_all = len(agents)
+        total_enabled = 0
+        disabled_count = 0
         online = 0
         synced = 0
         for ag in agents:
+            is_enabled = ag.get("enabled", True)
             is_online = (ag.get("status") == "online")
+            
+            if not is_enabled:
+                # Disabled agents are excluded from sync calculations
+                disabled_count += 1
+                agent_items.append({
+                    "id": ag["id"],
+                    "name": ag["name"],
+                    "enabled": False,
+                    "status": ag.get("status", "unknown"),
+                    "haproxy_status": ag.get("haproxy_status", "unknown"),
+                    "last_seen": ag["last_seen"].isoformat().replace('+00:00', 'Z') if ag.get("last_seen") else None,
+                    "delivered_version": ag.get("config_version"),
+                    "applied_version": ag.get("applied_config_version"),
+                    "in_sync": None,  # Not applicable for disabled agents
+                    "sync_excluded": True,
+                })
+                logger.info(f"CLUSTER SYNC: Agent {ag['name']} - DISABLED (excluded from sync)")
+                continue
+            
+            total_enabled += 1
             if is_online:
                 online += 1
             delivered_version = ag.get("config_version")
             applied_version = ag.get("applied_config_version")
             haproxy_status = ag.get("haproxy_status", "unknown")
             
-            # CRITICAL FIX: Agent is in sync ONLY if:
+            # Agent is in sync ONLY if:
             # 1. It has applied the latest version AND
             # 2. HAProxy service is running successfully
             version_matches = bool(latest_version and applied_version == latest_version)
@@ -725,13 +748,14 @@ async def get_cluster_agent_sync_status(cluster_id: int, authorization: str = He
             agent_items.append({
                 "id": ag["id"],
                 "name": ag["name"],
-                "enabled": ag.get("enabled", True),
+                "enabled": True,
                 "status": ag.get("status", "unknown"),
                 "haproxy_status": ag.get("haproxy_status", "unknown"),
                 "last_seen": ag["last_seen"].isoformat().replace('+00:00', 'Z') if ag.get("last_seen") else None,
                 "delivered_version": delivered_version,
                 "applied_version": applied_version,
                 "in_sync": in_sync,
+                "sync_excluded": False,
             })
 
         return {
@@ -741,10 +765,12 @@ async def get_cluster_agent_sync_status(cluster_id: int, authorization: str = He
             "validation_error": validation_error,
             "validation_error_reported_at": validation_error_reported_at,
             "parsed_error": parsed_error,
-            "total_agents": total,
+            "total_agents": total_enabled,
             "online_agents": online,
             "synced_agents": synced,
-            "unsynced_agents": max(0, total - synced),
+            "unsynced_agents": max(0, total_enabled - synced),
+            "disabled_agents": disabled_count,
+            "total_agents_including_disabled": total_all,
             "agents": agent_items,
         }
     except HTTPException:
@@ -3965,10 +3991,32 @@ async def get_ssl_certificate_agent_sync_status(cluster_id: int, cert_id: int, a
         # 3. Agent has applied the latest cluster config version (which includes SSL changes)
         
         agent_items = []
-        total = len(agents)
+        total_enabled = 0
+        disabled_count = 0
         synced = 0
         
         for ag in agents:
+            is_enabled = ag.get("enabled", True)
+            
+            if not is_enabled:
+                # Disabled agents are excluded from SSL sync calculations
+                disabled_count += 1
+                agent_items.append({
+                    "name": ag["name"],
+                    "enabled": False,
+                    "status": ag.get("status", "unknown"),
+                    "haproxy_status": ag.get("haproxy_status", "unknown"),
+                    "last_seen": ag["last_seen"].isoformat() if ag.get("last_seen") else None,
+                    "delivered_version": ag.get("applied_config_version"),
+                    "expected_ssl_path": expected_ssl_path,
+                    "ssl_file_deployed": None,
+                    "in_sync": None,
+                    "sync_excluded": True
+                })
+                logger.info(f"SSL SYNC: Agent {ag['name']} - DISABLED (excluded from sync)")
+                continue
+            
+            total_enabled += 1
             is_online = (ag.get("status") == "online")
             delivered_version = ag.get("applied_config_version")
             
@@ -3988,13 +4036,15 @@ async def get_ssl_certificate_agent_sync_status(cluster_id: int, cert_id: int, a
                 
             agent_items.append({
                 "name": ag["name"],
+                "enabled": True,
                 "status": ag.get("status", "unknown"),
                 "haproxy_status": ag.get("haproxy_status", "unknown"),
                 "last_seen": ag["last_seen"].isoformat() if ag.get("last_seen") else None,
                 "delivered_version": delivered_version,
                 "expected_ssl_path": expected_ssl_path,
                 "ssl_file_deployed": ssl_file_deployed,
-                "in_sync": in_sync
+                "in_sync": in_sync,
+                "sync_excluded": False
             })
 
         # Get SSL certificate entity_updated_at for proper sync status detection
@@ -4035,14 +4085,15 @@ async def get_ssl_certificate_agent_sync_status(cluster_id: int, cert_id: int, a
         return {
             "sync_status": {
                 "synced_agents": synced,
-                "total_agents": total,
-                "sync_percentage": round((synced / total * 100) if total > 0 else 100, 1),
+                "total_agents": total_enabled,
+                "disabled_agents": disabled_count,
+                "sync_percentage": round((synced / total_enabled * 100) if total_enabled > 0 else 100, 1),
                 "last_sync_check": datetime.now(timezone.utc).isoformat()
             },
             "entity_updated_at": entity_updated_at.isoformat() if entity_updated_at else None,
             "latest_applied_version": latest_version,
             "latest_version_created_at": latest_version_created_at.isoformat() if latest_version_created_at else None,
-            "last_applied_by": last_applied_by,  # NEW: Show who applied last
+            "last_applied_by": last_applied_by,
             "ssl_certificate": {
                 "name": ssl_cert["name"],
                 "domain": ssl_cert["primary_domain"],
