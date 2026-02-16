@@ -260,6 +260,13 @@ fi
 if [[ "$DAEMON_MODE" == "true" ]]; then
     log "INFO" "DAEMON: Starting agent daemon with existing configuration..."
     
+    # Verify jq is available (required for config parsing in daemon mode)
+    if ! command -v jq &> /dev/null; then
+        log "ERROR" "DAEMON: jq is required but not found. Cannot parse agent configuration."
+        echo "FATAL: jq is not installed. Install jq and restart the agent service." >&2
+        exit 1
+    fi
+    
     # Load existing configuration
     CONFIG_FILE="/etc/haproxy-agent/config.json"
     LOG_FILE="/var/log/haproxy-agent/agent.log"
@@ -297,6 +304,31 @@ HAPROXY_CONFIG_PATH="{{HAPROXY_CONFIG_PATH}}"
 HAPROXY_BIN_PATH="{{HAPROXY_BIN_PATH}}"
 STATS_SOCKET_PATH="{{STATS_SOCKET_PATH}}"
 HAPROXY_SERVICE_NAME="haproxy"
+
+# Verify curl is available before any network operations
+if [[ "$SKIP_TO_DAEMON" != "true" ]]; then
+    if ! command -v curl &> /dev/null; then
+        log "ERROR" "curl is not installed. Attempting to install..."
+        CURL_INSTALLED=false
+        if command -v apt-get &> /dev/null; then
+            apt-get update -qq && apt-get install -y -qq curl && CURL_INSTALLED=true
+        elif command -v dnf &> /dev/null; then
+            dnf install -y -q curl && CURL_INSTALLED=true
+        elif command -v yum &> /dev/null; then
+            yum install -y -q curl && CURL_INSTALLED=true
+        elif command -v apk &> /dev/null; then
+            apk add --no-cache curl && CURL_INSTALLED=true
+        fi
+        if [[ "$CURL_INSTALLED" != "true" ]] || ! command -v curl &> /dev/null; then
+            log "ERROR" "Failed to install curl automatically."
+            echo ""
+            echo "   curl is required for this agent to communicate with the management server."
+            echo "   Please install it manually and re-run this script."
+            exit 1
+        fi
+        log "INFO" "curl installed successfully"
+    fi
+fi
 
 # Skip authentication if we already have token from config (daemon mode)
 if [[ "$SKIP_TO_DAEMON" == "true" && -n "$AGENT_TOKEN" ]]; then
@@ -528,6 +560,59 @@ fi
 
 # Skip validation if in daemon mode
 if [[ "$SKIP_TO_DAEMON" != "true" ]]; then
+    # CRITICAL: Ensure jq is available before cluster validation (which requires it)
+    if ! command -v jq &> /dev/null; then
+        log "WARN" "jq is not installed. Attempting to install..."
+        JQ_INSTALLED=false
+
+        # Detect package manager and install jq
+        if command -v apt-get &> /dev/null; then
+            log "INFO" "Detected apt-get (Debian/Ubuntu)"
+            if apt-get update -qq && apt-get install -y -qq jq; then
+                JQ_INSTALLED=true
+            fi
+        elif command -v dnf &> /dev/null; then
+            log "INFO" "Detected dnf (RHEL/Fedora/CentOS 8+)"
+            if dnf install -y -q jq; then
+                JQ_INSTALLED=true
+            fi
+        elif command -v yum &> /dev/null; then
+            log "INFO" "Detected yum (RHEL/CentOS 7)"
+            if yum install -y -q jq; then
+                JQ_INSTALLED=true
+            fi
+        elif command -v zypper &> /dev/null; then
+            log "INFO" "Detected zypper (SUSE/openSUSE)"
+            if zypper --non-interactive install -y jq; then
+                JQ_INSTALLED=true
+            fi
+        elif command -v apk &> /dev/null; then
+            log "INFO" "Detected apk (Alpine Linux)"
+            if apk add --no-cache jq; then
+                JQ_INSTALLED=true
+            fi
+        fi
+
+        if [[ "$JQ_INSTALLED" != "true" ]] || ! command -v jq &> /dev/null; then
+            log "ERROR" "Failed to install jq automatically."
+            echo ""
+            echo "   jq is required for this agent to function."
+            echo "   Please install it manually using one of the following commands:"
+            echo ""
+            echo "     Debian/Ubuntu:    sudo apt-get install -y jq"
+            echo "     RHEL/CentOS 8+:   sudo dnf install -y jq"
+            echo "     RHEL/CentOS 7:    sudo yum install -y jq"
+            echo "     SUSE/openSUSE:    sudo zypper install -y jq"
+            echo "     Alpine Linux:     sudo apk add jq"
+            echo ""
+            echo "   After installing jq, re-run this script."
+            exit 1
+        fi
+        log "INFO" "jq installed successfully: $(jq --version)"
+    else
+        log "INFO" "jq found: $(jq --version)"
+    fi
+
     # Validate cluster exists by checking management API
     log "DEBUG" "Validating HAProxy Cluster..."
     CLUSTER_CHECK=$("$CURL_BIN" -k -s -f "$MANAGEMENT_URL/api/clusters" -H "User-Agent: haproxy-agent-installer" || echo "FAILED")
@@ -650,19 +735,10 @@ check_dependencies() {
         mkdir -p "$STATS_DIR"
     fi
     
-    # Check if jq is installed
+    # Verify jq is available (should already be installed from early check)
     if ! command -v jq &> /dev/null; then
-        log "WARN" "jq not found. Installing..."
-        if command -v apt-get &> /dev/null; then
-            apt-get install -y jq
-        elif command -v yum &> /dev/null; then
-            yum install -y jq
-        elif command -v dnf &> /dev/null; then
-            dnf install -y jq
-        else
-            log "ERROR" "Cannot install jq automatically. Please install manually."
-            exit 1
-        fi
+        log "ERROR" "jq is required but not installed. Please install jq and re-run this script."
+        exit 1
     fi
     log "INFO" "jq found: $(jq --version)"
     
@@ -681,6 +757,25 @@ check_dependencies() {
         fi
     fi
     log "INFO" "socat found: $(socat -V | head -1)"
+    
+    # Check if openssl is installed (required for SSL certificate deployment)
+    if ! command -v openssl &> /dev/null; then
+        log "WARN" "openssl not found. Installing..."
+        if command -v apt-get &> /dev/null; then
+            apt-get install -y -qq openssl
+        elif command -v dnf &> /dev/null; then
+            dnf install -y -q openssl
+        elif command -v yum &> /dev/null; then
+            yum install -y -q openssl
+        elif command -v apk &> /dev/null; then
+            apk add --no-cache openssl
+        else
+            log "WARN" "Cannot install openssl automatically. SSL certificate features may not work."
+        fi
+    fi
+    if command -v openssl &> /dev/null; then
+        log "INFO" "openssl found: $(openssl version)"
+    fi
 }
 
 # Skip dependency check if in daemon mode
@@ -831,6 +926,12 @@ find_binary() {
 CURL_BIN=$(find_binary curl)
 if [[ -z "$CURL_BIN" ]]; then
     echo "ERROR: curl not found in system" >&2
+    exit 1
+fi
+
+# Verify jq is available (critical dependency for JSON config parsing)
+if ! command -v jq &> /dev/null; then
+    echo "ERROR: jq not found. Install jq and restart the agent service." >&2
     exit 1
 fi
 

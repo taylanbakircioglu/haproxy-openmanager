@@ -109,6 +109,13 @@ log "DEBUG" "Config file exists: $(test -f "/etc/haproxy-agent/config.json" && e
 if [[ "$1" == "daemon" && -f "/etc/haproxy-agent/config.json" ]] || [[ "$HAPROXY_AGENT_SKIP_SETUP" == "true" ]]; then
     log "INFO" "Starting agent daemon with existing configuration..."
     
+    # Verify jq is available (required for config parsing in daemon mode)
+    if ! command -v jq &> /dev/null; then
+        log "ERROR" "DAEMON: jq is required but not found. Cannot parse agent configuration."
+        echo "FATAL: jq is not installed. Install jq (brew install jq) and restart the agent service." >&2
+        exit 1
+    fi
+    
     # Use provided config file or default
     CONFIG_FILE="${HAPROXY_AGENT_CONFIG_FILE:-/etc/haproxy-agent/config.json}"
     LOG_FILE="/var/log/haproxy-agent/agent.log"
@@ -145,6 +152,24 @@ HAPROXY_CONFIG_PATH="{{HAPROXY_CONFIG_PATH}}"
 HAPROXY_BIN_PATH="{{HAPROXY_BIN_PATH}}"
 STATS_SOCKET_PATH="{{STATS_SOCKET_PATH}}"
 HAPROXY_SERVICE_NAME="haproxy"
+
+# Verify curl is available before any network operations
+if [[ "$SKIP_TO_DAEMON" != "true" ]]; then
+    if ! command -v curl &> /dev/null; then
+        log "ERROR" "curl is not installed."
+        if command -v brew &> /dev/null; then
+            log "INFO" "Attempting to install curl via Homebrew..."
+            brew install curl 2>/dev/null
+        fi
+        if ! command -v curl &> /dev/null; then
+            echo ""
+            echo "   curl is required for this agent to communicate with the management server."
+            echo "   Please install it: brew install curl"
+            exit 1
+        fi
+        log "INFO" "curl installed successfully"
+    fi
+fi
 
 # Skip authentication if we already have token from config (daemon mode)
 if [[ "$SKIP_TO_DAEMON" == "true" && -n "$AGENT_TOKEN" ]]; then
@@ -444,6 +469,36 @@ fi
 
 # Skip validation if in daemon mode
 if [[ "$SKIP_TO_DAEMON" != "true" ]]; then
+    # CRITICAL: Ensure jq is available before cluster validation (which requires it)
+    if ! command -v jq &> /dev/null; then
+        log "WARN" "jq is not installed. Attempting to install via Homebrew..."
+        JQ_INSTALLED=false
+
+        if command -v brew &> /dev/null; then
+            if brew install jq 2>/dev/null; then
+                JQ_INSTALLED=true
+            fi
+        fi
+
+        if [[ "$JQ_INSTALLED" != "true" ]] || ! command -v jq &> /dev/null; then
+            log "ERROR" "Failed to install jq automatically."
+            echo ""
+            echo "   jq is required for this agent to function."
+            echo "   Please install it manually:"
+            echo ""
+            echo "     brew install jq"
+            echo ""
+            echo "   If Homebrew is not installed:"
+            echo "     /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+            echo ""
+            echo "   After installing jq, re-run this script."
+            exit 1
+        fi
+        log "INFO" "jq installed successfully: $(jq --version)"
+    else
+        log "INFO" "jq found: $(jq --version)"
+    fi
+
     # Validate cluster exists by checking management API
     log "DEBUG" "Validating HAProxy Cluster..."
     CLUSTER_CHECK=$("$CURL_BIN" -k -s -f "$MANAGEMENT_URL/api/clusters" -H "User-Agent: haproxy-agent-installer" || echo "FAILED")
@@ -559,14 +614,12 @@ check_dependencies() {
         mkdir -p "$STATS_DIR"
     fi
     
-    # Check if jq is installed
+    # Verify jq is available (should already be installed from early check)
     if ! command -v jq &> /dev/null; then
-        log "ERROR" "jq not found!"
-        echo "   Please install jq first: brew install jq"
+        log "ERROR" "jq is required but not installed. Please run: brew install jq"
         exit 1
-    else
-        log "INFO" "jq found: $(jq --version)"
     fi
+    log "INFO" "jq found: $(jq --version)"
     
     # Check if socat is installed (required for HAProxy stats socket)
     if ! command -v socat &> /dev/null; then
@@ -575,6 +628,14 @@ check_dependencies() {
         exit 1
     else
         log "INFO" "socat found: $(socat -V | head -1)"
+    fi
+    
+    # Check if openssl is installed (required for SSL certificate deployment)
+    if ! command -v openssl &> /dev/null; then
+        log "WARN" "openssl not found. SSL certificate features may not work."
+        echo "   Install openssl: brew install openssl"
+    else
+        log "INFO" "openssl found: $(openssl version)"
     fi
 }
 
@@ -727,6 +788,12 @@ find_binary() {
 CURL_BIN=$(find_binary curl)
 if [[ -z "$CURL_BIN" ]]; then
     echo "ERROR: curl not found in system" >&2
+    exit 1
+fi
+
+# Verify jq is available (critical dependency for JSON config parsing)
+if ! command -v jq &> /dev/null; then
+    echo "ERROR: jq not found. Install jq (brew install jq) and restart the agent service." >&2
     exit 1
 fi
 
