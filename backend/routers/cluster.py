@@ -1874,8 +1874,22 @@ defaults
                 except Exception as sync_error:
                     logger.warning(f"RESTORE SYNC WARNING: Could not sync entities with restored config: {sync_error}")
 
-            # Post-apply cleanup: Keep inactive servers for commenting, only delete backends/frontends that are truly inactive
-            # Note: Inactive servers (is_active=FALSE) are kept for HAProxy config commenting
+            # Post-apply cleanup: Hard delete inactive entities that were processed during Apply
+            # CRITICAL FIX: Delete backend_servers BEFORE backends to prevent orphan data
+            # When backends are soft-deleted from UI, their servers are also soft-deleted,
+            # but server cleanup only happens for servers with explicit delete versions.
+            # We must clean up orphaned inactive servers belonging to inactive backends first.
+            inactive_backend_names = await conn.fetch(
+                "SELECT name FROM backends WHERE cluster_id = $1 AND is_active = FALSE", cluster_id
+            )
+            if inactive_backend_names:
+                names_list = [row['name'] for row in inactive_backend_names]
+                await conn.execute("""
+                    DELETE FROM backend_servers 
+                    WHERE backend_name = ANY($1) AND cluster_id = $2
+                """, names_list, cluster_id)
+                logger.info(f"APPLY CLEANUP: Deleted orphan servers for {len(names_list)} inactive backends in cluster {cluster_id}")
+            
             await conn.execute("DELETE FROM backends WHERE cluster_id = $1 AND is_active = FALSE", cluster_id)
             await conn.execute("DELETE FROM frontends WHERE cluster_id = $1 AND is_active = FALSE", cluster_id)
             

@@ -5,7 +5,6 @@ import {
   DashboardOutlined,
   SettingOutlined,
   CloudServerOutlined,
-  BarChartOutlined,
   FileTextOutlined,
   GlobalOutlined,
   SafetyCertificateOutlined,
@@ -58,11 +57,10 @@ const { Text } = Typography;
       icon: <DashboardOutlined />,
       label: <Link to="/">Dashboard</Link>,
     },
-    // Statistics temporarily removed - will be redesigned
     {
       key: '/frontends',
       icon: <GlobalOutlined />,
-      label: <Link to="/frontends">Frontend Management</Link>,
+      label: <Link to="/frontends">Frontends</Link>,
     },
     {
       key: '/backends',
@@ -72,7 +70,7 @@ const { Text } = Typography;
     {
       key: '/ssl-certificates',
       icon: <SafetyCertificateOutlined />,
-      label: <Link to="/ssl-certificates">SSL Certificate</Link>,
+      label: <Link to="/ssl-certificates">SSL Certificates</Link>,
     },
     {
       key: '/waf',
@@ -82,7 +80,7 @@ const { Text } = Typography;
     {
       key: '/bulk-config-import',
       icon: <CloudUploadOutlined />,
-      label: <Link to="/bulk-config-import">Bulk Config Import</Link>,
+      label: <Link to="/bulk-config-import">Config Import</Link>,
     },
     {
       key: '/apply-management',
@@ -92,27 +90,27 @@ const { Text } = Typography;
     {
       key: '/agents',
       icon: <CloudServerOutlined />,
-      label: <Link to="/agents">Agent Management</Link>,
+      label: <Link to="/agents">Agents</Link>,
     },
     {
       key: '/configuration',
       icon: <FileTextOutlined />,
-      label: <Link to="/configuration">Configuration Management</Link>,
+      label: <Link to="/configuration">Config Versions</Link>,
     },
     {
       key: '/clusters',
       icon: <CloudServerOutlined />,
-      label: <Link to="/clusters">Cluster Management</Link>,
+      label: <Link to="/clusters">Clusters</Link>,
     },
     {
       key: '/pools',
       icon: <GlobalOutlined />,
-      label: <Link to="/pools">Agent Pool Management</Link>,
+      label: <Link to="/pools">Agent Pools</Link>,
     },
     {
       key: '/users',
       icon: <UserOutlined />,
-      label: <Link to="/users">User Management</Link>,
+      label: <Link to="/users">Users</Link>,
     },
     {
       key: '/security',
@@ -204,10 +202,11 @@ function AppContent() {
           trigger={null}
           collapsible
           collapsed={collapsed}
+          width={240}
           breakpoint="lg"
           collapsedWidth="0"
           onBreakpoint={(broken) => {
-            console.log(broken);
+            setCollapsed(broken);
           }}
         >
           <div style={{ 
@@ -269,7 +268,7 @@ function AppContent() {
               alignItems: 'center'
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center' }}>
+            <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
               <Button
                 type="text"
                 icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
@@ -280,16 +279,17 @@ function AppContent() {
                   height: 64,
                 }}
               />
-              <div style={{ 
+              <div className="header-title" style={{ 
                 fontSize: '18px', 
                 fontWeight: 'bold',
                 color: '#1890ff',
-                marginLeft: '8px'
+                marginLeft: '8px',
+                whiteSpace: 'nowrap'
               }}>
                 HAProxy Load Balancer Management
               </div>
             </div>
-            <div style={{ flex: 1, display: 'flex', justifyContent: 'center', padding: '0 24px' }}>
+            <div style={{ flex: 1, display: 'flex', justifyContent: 'center', padding: '0 16px', minWidth: 0 }}>
               <ClusterSelector />
             </div>
             <div style={{ padding: '0 24px' }}>
