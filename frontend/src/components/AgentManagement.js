@@ -1,5 +1,5 @@
 // Agent Management Component - Database-backed script templates enabled - Pipeline trigger v2
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Card,
   Table,
@@ -188,6 +188,10 @@ const AgentManagement = () => {
   const { hasPermission, isAdmin } = useAuth();
   const refreshIntervalRef = useRef(null);
   const progressIntervalRef = useRef(null);
+  
+  // Refs to always access latest values in async callbacks (avoids stale closures)
+  const selectedClusterRef = useRef(selectedCluster);
+  const fetchAgentsRef = useRef(null);
 
   // Platform configuration
   const platformConfig = {
@@ -295,6 +299,10 @@ const AgentManagement = () => {
       setLoading(false);
     }
   }, [selectedCluster]);
+
+  // Keep refs in sync so async callbacks always get the latest values
+  selectedClusterRef.current = selectedCluster;
+  fetchAgentsRef.current = fetchAgents;
 
   // Search/filter agents
   const handleSearch = (value) => {
@@ -648,7 +656,7 @@ const AgentManagement = () => {
         description: `Agent "${agentName}" has been ${newStatus ? 'enabled' : 'disabled'}.`,
         duration: 4
       });
-      fetchAgents(false);
+      fetchAgents(true);
     } catch (error) {
       const errorMessage = error.response?.data?.detail || error.message;
       notification.error({
@@ -758,7 +766,7 @@ const AgentManagement = () => {
         await fetchAgentVersions();
         
         // Refresh agents list to update Available column and show Upgrade button
-        await fetchAgents();
+        await fetchAgents(true);
       }
     } catch (error) {
       hide();
@@ -785,7 +793,7 @@ const AgentManagement = () => {
       
       // Refresh data to show new version
       await fetchAgentVersions();
-      await fetchAgents(); // Refresh agents to show new available versions
+      await fetchAgents(true); // Refresh agents to show new available versions
       
       notification.success({
         message: 'Version Updated Successfully',
@@ -1025,12 +1033,12 @@ const AgentManagement = () => {
       await fetchAgents(true, clusterAtStart);
       
       // Also refresh after delay to ensure final state is updated
-      // CRITICAL: Only refresh if user is still on the same cluster
+      // CRITICAL: Use refs to avoid stale closure in setTimeout
       setTimeout(() => {
-        // Check if user is still on the same cluster before refreshing
-        if (selectedCluster?.pool_id === clusterAtStart?.pool_id) {
+        // Check if user is still on the same cluster before refreshing (use ref for latest value)
+        if (selectedClusterRef.current?.pool_id === clusterAtStart?.pool_id) {
           console.log(`🔄 Fetching agents after upgrade (delayed 1s)`);
-          fetchAgents(true, clusterAtStart);
+          fetchAgentsRef.current(true, clusterAtStart);
         } else {
           console.log(`⚠️ User switched clusters during upgrade. Skipping delayed refresh for ${agentName}`);
         }
@@ -1160,7 +1168,10 @@ const AgentManagement = () => {
   };
 
   // Enhanced table columns
-  const columns = useMemo(() => {
+  // NOTE: Not memoized intentionally - column render functions capture component closures
+  // (upgradeAgent, toggleAgent, deleteAgent, selectedCluster, fetchAgents, etc.)
+  // Memoizing with [hasPermission] only causes stale closures after cluster changes
+  const columns = (() => {
     const baseColumns = [
     {
       title: 'Agent Info',
@@ -1459,7 +1470,7 @@ const AgentManagement = () => {
     }
 
     return baseColumns;
-  }, [hasPermission]);
+  })();
 
   // Get agent statistics
   const getAgentStats = () => {
@@ -1802,7 +1813,7 @@ const AgentManagement = () => {
               </div>
               <Button
                 icon={<ReloadOutlined />}
-                onClick={() => fetchAgents()}
+                onClick={() => fetchAgents(true)}
                 loading={loading}
                 type="primary"
                 ghost
