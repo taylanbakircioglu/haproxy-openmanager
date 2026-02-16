@@ -15,129 +15,79 @@ echo ""
 
 SELF_PID=$$
 
-# ===========================================
-# SAFETY: Define protected HAProxy paths
-# These must NEVER be touched by this script
-# ===========================================
-PROTECTED_PATHS=(
-    "/etc/haproxy"
-    "/etc/haproxy/haproxy.cfg"
-    "/usr/sbin/haproxy"
-    "/usr/local/sbin/haproxy"
-    "/var/log/haproxy"
-    "/var/run/haproxy"
-    "/run/haproxy"
-    "/etc/systemd/system/haproxy.service"
-    "/lib/systemd/system/haproxy.service"
-    "/usr/lib/systemd/system/haproxy.service"
-)
-
-# Safety helper: refuse to remove anything that is a protected HAProxy path
+# Safety: only remove paths containing "haproxy-agent" or under /tmp
 safe_rm() {
     local target="$1"
-    for protected in "${PROTECTED_PATHS[@]}"; do
-        if [[ "$target" == "$protected" || "$target" == "$protected/" ]]; then
-            echo "  BLOCKED: Refusing to remove protected HAProxy path: $target"
-            return 1
-        fi
-    done
-    # Extra guard: path must contain "haproxy-agent" or be in /tmp
     if [[ "$target" != *"haproxy-agent"* && "$target" != /tmp/* ]]; then
-        echo "  BLOCKED: Path does not contain 'haproxy-agent': $target"
+        echo "  BLOCKED: '$target' does not contain 'haproxy-agent' - skipping"
         return 1
     fi
-    rm -rf "$target" 2>/dev/null && echo "  Removed $target"
+    if [[ -e "$target" ]]; then
+        rm -rf "$target" 2>/dev/null && echo "  Removed $target" || echo "  FAILED to remove $target"
+    fi
     return 0
 }
 
-# --- Pre-flight: verify HAProxy is safe ---
-echo "[0/5] Safety check..."
+# Snapshot HAProxy state before we start
+echo "[pre] HAProxy status before uninstall:"
+haproxy_was_active=$(systemctl is-active haproxy.service 2>/dev/null || echo "unknown")
+haproxy_cfg_hash=""
 if [[ -f /etc/haproxy/haproxy.cfg ]]; then
-    echo "  HAProxy config found at /etc/haproxy/haproxy.cfg - will be preserved"
+    haproxy_cfg_hash=$(md5sum /etc/haproxy/haproxy.cfg 2>/dev/null | awk '{print $1}')
+    echo "  Config : /etc/haproxy/haproxy.cfg (md5: $haproxy_cfg_hash)"
 fi
-if systemctl is-active haproxy.service &>/dev/null; then
-    echo "  HAProxy service is running - will NOT be touched"
-fi
-echo "  Protected paths: haproxy.service, /etc/haproxy/, /usr/sbin/haproxy, /var/log/haproxy"
+echo "  Service: haproxy.service ($haproxy_was_active)"
 echo ""
 
-# --- 1. Stop and remove systemd service ---
+# --- 1. Stop and remove agent systemd service ---
 echo "[1/5] Stopping agent systemd service..."
-# SAFETY: Only touch services with "agent" in the name
 for svc in haproxy-agent.service haproxy.agent.service; do
     systemctl stop "$svc" 2>/dev/null
     systemctl disable "$svc" 2>/dev/null
     systemctl unmask "$svc" 2>/dev/null
 done
-# SAFETY: Only remove unit files that contain "agent" in filename
 for f in \
     /etc/systemd/system/haproxy-agent.service \
     /etc/systemd/system/haproxy.agent.service \
     /lib/systemd/system/haproxy-agent.service \
     /usr/lib/systemd/system/haproxy-agent.service \
     /etc/systemd/user/haproxy-agent.service; do
-    rm -f "$f" 2>/dev/null && echo "  Removed $f"
+    safe_rm "$f"
 done
 systemctl daemon-reload 2>/dev/null
 systemctl reset-failed 2>/dev/null
 echo "  Done"
 echo ""
 
-# --- 2. Kill agent processes (exclude self and haproxy) ---
+# --- 2. Kill agent processes ---
 echo "[2/5] Killing agent processes..."
-agent_pids=$(pgrep -f "haproxy-agent" 2>/dev/null || true)
-# SAFETY: Get HAProxy master PID to never kill it
-haproxy_master_pid=$(pgrep -x "haproxy" 2>/dev/null || true)
-if [[ -n "$agent_pids" ]]; then
-    for p in $agent_pids; do
-        # Skip self, parent, and HAProxy master process
-        if [[ "$p" == "$SELF_PID" || "$p" == "$PPID" ]]; then
-            continue
-        fi
-        # SAFETY: Double-check this is not a haproxy process
-        proc_cmd=$(ps -p "$p" -o args= 2>/dev/null || true)
-        if [[ -n "$proc_cmd" && "$proc_cmd" != *"haproxy-agent"* ]]; then
-            echo "  SKIPPED PID $p: not an agent process ($proc_cmd)"
-            continue
-        fi
-        if [[ -n "$haproxy_master_pid" ]] && echo "$haproxy_master_pid" | grep -q "^${p}$"; then
-            echo "  SKIPPED PID $p: HAProxy master process - protected"
-            continue
-        fi
-        kill -9 "$p" 2>/dev/null && echo "  Killed PID $p"
-    done
-    sleep 1
-else
-    echo "  No agent processes found"
-fi
+found=0
+for p in $(pgrep -f "haproxy-agent" 2>/dev/null || true); do
+    [[ "$p" == "$SELF_PID" || "$p" == "$PPID" ]] && continue
+    # Verify process command actually contains "haproxy-agent"
+    cmd=$(ps -p "$p" -o args= 2>/dev/null || true)
+    if [[ "$cmd" == *"haproxy-agent"* ]]; then
+        kill -9 "$p" 2>/dev/null && echo "  Killed PID $p ($cmd)" && found=$((found + 1))
+    fi
+done
+[[ $found -eq 0 ]] && echo "  No agent processes found"
 echo ""
 
 # --- 3. Remove agent binary ---
 echo "[3/5] Removing agent binary..."
-# SAFETY: Only files named exactly "haproxy-agent", never "haproxy"
 for f in \
     /usr/local/bin/haproxy-agent \
     /usr/bin/haproxy-agent \
     /usr/sbin/haproxy-agent \
     /sbin/haproxy-agent \
     /opt/bin/haproxy-agent; do
-    if [[ -f "$f" ]]; then
-        # Final guard: verify filename is haproxy-agent, not haproxy
-        basename_f=$(basename "$f")
-        if [[ "$basename_f" == "haproxy-agent" ]]; then
-            rm -f "$f" 2>/dev/null && echo "  Removed $f"
-        else
-            echo "  BLOCKED: Unexpected filename: $f"
-        fi
-    fi
+    safe_rm "$f"
 done
 echo "  Done"
 echo ""
 
-# --- 4. Remove config, logs, PID files, temp files ---
+# --- 4. Remove config, logs, PID, temp files ---
 echo "[4/5] Removing agent config, logs, and temp files..."
-
-# Config and data directories - all contain "haproxy-agent" in path
 for d in \
     /etc/haproxy-agent \
     /var/log/haproxy-agent \
@@ -148,27 +98,25 @@ for d in \
     /opt/haproxy-agent; do
     safe_rm "$d"
 done
-
-# PID files
 for f in \
     /var/run/haproxy-agent.pid \
     /run/haproxy-agent.pid \
     /tmp/haproxy-agent.pid; do
     safe_rm "$f"
 done
-
-# Clean up agent temp files in /tmp
-find /tmp -maxdepth 1 -name "haproxy-agent*" -exec rm -rf {} \; 2>/dev/null
-find /tmp -maxdepth 1 -name "heartbeat_payload_*" -exec rm -f {} \; 2>/dev/null
-find /tmp -maxdepth 1 -name "heartbeat_response_*" -exec rm -f {} \; 2>/dev/null
-find /tmp -maxdepth 1 -name "haproxy-failed-*" -exec rm -f {} \; 2>/dev/null
-find /tmp -maxdepth 1 -name "haproxy_new_*" -exec rm -f {} \; 2>/dev/null
-find /tmp -maxdepth 1 -name "haproxy-merged*" -exec rm -f {} \; 2>/dev/null
-find /tmp -maxdepth 1 -name "ssl_cert_*" -exec rm -f {} \; 2>/dev/null
+# Agent temp files
+find /tmp -maxdepth 1 \( \
+    -name "haproxy-agent*" -o \
+    -name "heartbeat_payload_*" -o \
+    -name "heartbeat_response_*" -o \
+    -name "haproxy-failed-*" -o \
+    -name "haproxy_new_*" -o \
+    -name "haproxy-merged*" -o \
+    -name "ssl_cert_*" \
+    \) -exec rm -rf {} \; 2>/dev/null
 rm -f /tmp/agent_debug.log /tmp/debug_agent.log /tmp/haproxy-new-config.cfg 2>/dev/null
-
-# Clean agent-related cron entries
-if grep -q "haproxy-agent" /etc/cron.d/haproxy-agent 2>/dev/null; then
+# Cron
+if [[ -f /etc/cron.d/haproxy-agent ]]; then
     rm -f /etc/cron.d/haproxy-agent 2>/dev/null && echo "  Removed cron job"
 fi
 for cf in /etc/crontab /var/spool/cron/root /var/spool/cron/crontabs/root; do
@@ -194,26 +142,23 @@ if [[ -f /usr/local/bin/haproxy-agent ]]; then
     echo "  WARNING: /usr/local/bin/haproxy-agent still exists"
     ok=false
 fi
-if $ok; then
-    echo "  Agent completely removed."
-fi
+$ok && echo "  Agent completely removed."
 
+# Verify HAProxy was not affected
 echo ""
-echo "--- HAProxy integrity check ---"
+echo "[post] HAProxy integrity after uninstall:"
+haproxy_now_active=$(systemctl is-active haproxy.service 2>/dev/null || echo "unknown")
+echo "  Service: haproxy.service ($haproxy_now_active)"
+if [[ "$haproxy_was_active" == "active" && "$haproxy_now_active" != "active" ]]; then
+    echo "  ERROR: HAProxy was running but is now stopped!"
+fi
 if [[ -f /etc/haproxy/haproxy.cfg ]]; then
-    echo "  /etc/haproxy/haproxy.cfg    : OK (untouched)"
-else
-    echo "  /etc/haproxy/haproxy.cfg    : not found (was not present before)"
-fi
-if systemctl is-active haproxy.service &>/dev/null; then
-    echo "  haproxy.service             : running"
-elif systemctl is-enabled haproxy.service &>/dev/null; then
-    echo "  haproxy.service             : stopped (was not running before)"
-else
-    echo "  haproxy.service             : not installed"
-fi
-if [[ -f /usr/sbin/haproxy ]]; then
-    echo "  /usr/sbin/haproxy           : OK (untouched)"
+    haproxy_cfg_hash_after=$(md5sum /etc/haproxy/haproxy.cfg 2>/dev/null | awk '{print $1}')
+    if [[ "$haproxy_cfg_hash" == "$haproxy_cfg_hash_after" ]]; then
+        echo "  Config : unchanged (md5: $haproxy_cfg_hash_after)"
+    else
+        echo "  ERROR: HAProxy config was modified!"
+    fi
 fi
 
 echo ""
