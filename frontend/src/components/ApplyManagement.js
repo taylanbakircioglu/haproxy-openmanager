@@ -482,6 +482,16 @@ const ApplyManagement = () => {
         // CRITICAL: Real agent sync verification - check actual deployed state
         const allSynced = await verifyRealAgentSync(appliedEntities);
         
+        // CRITICAL FIX: Use allSynced result for syncedCount instead of stale entitySyncStates
+        // After Apply, fetchPendingChanges() refreshes to empty (entities deleted/applied),
+        // so fetchEntitySyncStates() has no entities to check, leaving entitySyncStates empty.
+        // This caused syncedCount to always be 0 even when all entities are confirmed synced.
+        const syncedCount = allSynced ? appliedEntities.length : appliedEntities.filter(entity => {
+          const syncKey = `${entity.type}-${entity.id}`;
+          const entitySync = entitySyncStates[syncKey];
+          return entitySync?.status === 'synced';
+        }).length;
+        
         // Additional check: Verify cluster-wide agent sync is also complete
         // Use fresh data instead of stale state
         // If no enabled agents exist (all disabled), cluster sync is inherently complete
@@ -495,6 +505,13 @@ const ApplyManagement = () => {
         const isRestoreOperation = appliedEntities.length === 0;
         const shouldCompleteRestore = isRestoreOperation && clusterSyncComplete;
         const shouldCompleteNormal = allSynced && clusterSyncComplete && appliedEntities.length > 0;
+        
+        // CRITICAL FIX: When ALL entities are confirmed synced (including via 404 for deleted entities)
+        // and we've waited long enough, complete even if cluster agent sync hasn't finished yet.
+        // The agent will receive the updated config on its next poll cycle (every 30s).
+        // This prevents the "stuck at Applying" bug when all entities are deleted.
+        const shouldCompleteEntitiesDone = allSynced && appliedEntities.length > 0 && 
+                                           !clusterSyncComplete && syncAttempts >= 4;
         
         if (shouldCompleteRestore || shouldCompleteNormal) {
           // All entities AND cluster are fully synced - complete immediately
@@ -510,18 +527,20 @@ const ApplyManagement = () => {
               'Configuration restored and synchronized successfully!' :
               'All changes applied and agents synchronized successfully!');
           }, 1500);
+        } else if (shouldCompleteEntitiesDone) {
+          // All entities are confirmed applied/deleted, but agent hasn't synced yet
+          // Complete the progress - agent will sync on its next poll cycle
+          const successMessage = 'All changes applied successfully! Agent will sync shortly.';
+          
+          setSyncProgress({ visible: true, step: successMessage, progress: 100 });
+          completeProgress(successMessage);
+          setTimeout(() => {
+            setSyncProgress({ visible: false, step: '', progress: 0 });
+            message.success(successMessage);
+          }, 1500);
         } else if (syncAttempts < maxAttempts) {
           // Continue checking
-          const syncedCount = appliedEntities.filter(entity => {
-            const syncKey = `${entity.type}-${entity.id}`;
-            const entitySync = entitySyncStates[syncKey];
-            return entitySync?.status === 'synced';
-          }).length;
-          
           const clusterStatus = clusterSyncComplete ? '✓' : '⏳';
-          
-          // Check if this is a restore operation for display purposes
-          const isRestoreOperation = appliedEntities.length === 0;
           
           let progressStep, syncedLabel, totalLabel;
           if (isRestoreOperation) {
@@ -556,41 +575,22 @@ const ApplyManagement = () => {
           }
           setTimeout(checkAgentSync, 3000);
         } else {
-          // Max attempts reached, but don't complete progress - keep monitoring
-          // Use real-time sync verification instead of cached state
+          // Max attempts reached - use real-time sync verification
           const isAllSynced = await verifyRealAgentSync(appliedEntities);
-          const syncedCount = isAllSynced ? appliedEntities.length : 0;
+          const finalSyncedCount = isAllSynced ? appliedEntities.length : 0;
           
           const clusterStatus = clusterSyncComplete ? '✓' : '⏳';
-          const progressStep = `Still syncing... Entities: ${syncedCount}/${appliedEntities.length}, Cluster: ${clusterStatus}`;
           
-          setSyncProgress({ 
-            visible: true, 
-            step: progressStep, 
-            progress: 95  // Keep at 95% to show it's not complete
-          });
-          updateProgress(progressStep, 95, {
-            'Synced Entities': `${syncedCount}/${appliedEntities.length}`,
-            'Cluster Status': clusterStatus === '✓' ? 'Synced' : 'Syncing',
-            'Status': 'Monitoring continues...'
-          });
-          updateEntityCounts(syncedCount, appliedEntities.length, freshAgentSync?.synced_agents || 0, freshAgentSync?.total_agents || totalAgents, freshAgentSync?.disabled_agents || disabledAgents);
-          
-          // Check if we should complete the progress
-          // CRITICAL: Recalculate clusterSyncComplete with fresh agentSync data
-          const freshNoEnabledAgents = freshAgentSync?.total_agents === 0 && freshAgentSync?.disabled_agents > 0;
-          const freshClusterSyncComplete = freshNoEnabledAgents ||
-                                          (freshAgentSync?.synced_agents === freshAgentSync?.total_agents && 
-                                          freshAgentSync?.synced_agents > 0);
-          console.log('🔍 FRESH CLUSTER SYNC CHECK:', { 
-            isAllSynced, 
-            freshClusterSyncComplete,
-            agentSync: freshAgentSync ? { synced: freshAgentSync.synced_agents, total: freshAgentSync.total_agents } : 'null'
-          });
-          
-          if (isAllSynced && freshClusterSyncComplete) {
-            console.log('🎯 APPLY COMPLETE: All entities and cluster synced, completing progress');
-            completeProgress('All changes successfully applied and synced!');
+          // CRITICAL FIX: If all entities are synced, complete the progress
+          // Don't stay stuck forever waiting for agent cluster sync
+          if (isAllSynced) {
+            const successMessage = clusterSyncComplete ?
+              'All changes deployed and synchronized!' :
+              'All changes applied successfully! Agent will sync shortly.';
+            
+            console.log('APPLY COMPLETE: All entities confirmed synced, completing progress');
+            setSyncProgress({ visible: true, step: successMessage, progress: 100 });
+            completeProgress(successMessage);
             setApplyLoading(false);
             
             // Only show success notification if THIS session initiated the apply
@@ -599,8 +599,7 @@ const ApplyManagement = () => {
             const isRecentApply = (Date.now() - applyTimestamp) < 300000; // 5 minutes
             
             if (applySession && isRecentApply) {
-              message.success('All changes successfully applied and synced to agents!');
-              // Clear session markers after showing notification
+              message.success(successMessage);
               sessionStorage.removeItem(`apply_session_${selectedCluster.id}`);
               sessionStorage.removeItem(`apply_timestamp_${selectedCluster.id}`);
             }
@@ -608,9 +607,23 @@ const ApplyManagement = () => {
             return;
           }
           
+          // Entities not yet synced - continue monitoring
+          const progressStep = `Still syncing... Entities: ${finalSyncedCount}/${appliedEntities.length}, Cluster: ${clusterStatus}`;
+          
+          setSyncProgress({ 
+            visible: true, 
+            step: progressStep, 
+            progress: 95  // Keep at 95% to show it's not complete
+          });
+          updateProgress(progressStep, 95, {
+            'Synced Entities': `${finalSyncedCount}/${appliedEntities.length}`,
+            'Cluster Status': clusterStatus === '✓' ? 'Synced' : 'Syncing',
+            'Status': 'Monitoring continues...'
+          });
+          updateEntityCounts(finalSyncedCount, appliedEntities.length, freshAgentSync?.synced_agents || 0, freshAgentSync?.total_agents || totalAgents, freshAgentSync?.disabled_agents || disabledAgents);
+          
           // Continue monitoring every 5 seconds until fully synced
           setTimeout(checkAgentSync, 5000);
-          // Remove repetitive notification - progress bar shows status
         }
       };
       

@@ -66,14 +66,31 @@ const ClusterSelector = () => {
     );
   }
 
+  // Dynamic width based on selected cluster name length
+  // Respects viewport width to avoid overflow on smaller screens
+  const getSelectWidth = () => {
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
+    // On small screens, use a compact width
+    if (vw < 992) return 200;
+    if (vw < 1200) return Math.min(280, vw * 0.25);
+    
+    if (!selectedCluster) return 250;
+    const nameLen = selectedCluster.name?.length || 0;
+    const typeLen = (selectedCluster.connection_type || '').length;
+    // ~7.5px per char + padding for badge, icon, parentheses, gaps
+    const estimated = Math.ceil((nameLen + typeLen + 4) * 7.5) + 90;
+    return Math.max(250, Math.min(estimated, 500));
+  };
+
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-      <CloudServerOutlined style={{ color: '#1890ff' }} />
+    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+      <CloudServerOutlined style={{ color: '#1890ff', flexShrink: 0 }} />
       <Select
         value={selectedCluster?.id}
         style={{ 
-          minWidth: 250, 
-          maxWidth: 350 
+          width: getSelectWidth(),
+          minWidth: 180, 
+          maxWidth: 500 
         }}
         placeholder="Select HAProxy Cluster"
         onChange={(clusterId) => {
@@ -90,16 +107,22 @@ const ClusterSelector = () => {
             key={cluster.id} 
             value={cluster.id}
             label={
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden' }}>
                 <Badge 
                   dot 
                   color={getAgentStatusColor(cluster.agent_status, cluster.total_agents)} 
                 />
-                <span>{cluster.name}</span>
+                <span style={{ 
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  flexShrink: 1
+                }}>{cluster.name}</span>
                 <span style={{ 
                   fontSize: '11px', 
                   color: '#666',
-                  marginLeft: 'auto'
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0
                 }}>
                   ({cluster.connection_type})
                 </span>

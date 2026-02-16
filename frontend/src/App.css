@@ -15,24 +15,71 @@
   margin: 16px 8px;
 }
 
-/* Menu collapse animations */
+/* ═══════════════════════════════════════════════════════════════
+   SIDEBAR / SIDER
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Smooth collapse animation */
 .ant-layout-sider {
   transition: all 0.2s;
 }
 
+/* Ensure menu labels never wrap; ellipsis as safety net */
+.ant-layout-sider .ant-menu-item {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Collapsed sidebar trigger button */
 .ant-layout-sider-zero-width-trigger {
   background: #1890ff;
   border-radius: 0 6px 6px 0;
+  top: 12px;
+  z-index: 10;
 }
 
 .ant-layout-sider-zero-width-trigger:hover {
   background: #40a9ff;
 }
 
-/* Header improvements */
+/* ═══════════════════════════════════════════════════════════════
+   HEADER
+   ═══════════════════════════════════════════════════════════════ */
+
 .ant-layout-header {
   border-bottom: 1px solid #f0f0f0;
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   RESPONSIVE BREAKPOINTS
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Tablets and small laptops (< 1200px): Shorten header title */
+@media (max-width: 1200px) {
+  .header-title {
+    font-size: 15px !important;
+  }
+}
+
+/* Small tablets (< 992px): Hide header title, sidebar auto-collapses */
+@media (max-width: 992px) {
+  .header-title {
+    display: none !important;
+  }
+}
+
+/* Mobile (< 768px): Tighter content padding */
+@media (max-width: 768px) {
+  .ant-layout-content {
+    margin: 12px 8px !important;
+    padding: 16px !important;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   GENERAL LAYOUT
+   ═══════════════════════════════════════════════════════════════ */
 
 .site-layout .site-layout-background {
   background: #fff;
