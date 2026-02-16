@@ -13,8 +13,13 @@ HAPROXY_CONFIG_PATH="{{HAPROXY_CONFIG_PATH}}"
 
 # Quick daemon mode detection (before installer UI)
 # Suppress installer messages if running in daemon mode
+# CRITICAL FIX: Only check config.json for daemon mode when NOT running interactively
+# Previous bug: config.json from old install caused script to silently enter daemon mode
 QUIET_MODE=false
-if [[ "$1" == "daemon" || "$SKIP_TO_DAEMON" == "true" || -f "/etc/haproxy-agent/config.json" ]]; then
+if [[ "$1" == "daemon" || "$SKIP_TO_DAEMON" == "true" ]]; then
+    QUIET_MODE=true
+elif [[ -f "/etc/haproxy-agent/config.json" ]] && [[ ! -t 0 ]]; then
+    # Config exists AND not running from terminal (launchd/non-interactive)
     QUIET_MODE=true
 fi
 
@@ -26,7 +31,7 @@ if [[ "$QUIET_MODE" != "true" ]]; then
     echo "With Version Management & Auto-Upgrade"
     echo "=========================================="
     echo ""
-    echo "⚠️  IMPORTANT WARNING ⚠️"
+    echo "IMPORTANT WARNING"
     echo "=========================================="
     echo ""
     echo "After agent installation, ALL your existing frontend and backend"
@@ -35,11 +40,11 @@ if [[ "$QUIET_MODE" != "true" ]]; then
     echo ""
     echo "An automatic backup will be created: haproxy.cfg.initial-backup"
     echo ""
-    echo "📋 REQUIRED STEPS AFTER INSTALLATION:"
+    echo "REQUIRED STEPS AFTER INSTALLATION:"
     echo "  1. Login to HAProxy OpenManager interface"
     echo "  2. Use the BULK IMPORT feature to restore your configuration"
     echo ""
-    echo "⚠️  IMPORTANT: After installation, ALL configuration changes MUST be"
+    echo "IMPORTANT: After installation, ALL configuration changes MUST be"
     echo "   made through the HAProxy OpenManager interface only."
     echo "   Manual changes will be overwritten on the next update."
     echo ""
@@ -50,8 +55,8 @@ if [[ "$QUIET_MODE" != "true" ]]; then
     if [[ -f "$HAPROXY_CONFIG_PATH" ]]; then
         BACKUP_PATH="${HAPROXY_CONFIG_PATH}.initial-backup"
         if [[ ! -f "$BACKUP_PATH" ]]; then
-            echo "📦 Creating backup: $BACKUP_PATH"
-            cp "$HAPROXY_CONFIG_PATH" "$BACKUP_PATH" && echo "✅ Backup created successfully" || echo "⚠️  Backup failed"
+            echo "Creating backup: $BACKUP_PATH"
+            cp "$HAPROXY_CONFIG_PATH" "$BACKUP_PATH" && echo "Backup created successfully" || echo "WARNING: Backup failed"
             echo ""
         fi
     fi
@@ -247,7 +252,7 @@ if [[ "$SKIP_TO_DAEMON" != "true" ]]; then
 # CRITICAL: Clean installation - Remove existing agent components
 if [[ "$QUIET_MODE" != "true" ]]; then
     echo ""
-    echo "🧹 Performing pre-installation cleanup..."
+    echo "Performing pre-installation cleanup..."
 fi
 
 # Function to safely remove files/directories
@@ -256,7 +261,7 @@ safe_remove() {
     local desc="$2"
     
     if [[ -e "$path" ]]; then
-        [[ "$QUIET_MODE" != "true" ]] && echo "   🗑️  Removing $desc..."
+        [[ "$QUIET_MODE" != "true" ]] && echo "   Removing $desc..."
         rm -rf "$path" 2>/dev/null || true
         [[ "$QUIET_MODE" != "true" ]] && echo "   $desc removed"
         return 0
@@ -264,7 +269,7 @@ safe_remove() {
 }
 
 # 1. Stop and kill all existing agent processes
-[[ "$QUIET_MODE" != "true" ]] && echo "🔪 Terminating existing HAProxy Agent processes..."
+[[ "$QUIET_MODE" != "true" ]] && echo "Terminating existing HAProxy Agent processes..."
 KILLED_COUNT=0
 for pattern in "haproxy-agent" "/usr/local/bin/haproxy-agent" "com.haproxy.agent"; do
     PIDS=$(pgrep -f "$pattern" 2>/dev/null || true)
@@ -284,7 +289,7 @@ else
 fi
 
 # 2. Stop and unload existing launchd services
-[[ "$QUIET_MODE" != "true" ]] && echo "🛑 Cleaning up existing launchd services..."
+[[ "$QUIET_MODE" != "true" ]] && echo "Cleaning up existing launchd services..."
 for service in "com.haproxy.agent" "homebrew.mxcl.haproxy"; do
     if launchctl list 2>/dev/null | grep -q "$service"; then
         [[ "$QUIET_MODE" != "true" ]] && echo "   Stopping service: $service"
@@ -297,7 +302,7 @@ done
 
 # 3. Remove existing files and directories (requires root for some)
 if [[ $EUID -eq 0 ]]; then
-    [[ "$QUIET_MODE" != "true" ]] && echo "🗑️  Removing existing agent files (as root)..."
+    [[ "$QUIET_MODE" != "true" ]] && echo "Removing existing agent files (as root)..."
     safe_remove "/Library/LaunchDaemons/com.haproxy.agent.plist" "LaunchDaemon plist"
     safe_remove "/Library/LaunchAgents/com.haproxy.agent.plist" "LaunchAgent plist" 
     safe_remove "/usr/local/bin/haproxy-agent" "agent binary"
@@ -332,22 +337,22 @@ fi # End of cleanup section
 ARCH=$(uname -m)
 if [[ "$ARCH" == "arm64" ]]; then
     ARCH_SUFFIX="darwin-arm64"
-    [[ "$QUIET_MODE" != "true" ]] && echo "🍎 Detected: Apple Silicon (ARM64)"
+    [[ "$QUIET_MODE" != "true" ]] && echo "Detected: Apple Silicon (ARM64)"
 else
     ARCH_SUFFIX="darwin-amd64"
-    [[ "$QUIET_MODE" != "true" ]] && echo "🖥️  Detected: Intel Mac (AMD64)"
+    [[ "$QUIET_MODE" != "true" ]] && echo "Detected: Intel Mac (AMD64)"
 fi
 
 # Display configuration only in interactive mode
 if [[ "$QUIET_MODE" != "true" ]]; then
-    echo "📋 Agent Configuration:"
+    echo "Agent Configuration:"
     echo "  Management URL: $MANAGEMENT_URL"
     echo "  Cluster ID: $CLUSTER_ID"
     echo "  Agent Name: $AGENT_NAME"
     echo "  Hostname: $HOSTNAME"
     echo "  Architecture: $ARCH ($ARCH_SUFFIX)"
     echo ""
-    echo "📋 HAProxy Integration:"
+    echo "HAProxy Integration:"
     echo "  Config Path: $HAPROXY_CONFIG_PATH"
     echo "  Stats Socket: $STATS_SOCKET_PATH"
     echo "  Service Name: $HAPROXY_SERVICE_NAME"
@@ -423,7 +428,7 @@ if [[ "$SKIP_TO_DAEMON" != "true" && $EUID -ne 0 ]]; then
     install_dependencies_user
     
     echo ""
-    echo "📋 Dependencies installed. Now run with root privileges for agent service setup:"
+    echo "Dependencies installed. Now run with root privileges for agent service setup:"
     echo "   sudo $0"
     exit 0
 fi
@@ -574,7 +579,7 @@ if [[ "$SKIP_TO_DAEMON" != "true" ]]; then
 
 # CRITICAL: Final cleanup as root (clean any remaining files)
 echo ""
-echo "🧹 Final cleanup as root (removing any remaining files)..."
+echo "Final cleanup as root (removing any remaining files)..."
 safe_remove "/Library/LaunchDaemons/com.haproxy.agent.plist" "LaunchDaemon plist"
 safe_remove "/Library/LaunchAgents/com.haproxy.agent.plist" "LaunchAgent plist"
 safe_remove "/usr/local/bin/haproxy-agent" "existing agent binary"
@@ -2053,7 +2058,7 @@ CLUSTER_POOL_ID=$(curl -k -s -X GET "$MANAGEMENT_URL/api/clusters/$CLUSTER_ID" \
 [[ -z "$CLUSTER_POOL_ID" || "$CLUSTER_POOL_ID" == "null" ]] && CLUSTER_POOL_ID=1
 
 # Create configuration
-echo "⚙️  Creating configuration..."
+echo "Creating configuration..."
 cat > "$CONFIG_DIR/config.json" << CONFIG_EOF
 {
   "management": {
@@ -2151,7 +2156,7 @@ if [[ "$SERVICE_STATUS" == "active" ]]; then
     echo "   • Wait for configuration update tasks from management UI"
     echo "   • Apply HAProxy config changes to: $HAPROXY_CONFIG_PATH"
     echo ""
-    echo "✨ Your macOS HAProxy instance is now centrally manageable!"
+    echo "Your macOS HAProxy instance is now centrally manageable!"
     echo ""
     echo "Next Steps:"
     echo "   1. Check agent logs: tail -f $LOG_DIR/agent.log"
