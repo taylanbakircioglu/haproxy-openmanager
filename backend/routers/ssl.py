@@ -240,6 +240,7 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                     'cluster_names': cert.get('cluster_names', []),
                     'created_at': cert['created_at'].isoformat().replace('+00:00', 'Z') if cert['created_at'] else None,
                     'updated_at': cert['updated_at'].isoformat().replace('+00:00', 'Z') if cert['updated_at'] else None,
+                    'is_active': cert['is_active'],
                     'last_config_status': cert.get('last_config_status'),
                     'has_pending_config': cert.get('has_pending_config', False)
                 }
@@ -583,7 +584,7 @@ async def get_ssl_certificate(cert_id: int, authorization: str = Header(None)):
         certificate = await conn.fetchrow("""
             SELECT s.id, s.name, s.primary_domain as domain, s.all_domains, s.certificate_content, 
                    s.private_key_content, s.chain_content, s.expiry_date, s.issuer, s.status, 
-                   s.days_until_expiry, s.fingerprint, s.cluster_id, s.usage_type, s.created_at, s.updated_at,
+                   s.days_until_expiry, s.fingerprint, s.cluster_id, s.usage_type, s.is_active, s.created_at, s.updated_at,
                    CASE 
                        WHEN NOT EXISTS (SELECT 1 FROM ssl_certificate_clusters WHERE ssl_certificate_id = s.id) THEN TRUE
                        ELSE FALSE
@@ -597,7 +598,7 @@ async def get_ssl_certificate(cert_id: int, authorization: str = Header(None)):
             WHERE s.id = $1
             GROUP BY s.id, s.name, s.primary_domain, s.all_domains, s.certificate_content, 
                      s.private_key_content, s.chain_content, s.expiry_date, s.issuer, s.status, 
-                     s.days_until_expiry, s.fingerprint, s.cluster_id, s.usage_type, s.created_at, s.updated_at
+                     s.days_until_expiry, s.fingerprint, s.cluster_id, s.usage_type, s.is_active, s.created_at, s.updated_at
         """, cert_id)
         
         if not certificate:
