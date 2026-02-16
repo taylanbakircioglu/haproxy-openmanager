@@ -1345,6 +1345,9 @@ reload_haproxy_service() {
 deploy_ssl_certificates() {
     local ssl_certs_json="$1"
     
+    # Global counter: tracks how many cert files were ACTUALLY changed (for reload decisions)
+    SSL_CERTS_CHANGED_COUNT=0
+    
     log "INFO" "SSL DEPLOYMENT: Processing SSL certificates..."
     
     # Create SSL directory if it doesn't exist
@@ -1388,24 +1391,37 @@ deploy_ssl_certificates() {
             fi
         fi
         
-        # Create combined PEM file (HAProxy format: cert + key + chain)
-        local temp_cert_file="/tmp/ssl_cert_$$.pem"
-        
-        # Write certificate
-        echo "$cert_content" > "$temp_cert_file"
-        
-        # Append private key (only if provided - server SSL may not have it)
+        # Build combined PEM content (same format as embedded daemon for consistent checksums)
+        local new_content=""
         if [[ -n "$key_content" && "$key_content" != "null" ]]; then
-            echo "" >> "$temp_cert_file"
-            echo "$key_content" >> "$temp_cert_file"
+            if [[ -n "$chain_content" && "$chain_content" != "null" ]]; then
+                new_content=$(printf "%s\n\n%s\n\n%s" "$cert_content" "$key_content" "$chain_content")
+            else
+                new_content=$(printf "%s\n\n%s" "$cert_content" "$key_content")
+            fi
+        else
+            if [[ -n "$chain_content" && "$chain_content" != "null" ]]; then
+                new_content=$(printf "%s\n\n%s" "$cert_content" "$chain_content")
+            else
+                new_content="$cert_content"
+            fi
         fi
         
-        # Append certificate chain if present
-        if [[ -n "$chain_content" && "$chain_content" != "null" ]]; then
-            echo "" >> "$temp_cert_file"
-            echo "$chain_content" >> "$temp_cert_file"
-            log "DEBUG" "Added certificate chain for $cert_name"
+        # Compare checksums to detect actual changes (avoid unnecessary writes + reloads)
+        local new_checksum=$(echo "$new_content" | md5 -q 2>/dev/null || echo "$new_content" | md5sum | awk '{print $1}' 2>/dev/null)
+        local existing_checksum=""
+        if [[ -f "$cert_file_path" ]]; then
+            existing_checksum=$(cat "$cert_file_path" | md5 -q 2>/dev/null || cat "$cert_file_path" | md5sum | awk '{print $1}' 2>/dev/null)
         fi
+        
+        if [[ "$existing_checksum" == "$new_checksum" ]]; then
+            log "DEBUG" "SSL certificate unchanged: $cert_name (checksum match), skipping deploy"
+            continue
+        fi
+        
+        # Certificate is new or changed - write to temp file and validate
+        local temp_cert_file="/tmp/ssl_cert_$$.pem"
+        echo "$new_content" > "$temp_cert_file"
         
         # Validate the combined certificate file
         if openssl x509 -in "$temp_cert_file" -noout -text >/dev/null 2>&1; then
@@ -1414,7 +1430,8 @@ deploy_ssl_certificates() {
             chmod 600 "$cert_file_path"
             chown root:root "$cert_file_path" 2>/dev/null || true
             
-            log "INFO" "SSL certificate deployed: $cert_file_path"
+            SSL_CERTS_CHANGED_COUNT=$((SSL_CERTS_CHANGED_COUNT + 1))
+            log "INFO" "SSL certificate deployed (CHANGED): $cert_file_path"
             
             # Log certificate details
             local cert_subject=$(openssl x509 -in "$cert_file_path" -noout -subject 2>/dev/null | sed 's/subject=//')
@@ -1427,19 +1444,29 @@ deploy_ssl_certificates() {
         fi
     done
     
-    log "INFO" "SSL DEPLOYMENT: Completed"
+    if [[ $SSL_CERTS_CHANGED_COUNT -gt 0 ]]; then
+        log "INFO" "SSL DEPLOYMENT: Completed - $SSL_CERTS_CHANGED_COUNT certificate(s) changed"
+    else
+        log "INFO" "SSL DEPLOYMENT: Completed - all certificates up to date"
+    fi
 }
 
-# Fetch and deploy SSL certificates from separate endpoint
+# Fetch and deploy SSL certificates from separate endpoint (macOS)
+# Args: $1 = "full" to skip incremental sync and fetch ALL certs (used by standalone SSL check)
 fetch_and_deploy_ssl_certificates() {
+    local fetch_mode="${1:-incremental}"
+    
+    # Reset global counter before fetch
+    SSL_CERTS_CHANGED_COUNT=0
+    
     # Only log SSL fetch in debug mode to reduce log spam
-    [[ "${DEBUG_MODE:-0}" == "1" ]] && log "INFO" "SSL FETCH: Getting SSL certificates..."
+    [[ "${DEBUG_MODE:-0}" == "1" ]] && log "INFO" "SSL FETCH: Getting SSL certificates (mode: $fetch_mode)..."
     
     # Build SSL endpoint URL with incremental update support
     local ssl_endpoint="$MANAGEMENT_URL/api/agents/$AGENT_NAME/ssl-certificates"
     
-    # Add timestamp parameter for incremental updates if we have a last SSL sync time
-    if [[ -f "$SSL_SYNC_TIMESTAMP_FILE" ]]; then
+    # Add timestamp parameter for incremental updates (skip for full sync)
+    if [[ "$fetch_mode" != "full" && -f "$SSL_SYNC_TIMESTAMP_FILE" ]]; then
         local last_ssl_sync=$(cat "$SSL_SYNC_TIMESTAMP_FILE" 2>/dev/null || echo "")
         if [[ -n "$last_ssl_sync" ]]; then
             ssl_endpoint="${ssl_endpoint}?since=${last_ssl_sync}"
@@ -1473,6 +1500,28 @@ fetch_and_deploy_ssl_certificates() {
         log "DEBUG" "SSL INCREMENTAL: Saved SSL sync timestamp for next incremental update"
     else
         log "DEBUG" "No SSL certificates to deploy"
+    fi
+}
+
+# Independent SSL certificate sync check (mirrors embedded daemon behavior)
+# Runs periodically in daemon loop, independent of config version changes
+# If any cert files actually changed on disk, triggers HAProxy reload
+check_ssl_updates() {
+    # Fetch ALL certificates (full sync, not incremental) so checksum comparison catches everything
+    fetch_and_deploy_ssl_certificates "full"
+    
+    if [[ ${SSL_CERTS_CHANGED_COUNT:-0} -gt 0 ]]; then
+        log "INFO" "SSL SYNC: $SSL_CERTS_CHANGED_COUNT certificate(s) changed, triggering HAProxy reload..."
+        
+        # Validate HAProxy config before reload (cert files are already on disk)
+        if "$HAPROXY_BIN_PATH" -c -f "$HAPROXY_CONFIG_PATH" >/dev/null 2>&1; then
+            reload_haproxy_service
+            log "INFO" "SSL SYNC: HAProxy reloaded successfully after SSL certificate update"
+        else
+            # Config validation may fail if config references a cert that was just added
+            # but config hasn't been updated yet - this is expected, config update will handle it
+            log "WARN" "SSL SYNC: Certificates deployed but HAProxy config validation failed, reload will happen on next config update"
+        fi
     fi
 }
 
@@ -1757,10 +1806,10 @@ check_config_updates() {
         return 0
     fi
     
-    # OPTIMIZATION: Fetch and deploy SSL certificates ONLY when config changes
-    # This prevents unnecessary SSL API calls every 30 seconds
+    # Fetch and deploy SSL certificates when config version changes
     log "INFO" "Config version changed ($last_applied_version → $CONFIG_VERSION), fetching SSL certificates..."
     fetch_and_deploy_ssl_certificates
+    local _ssl_changed_in_config_update=${SSL_CERTS_CHANGED_COUNT:-0}
     
     # Create backup of current config (CRITICAL: Always backup before changes)
     if [[ -f "$HAPROXY_CONFIG_PATH" ]]; then
@@ -1984,6 +2033,18 @@ check_config_updates() {
             -H "X-API-Key: $AGENT_TOKEN" \
             -d "{\"version\":\"$CONFIG_VERSION\",\"validation_error\":$VALIDATION_ERROR_JSON}" > /dev/null 2>&1 || true
         
+        # CRITICAL: If SSL certificates were changed but config validation failed,
+        # still reload HAProxy with the EXISTING (known-good) config so it picks up new certs
+        if [[ ${_ssl_changed_in_config_update:-0} -gt 0 ]]; then
+            log "WARN" "Config validation failed but $_ssl_changed_in_config_update SSL cert(s) changed - reloading HAProxy with current config"
+            if "$HAPROXY_BIN_PATH" -c -f "$HAPROXY_CONFIG_PATH" >/dev/null 2>&1; then
+                reload_haproxy_service
+                log "INFO" "HAProxy reloaded with existing config to apply SSL certificate changes"
+            else
+                log "ERROR" "Cannot reload HAProxy - even existing config fails validation"
+            fi
+        fi
+        
         return 1
     fi
 }
@@ -2072,6 +2133,8 @@ run_daemon() {
     # Main agent loop with interruptible sleep for fast shutdown
     # Sleep is broken into 1-second intervals to check shutdown flag every second
     # This allows agent to stop in 1-2 seconds instead of waiting up to 30 seconds
+    local _loop_count=0
+    
     while [[ "$SHUTDOWN_REQUESTED" == "false" ]]; do
         # Interruptible sleep: break 30s into 30x 1s intervals
         for i in {1..30}; do
@@ -2087,6 +2150,15 @@ run_daemon() {
         send_heartbeat
         check_config_requests
         check_config_updates
+        
+        # Independent SSL certificate sync every 5th iteration (~2.5 minutes)
+        # This mirrors the embedded daemon behavior: SSL changes trigger HAProxy reload
+        # even when config version hasn't changed (e.g., certificate content renewal)
+        _loop_count=$((_loop_count + 1))
+        if (( _loop_count % 5 == 0 )); then
+            check_ssl_updates
+        fi
+        
         check_agent_upgrade
     done
     
@@ -2707,6 +2779,13 @@ CONFIG_RESPONSE_EOF
     fi
     
     last_validation_failed_version="none"
+    
+    # CRITICAL: Initialize HAProxy paths BEFORE daemon loop so SSL reload works from first iteration
+    # Without this, HAPROXY_BIN/HAPROXY_CONFIG are empty until first config version change,
+    # causing SSL-triggered reloads to silently fail with "config validation failed"
+    HAPROXY_BIN="${HAPROXY_BIN_PATH}"
+    HAPROXY_CONFIG="${HAPROXY_CONFIG_PATH}"
+    log "INFO" "DAEMON: Initialized HAProxy paths - bin: $HAPROXY_BIN, config: $HAPROXY_CONFIG"
     
     # Enhanced daemon loop with upgrade capability  
     log "DEBUG" "DAEMON: Starting agent monitoring loop for $AGENT_NAME"
