@@ -417,14 +417,23 @@ safe_remove() {
 # 1. Stop and kill all existing agent processes
 [[ "$QUIET_MODE" != "true" ]] && echo "Terminating existing HAProxy Agent processes..."
 KILLED_COUNT=0
+INSTALLER_PID=$$
 for pattern in "haproxy-agent" "/usr/local/bin/haproxy-agent" "haproxy-agent.service"; do
     PIDS=$(pgrep -f "$pattern" 2>/dev/null || true)
     if [[ -n "$PIDS" ]]; then
-        [[ "$QUIET_MODE" != "true" ]] && echo "   Killing processes matching: $pattern"
-        kill -TERM $PIDS 2>/dev/null || true
-        sleep 2
-        kill -KILL $PIDS 2>/dev/null || true
-        KILLED_COUNT=$((KILLED_COUNT + $(echo "$PIDS" | wc -w)))
+        FILTERED=""
+        for p in $PIDS; do
+            [[ "$p" == "$INSTALLER_PID" || "$p" == "$PPID" ]] && continue
+            FILTERED="$FILTERED $p"
+        done
+        FILTERED=$(echo "$FILTERED" | xargs)
+        if [[ -n "$FILTERED" ]]; then
+            [[ "$QUIET_MODE" != "true" ]] && echo "   Killing processes matching: $pattern"
+            kill -TERM $FILTERED 2>/dev/null || true
+            sleep 2
+            kill -KILL $FILTERED 2>/dev/null || true
+            KILLED_COUNT=$((KILLED_COUNT + $(echo "$FILTERED" | wc -w)))
+        fi
     fi
 done
 
