@@ -260,38 +260,58 @@ fi
 if [[ "$DAEMON_MODE" == "true" ]]; then
     log "INFO" "DAEMON: Starting agent daemon with existing configuration..."
     
-    # Verify jq is available (required for config parsing in daemon mode)
-    if ! command -v jq &> /dev/null; then
-        log "ERROR" "DAEMON: jq is required but not found. Cannot parse agent configuration."
-        echo "FATAL: jq is not installed. Install jq and restart the agent service." >&2
-        exit 1
-    fi
+    # Verify critical dependencies with retry (prevents rapid restart loops)
+    # SystemD Restart=always would cause fast crash-loop if we exit immediately
+    _dep_retry=0
+    _dep_max=5
+    while ! command -v jq &> /dev/null || ! command -v curl &> /dev/null; do
+        _dep_retry=$((_dep_retry + 1))
+        _missing=""
+        command -v jq &> /dev/null || _missing="jq"
+        command -v curl &> /dev/null || _missing="${_missing:+$_missing }curl"
+        if [[ $_dep_retry -ge $_dep_max ]]; then
+            log "ERROR" "DAEMON: Required tools not found after $_dep_max retries: $_missing"
+            log "ERROR" "DAEMON: Install missing tools and restart: sudo systemctl restart haproxy-agent"
+            exit 1
+        fi
+        _wait=$((_dep_retry * 30))
+        log "WARN" "DAEMON: Required tools missing ($_missing). Retry $_dep_retry/$_dep_max in ${_wait}s..."
+        sleep $_wait
+    done
     
     # Load existing configuration
     CONFIG_FILE="/etc/haproxy-agent/config.json"
     LOG_FILE="/var/log/haproxy-agent/agent.log"
     PID_FILE="/var/run/haproxy-agent.pid"
     
-    # Load configuration from file
-    if [[ -f "$CONFIG_FILE" ]]; then
-        MANAGEMENT_URL=$(jq -r '.management.url' "$CONFIG_FILE" 2>/dev/null)
-        AGENT_TOKEN=$(jq -r '.management.token' "$CONFIG_FILE" 2>/dev/null)
-        CLUSTER_ID=$(jq -r '.management.cluster_id' "$CONFIG_FILE" 2>/dev/null)
-        AGENT_NAME=$(jq -r '.agent.name' "$CONFIG_FILE" 2>/dev/null)
-        HOSTNAME=$(jq -r '.agent.hostname' "$CONFIG_FILE" 2>/dev/null)
-        
-        log "INFO" "DAEMON: Configuration loaded - Agent: $AGENT_NAME, Cluster: $CLUSTER_ID"
-        
-        # FIXED: Jump directly to daemon mode instead of setting SKIP_TO_DAEMON (MacOS style)
-        log "INFO" "DAEMON: Going directly to daemon mode..."
-        
-        # Jump to the daemon section at the end of the script
-        SKIP_TO_DAEMON=true
-    else
-        log "ERROR" "DAEMON: Configuration file not found: $CONFIG_FILE"
-        log "INFO" "DAEMON: Falling back to installer mode..."
-        DAEMON_MODE=false
-    fi
+    # Load configuration from file (with retry - config may be temporarily unavailable)
+    _cfg_retry=0
+    _cfg_max=5
+    while [[ ! -f "$CONFIG_FILE" ]]; do
+        _cfg_retry=$((_cfg_retry + 1))
+        if [[ $_cfg_retry -ge $_cfg_max ]]; then
+            log "ERROR" "DAEMON: Configuration file not found after $_cfg_max retries: $CONFIG_FILE"
+            log "ERROR" "DAEMON: Re-install the agent to recreate the configuration."
+            exit 1
+        fi
+        _wait=$((_cfg_retry * 15))
+        log "WARN" "DAEMON: Config not found: $CONFIG_FILE. Retry $_cfg_retry/$_cfg_max in ${_wait}s..."
+        sleep $_wait
+    done
+    
+    MANAGEMENT_URL=$(jq -r '.management.url' "$CONFIG_FILE" 2>/dev/null)
+    AGENT_TOKEN=$(jq -r '.management.token' "$CONFIG_FILE" 2>/dev/null)
+    CLUSTER_ID=$(jq -r '.management.cluster_id' "$CONFIG_FILE" 2>/dev/null)
+    AGENT_NAME=$(jq -r '.agent.name' "$CONFIG_FILE" 2>/dev/null)
+    HOSTNAME=$(jq -r '.agent.hostname' "$CONFIG_FILE" 2>/dev/null)
+    
+    log "INFO" "DAEMON: Configuration loaded - Agent: $AGENT_NAME, Cluster: $CLUSTER_ID"
+    
+    # FIXED: Jump directly to daemon mode instead of setting SKIP_TO_DAEMON (MacOS style)
+    log "INFO" "DAEMON: Going directly to daemon mode..."
+    
+    # Jump to the daemon section at the end of the script
+    SKIP_TO_DAEMON=true
 fi
 
 # Configuration variables - MODIFY THESE IF NEEDED
@@ -922,24 +942,48 @@ find_binary() {
     return 1
 }
 
-# Initialize global binary paths for daemon
-CURL_BIN=$(find_binary curl)
-if [[ -z "$CURL_BIN" ]]; then
-    echo "ERROR: curl not found in system" >&2
-    exit 1
-fi
+# Initialize global binary paths for daemon (with retry to prevent crash loops)
+_dep_retry=0
+_dep_max=5
+while true; do
+    CURL_BIN=$(find_binary curl)
+    JQ_AVAILABLE=false
+    command -v jq &> /dev/null && JQ_AVAILABLE=true
+    
+    if [[ -n "$CURL_BIN" ]] && [[ "$JQ_AVAILABLE" == "true" ]]; then
+        break
+    fi
+    
+    _dep_retry=$((_dep_retry + 1))
+    _missing=""
+    [[ -z "$CURL_BIN" ]] && _missing="curl"
+    [[ "$JQ_AVAILABLE" != "true" ]] && _missing="${_missing:+$_missing }jq"
+    
+    if [[ $_dep_retry -ge $_dep_max ]]; then
+        echo "ERROR: Required tools not found after $_dep_max retries: $_missing" >&2
+        echo "Install missing tools and restart the agent service." >&2
+        exit 1
+    fi
+    
+    _wait=$((_dep_retry * 30))
+    echo "WARN: Required tools missing ($_missing). Retry $_dep_retry/$_dep_max in ${_wait}s..." >&2
+    sleep $_wait
+done
 
-# Verify jq is available (critical dependency for JSON config parsing)
-if ! command -v jq &> /dev/null; then
-    echo "ERROR: jq not found. Install jq and restart the agent service." >&2
-    exit 1
-fi
-
-# Load configuration
-if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "ERROR: Configuration not found: $CONFIG_FILE" >&2
-    exit 1
-fi
+# Load configuration (with retry - config may be temporarily unavailable after upgrade)
+_cfg_retry=0
+_cfg_max=5
+while [[ ! -f "$CONFIG_FILE" ]]; do
+    _cfg_retry=$((_cfg_retry + 1))
+    if [[ $_cfg_retry -ge $_cfg_max ]]; then
+        echo "ERROR: Configuration not found after $_cfg_max retries: $CONFIG_FILE" >&2
+        echo "Re-install the agent to recreate the configuration." >&2
+        exit 1
+    fi
+    _wait=$((_cfg_retry * 15))
+    echo "WARN: Config file not found: $CONFIG_FILE. Retry $_cfg_retry/$_cfg_max in ${_wait}s..." >&2
+    sleep $_wait
+done
 
 MANAGEMENT_URL=$(jq -r '.management.url' "$CONFIG_FILE")
 AGENT_TOKEN=$(jq -r '.management.token' "$CONFIG_FILE")
@@ -2089,8 +2133,7 @@ run_daemon() {
     if [[ -n "$SOCAT_BIN" ]]; then
         log "INFO" "Found socat: $SOCAT_BIN"
     else
-        log "ERROR" "socat not found in system"
-        exit 1
+        log "WARN" "socat not found - HAProxy stats will be unavailable (agent will still function)"
     fi
     
     if [[ -n "$JQ_BIN" ]]; then
@@ -2300,6 +2343,10 @@ KillSignal=SIGTERM
 
 Restart=always
 RestartSec=10
+# Prevent rapid restart loops: max 5 restarts within 2 minutes
+# Allows multiple legitimate upgrades (exit 0 + restart) while catching crash loops
+StartLimitBurst=5
+StartLimitIntervalSec=120
 StandardOutput=append:$LOG_DIR/agent.log
 StandardError=append:$LOG_DIR/agent.log
 Environment=SKIP_TO_DAEMON=true
