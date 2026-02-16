@@ -133,6 +133,7 @@ const AgentManagement = () => {
   const [filteredAgents, setFilteredAgents] = useState([]);
   const [searchText, setSearchText] = useState('');
   const [loading, setLoading] = useState(false);
+  const loadingRef = useRef(false);
   // Store upgrade types in ref to avoid re-render loops
   const upgradeTypesRef = useRef({});
   const [agentDetailModalVisible, setAgentDetailModalVisible] = useState(false);
@@ -225,8 +226,8 @@ const AgentManagement = () => {
       return;
     }
     
-    // Prevent concurrent fetches
-    if (!force && loading) {
+    // Prevent concurrent fetches (use ref to avoid stale closure)
+    if (!force && loadingRef.current) {
       console.log('⚠️ fetchAgents: Already loading, skipping fetch');
       return;
     }
@@ -239,6 +240,7 @@ const AgentManagement = () => {
     }
     lastFetchTime.current = now;
     
+    loadingRef.current = true;
     setLoading(true);
     console.log(`📡 fetchAgents: Fetching agents for pool_id=${targetCluster.pool_id}`);
     try {
@@ -289,6 +291,7 @@ const AgentManagement = () => {
       message.error('Failed to fetch agents: ' + (error.response?.data?.detail || error.message));
       setConnectionStatus('error');
     } finally {
+      loadingRef.current = false;
       setLoading(false);
     }
   }, [selectedCluster]);
@@ -391,24 +394,32 @@ const AgentManagement = () => {
     };
   }, [setupAutoRefresh]);
 
-  // CRITICAL FIX: Clear agents immediately when cluster changes (prevent cache/mixing)
+  // Track previous cluster ID to detect actual changes
+  const prevClusterIdRef = useRef(null);
+
+  // Cluster change handler + initial load
   useEffect(() => {
-    if (selectedCluster) {
-      console.log(`🔄 CLUSTER CHANGED: ${selectedCluster.name} (ID: ${selectedCluster.id}) - Clearing agents to prevent mixing...`);
+    if (!selectedCluster) return;
+    
+    const isClusterChange = prevClusterIdRef.current !== null && prevClusterIdRef.current !== selectedCluster.id;
+    prevClusterIdRef.current = selectedCluster.id;
+    
+    if (isClusterChange) {
+      console.log(`🔄 CLUSTER CHANGED: ${selectedCluster.name} (ID: ${selectedCluster.id}) - Clearing and force-fetching...`);
+      // Clear stale data immediately
       setAgents([]);
       setFilteredAgents([]);
       setConnectionStatus('checking');
-      // Clear upgrade types ref for new cluster
       upgradeTypesRef.current = {};
+      // Reset throttle so force-fetch is not blocked
+      lastFetchTime.current = 0;
     }
-  }, [selectedCluster?.id]); // Trigger on cluster ID change only
-
-  // Initial load and cluster change
-  useEffect(() => {
-    fetchAgents();
+    
+    // Force fetch on cluster change, normal fetch on initial load
+    fetchAgents(isClusterChange);
     fetchPools();
-    fetchAgentVersions(); // Auto-load agent versions on component mount
-  }, [fetchAgents, fetchPools, selectedCluster]); // CRITICAL FIX: Re-fetch when cluster changes
+    fetchAgentVersions();
+  }, [selectedCluster?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Generate installation script
   const generateInstallScript = async () => {
