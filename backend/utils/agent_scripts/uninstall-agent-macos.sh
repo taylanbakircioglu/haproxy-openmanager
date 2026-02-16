@@ -1,343 +1,289 @@
 #!/bin/bash
 # HAProxy Agent Uninstaller for macOS - Complete Agent Cleanup
 # Run with: sudo ./uninstall-agent-macos.sh
-# Updated for daemon mode and modern agent cleanup
-
-set -e
+# Removes ALL agent components while keeping HAProxy intact
+#
+# IMPORTANT: 'set -e' intentionally NOT used here.
+# safe_remove returns non-zero for missing files which would cause
+# premature exit before cleaning up config, logs, and binaries.
 
 echo "=========================================="
-echo "HAProxy Agent Uninstaller for macOS v5.0"
-echo "Complete Agent Cleanup Edition"
-echo "With Daemon Mode & Modern Agent Support"
+echo "HAProxy Agent Uninstaller for macOS v6.0"
+echo "Complete Agent Cleanup"
 echo "=========================================="
 
 # Check root permissions
 if [[ $EUID -ne 0 ]]; then
-   echo "❌ ERROR: This script must be run as root"
-   echo "   Please run: sudo $0"
-   exit 1
+    echo "ERROR: This script must be run as root"
+    echo "  Please run: sudo $0"
+    exit 1
 fi
 
-echo "🔍 Performing COMPLETE agent cleanup (HAProxy untouched)..."
+echo ""
+echo "Starting complete agent cleanup (HAProxy untouched)..."
+echo ""
 
-# Function to safely remove files/directories
+# --------------------------------------------
+# Helper: safely remove a file or directory
+# Always returns 0 so the script never exits early
+# --------------------------------------------
 safe_remove() {
     local path="$1"
     local desc="$2"
-    
+
     if [[ -e "$path" ]]; then
-        echo "🗑️  Removing $desc..."
-        rm -rf "$path" 2>/dev/null || {
-            echo "⚠️  Failed to remove $desc (may not exist or no permission)"
-            return 1
-        }
-        echo "✅ $desc removed"
-        return 0
-    else
-        echo "ℹ️  $desc not found"
-        return 1
-    fi
-}
-
-# Function to find and kill daemon processes
-kill_daemon_processes() {
-    echo "🔪 Terminating ALL HAProxy Agent processes (including daemon mode)..."
-    local killed_count=0
-    
-    # Enhanced process patterns for daemon mode
-    local patterns=(
-        "haproxy-agent"
-        "/usr/local/bin/haproxy-agent"
-        "/opt/homebrew/bin/haproxy-agent"
-        "com.haproxy.agent"
-        "haproxy-agent daemon"
-        "bash.*haproxy-agent"
-        "nohup.*haproxy-agent"
-    )
-    
-    for pattern in "${patterns[@]}"; do
-        local pids=$(pgrep -f "$pattern" 2>/dev/null || true)
-        if [[ -n "$pids" ]]; then
-            echo "   🎯 Killing processes matching: $pattern"
-            echo "   📋 PIDs: $pids"
-            
-            # First try TERM signal
-            kill -TERM $pids 2>/dev/null || true
-            sleep 3
-            
-            # Check if still running, then use KILL
-            local remaining_pids=$(pgrep -f "$pattern" 2>/dev/null || true)
-            if [[ -n "$remaining_pids" ]]; then
-                echo "   💀 Force killing remaining PIDs: $remaining_pids"
-                kill -KILL $remaining_pids 2>/dev/null || true
-                sleep 1
-            fi
-            
-            killed_count=$((killed_count + $(echo "$pids" | wc -w)))
-        fi
-    done
-    
-    # Also check for any remaining haproxy-agent processes
-    local final_check=$(pgrep -f "haproxy-agent" 2>/dev/null || true)
-    if [[ -n "$final_check" ]]; then
-        echo "   🔥 Final cleanup: killing PIDs $final_check"
-        kill -KILL $final_check 2>/dev/null || true
-    fi
-    
-    if [[ $killed_count -gt 0 ]]; then
-        echo "✅ Terminated $killed_count agent processes"
-    else
-        echo "ℹ️  No agent processes found"
-    fi
-}
-
-# Function to find and remove all agent binaries dynamically
-remove_agent_binaries() {
-    echo "🔍 Searching for agent binaries in all possible locations..."
-    
-    # Common binary locations
-    local search_paths=(
-        "/usr/local/bin"
-        "/opt/homebrew/bin"
-        "/usr/bin"
-        "/bin"
-        "/opt/homebrew/sbin"
-        "/usr/sbin"
-        "/sbin"
-    )
-    
-    local found_count=0
-    for path in "${search_paths[@]}"; do
-        if [[ -f "$path/haproxy-agent" ]]; then
-            safe_remove "$path/haproxy-agent" "agent binary ($path)"
-            ((found_count++))
-        fi
-    done
-    
-    # Deep search for any remaining haproxy-agent binaries
-    echo "🔍 Deep search for any remaining haproxy-agent binaries..."
-    local found_binaries
-    found_binaries=$(find /usr /opt /Applications 2>/dev/null -name "haproxy-agent" -type f 2>/dev/null || true)
-    
-    if [[ -n "$found_binaries" ]]; then
-        while IFS= read -r binary; do
-            if [[ -f "$binary" ]]; then
-                safe_remove "$binary" "found agent binary ($binary)"
-                ((found_count++))
-            fi
-        done <<< "$found_binaries"
-    fi
-    
-    if [[ $found_count -eq 0 ]]; then
-        echo "ℹ️  No agent binaries found"
-    else
-        echo "✅ Removed $found_count agent binaries"
-    fi
-}
-
-# Function to clean up launchd services
-cleanup_launchd_services() {
-    echo "🛑 Cleaning up agent launchd services..."
-    
-    local services=(
-        "com.haproxy.agent"
-        "haproxy.agent" 
-        "haproxy-agent"
-        "com.haproxy-agent"
-    )
-    
-    for service in "${services[@]}"; do
-        # Check if service is loaded
-        if launchctl list 2>/dev/null | grep -q "$service"; then
-            echo "   🛑 Stopping service: $service"
-            launchctl stop "$service" 2>/dev/null || true
-            launchctl unload "/Library/LaunchDaemons/$service.plist" 2>/dev/null || true
-            launchctl unload "/Library/LaunchAgents/$service.plist" 2>/dev/null || true
-            launchctl remove "$service" 2>/dev/null || true
-            echo "   ✅ Service $service cleaned up"
-        fi
-    done
-    
-    # Remove plist files
-    for service in "${services[@]}"; do
-        safe_remove "/Library/LaunchDaemons/$service.plist" "LaunchDaemon plist ($service)"
-        safe_remove "/Library/LaunchAgents/$service.plist" "LaunchAgent plist ($service)"
-        safe_remove "~/Library/LaunchAgents/$service.plist" "User LaunchAgent plist ($service)"
-    done
-}
-
-# Function to clean up configuration and data
-cleanup_agent_data() {
-    echo "🧹 Cleaning up agent configuration and data..."
-    
-    # Configuration directories
-    local config_dirs=(
-        "/etc/haproxy-agent"
-        "/opt/homebrew/etc/haproxy-agent"
-        "/usr/local/etc/haproxy-agent"
-        "/var/lib/haproxy-agent"
-        "/usr/local/share/haproxy-agent"
-        "/usr/local/share/haproxy-agent-backups"
-        "/opt/homebrew/share/haproxy-agent"
-        "/opt/homebrew/share/haproxy-agent-backups"
-    )
-    
-    for config_dir in "${config_dirs[@]}"; do
-        safe_remove "$config_dir" "agent configuration directory ($config_dir)"
-    done
-    
-    # Log directories
-    local log_dirs=(
-        "/var/log/haproxy-agent"
-        "/opt/homebrew/var/log/haproxy-agent"
-        "/usr/local/var/log/haproxy-agent"
-        "/tmp/haproxy-agent-logs"
-    )
-    
-    for log_dir in "${log_dirs[@]}"; do
-        safe_remove "$log_dir" "agent log directory ($log_dir)"
-    done
-    
-    # PID files
-    local pid_files=(
-        "/var/run/haproxy-agent.pid"
-        "/tmp/haproxy-agent.pid"
-        "/usr/local/var/run/haproxy-agent.pid"
-        "/opt/homebrew/var/run/haproxy-agent.pid"
-    )
-    
-    for pid_file in "${pid_files[@]}"; do
-        safe_remove "$pid_file" "agent PID file ($pid_file)"
-    done
-}
-
-# Function to clean up temporary files
-cleanup_temp_files() {
-    echo "🧹 Cleaning up agent-specific temporary and debug files..."
-    
-    local temp_patterns=(
-        "/tmp/agent_debug.log"
-        "/tmp/debug_agent.log" 
-        "/tmp/fixed_agent_test.log"
-        "/tmp/haproxy-agent-*"
-        "/tmp/agent-startup-with-config.sh"
-        "/tmp/daemon-test-agent*.sh"
-        "/var/tmp/haproxy-agent-*"
-        "/tmp/haproxy-failed-*.cfg"
-        "/tmp/haproxy_new_*.cfg"
-        "/tmp/haproxy-new-config.cfg"
-        "/tmp/haproxy-merged*.cfg"
-        "/tmp/haproxy-global*.cfg"
-        "/tmp/haproxy-defaults*.cfg"
-        "/tmp/haproxy-listen*.cfg"
-    )
-    
-    for pattern in "${temp_patterns[@]}"; do
-        if [[ "$pattern" == *"*"* ]]; then
-            # Handle wildcard patterns
-            local base_dir=$(dirname "$pattern")
-            local file_pattern=$(basename "$pattern")
-            if [[ -d "$base_dir" ]]; then
-                local found_files=$(find "$base_dir" -maxdepth 1 -name "$file_pattern" -type f 2>/dev/null || true)
-                if [[ -n "$found_files" ]]; then
-                    while IFS= read -r file; do
-                        [[ -f "$file" ]] && safe_remove "$file" "agent temp file ($file)"
-                    done <<< "$found_files"
-                fi
-            fi
+        rm -rf "$path" 2>/dev/null || true
+        if [[ ! -e "$path" ]]; then
+            echo "  [REMOVED] $desc"
         else
-            safe_remove "$pattern" "agent temp file ($(basename "$pattern"))"
+            echo "  [WARN]    Failed to remove $desc"
         fi
-    done
-    
-    # Clean up agent upgrade markers and PID files
-    echo "🧹 Cleaning up agent upgrade markers..."
-    local marker_patterns=(
-        "/tmp/haproxy-agent-upgrade-complete-*"
-        "/tmp/haproxy-agent-upgrade-test-*"
-        "/tmp/haproxy-agent-*.pid"
-    )
-    
-    for pattern in "${marker_patterns[@]}"; do
-        local marker_dir=$(dirname "$pattern")
-        local marker_name=$(basename "$pattern")
-        if [[ -d "$marker_dir" ]]; then
-            local found_markers=$(find "$marker_dir" -maxdepth 1 -name "$marker_name" -type f 2>/dev/null || true)
-            if [[ -n "$found_markers" ]]; then
-                while IFS= read -r marker; do
-                    [[ -f "$marker" ]] && safe_remove "$marker" "agent marker file ($marker)"
-                done <<< "$found_markers"
-            fi
-        fi
-    done
-    
-    # Clean up agent-specific sockets
-    echo "🧹 Cleaning up agent-specific sockets..."
-    local socket_patterns=(
-        "/tmp/haproxy-agent-*"
-        "/var/run/haproxy-agent-*"
-    )
-    
-    for pattern in "${socket_patterns[@]}"; do
-        local socket_dir=$(dirname "$pattern")
-        local socket_name=$(basename "$pattern")
-        if [[ -d "$socket_dir" ]]; then
-            local found_sockets=$(find "$socket_dir" -name "$socket_name" -type s 2>/dev/null || true)
-            if [[ -n "$found_sockets" ]]; then
-                while IFS= read -r socket; do
-                    safe_remove "$socket" "agent socket ($socket)"
-                done <<< "$found_sockets"
-            fi
-        fi
-    done
+    else
+        echo "  [SKIP]    $desc (not found)"
+    fi
+    return 0
 }
 
-# Main cleanup execution
-echo "🚀 Starting complete agent cleanup process..."
+# --------------------------------------------
+# 1. Terminate all agent processes
+# --------------------------------------------
+echo "[1/6] Terminating agent processes..."
 
-# 1. Kill all processes (including daemon mode)
-kill_daemon_processes
+killed_count=0
+patterns=(
+    "haproxy-agent"
+    "/usr/local/bin/haproxy-agent"
+    "/opt/homebrew/bin/haproxy-agent"
+    "com.haproxy.agent"
+    "haproxy-agent daemon"
+    "bash.*haproxy-agent"
+    "nohup.*haproxy-agent"
+)
 
-# 2. Stop and clean launchd services
-cleanup_launchd_services
+for pattern in "${patterns[@]}"; do
+    pids=$(pgrep -f "$pattern" 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+        echo "  Killing processes matching: $pattern (PIDs: $pids)"
+        kill -TERM $pids 2>/dev/null || true
+        sleep 2
+        # Force kill if still running
+        remaining=$(pgrep -f "$pattern" 2>/dev/null || true)
+        if [[ -n "$remaining" ]]; then
+            echo "  Force killing remaining: $remaining"
+            kill -KILL $remaining 2>/dev/null || true
+            sleep 1
+        fi
+        killed_count=$((killed_count + $(echo "$pids" | wc -w)))
+    fi
+done
 
+# Final sweep
+final_pids=$(pgrep -f "haproxy-agent" 2>/dev/null || true)
+if [[ -n "$final_pids" ]]; then
+    echo "  Final cleanup: force killing PIDs $final_pids"
+    kill -KILL $final_pids 2>/dev/null || true
+fi
+
+if [[ $killed_count -gt 0 ]]; then
+    echo "  Terminated $killed_count agent process(es)"
+else
+    echo "  No agent processes found"
+fi
+echo ""
+
+# --------------------------------------------
+# 2. Stop and remove launchd services
+# --------------------------------------------
+echo "[2/6] Cleaning up launchd services..."
+
+services=(
+    "com.haproxy.agent"
+    "haproxy.agent"
+    "haproxy-agent"
+    "com.haproxy-agent"
+)
+
+for svc in "${services[@]}"; do
+    if launchctl list 2>/dev/null | grep -q "$svc"; then
+        echo "  Stopping and removing: $svc"
+        launchctl stop "$svc" 2>/dev/null || true
+        launchctl unload "/Library/LaunchDaemons/$svc.plist" 2>/dev/null || true
+        launchctl unload "/Library/LaunchAgents/$svc.plist" 2>/dev/null || true
+        launchctl remove "$svc" 2>/dev/null || true
+    fi
+done
+
+# Remove plist files
+for svc in "${services[@]}"; do
+    safe_remove "/Library/LaunchDaemons/$svc.plist" "LaunchDaemon: $svc"
+    safe_remove "/Library/LaunchAgents/$svc.plist" "LaunchAgent: $svc"
+    safe_remove "$HOME/Library/LaunchAgents/$svc.plist" "User LaunchAgent: $svc"
+done
+echo ""
+
+# --------------------------------------------
 # 3. Remove agent binaries
-remove_agent_binaries
+# --------------------------------------------
+echo "[3/6] Removing agent binaries..."
 
-# 4. Clean up configuration and data
-cleanup_agent_data
+bin_paths=(
+    "/usr/local/bin/haproxy-agent"
+    "/opt/homebrew/bin/haproxy-agent"
+    "/usr/bin/haproxy-agent"
+    "/bin/haproxy-agent"
+    "/opt/homebrew/sbin/haproxy-agent"
+    "/usr/sbin/haproxy-agent"
+    "/sbin/haproxy-agent"
+)
 
-# 5. Clean up temporary files
-cleanup_temp_files
+for bp in "${bin_paths[@]}"; do
+    safe_remove "$bp" "binary: $bp"
+done
 
-# 6. Reload launchctl to clean up daemon list
-echo "🔄 Refreshing system services..."
-launchctl load /System/Library/LaunchDaemons/com.apple.periodic-daily.plist 2>/dev/null || true
+# Deep search for any remaining binaries
+found_extra=$(find /usr /opt /Applications -name "haproxy-agent" -type f 2>/dev/null || true)
+if [[ -n "$found_extra" ]]; then
+    while IFS= read -r extra; do
+        safe_remove "$extra" "binary (deep search): $extra"
+    done <<< "$found_extra"
+fi
+echo ""
 
-# 7. Final comprehensive verification
-echo "🔍 Final agent cleanup verification..."
-local remaining_processes=$(pgrep -f "haproxy-agent" 2>/dev/null | wc -l || echo "0")
-local remaining_services=$(launchctl list 2>/dev/null | grep -c "haproxy.agent\|haproxy-agent" || echo "0")
-local remaining_binaries=$(find /usr /opt /Applications 2>/dev/null -name "haproxy-agent" -type f 2>/dev/null | wc -l || echo "0")
+# --------------------------------------------
+# 4. Remove ALL agent configuration and data
+# --------------------------------------------
+echo "[4/6] Removing agent configuration and data..."
+
+config_dirs=(
+    "/etc/haproxy-agent"
+    "/opt/homebrew/etc/haproxy-agent"
+    "/usr/local/etc/haproxy-agent"
+    "/var/lib/haproxy-agent"
+    "/usr/local/share/haproxy-agent"
+    "/usr/local/share/haproxy-agent-backups"
+    "/opt/homebrew/share/haproxy-agent"
+    "/opt/homebrew/share/haproxy-agent-backups"
+)
+
+for cd in "${config_dirs[@]}"; do
+    safe_remove "$cd" "config dir: $cd"
+done
+
+log_dirs=(
+    "/var/log/haproxy-agent"
+    "/opt/homebrew/var/log/haproxy-agent"
+    "/usr/local/var/log/haproxy-agent"
+    "/tmp/haproxy-agent-logs"
+)
+
+for ld in "${log_dirs[@]}"; do
+    safe_remove "$ld" "log dir: $ld"
+done
+
+pid_files=(
+    "/var/run/haproxy-agent.pid"
+    "/tmp/haproxy-agent.pid"
+    "/usr/local/var/run/haproxy-agent.pid"
+    "/opt/homebrew/var/run/haproxy-agent.pid"
+)
+
+for pf in "${pid_files[@]}"; do
+    safe_remove "$pf" "PID file: $pf"
+done
+echo ""
+
+# --------------------------------------------
+# 5. Remove temporary files, markers, sockets
+# --------------------------------------------
+echo "[5/6] Cleaning up temporary files and markers..."
+
+# Fixed-name temp files
+fixed_temps=(
+    "/tmp/agent_debug.log"
+    "/tmp/debug_agent.log"
+    "/tmp/fixed_agent_test.log"
+    "/tmp/agent-startup-with-config.sh"
+    "/tmp/haproxy-new-config.cfg"
+)
+
+for ft in "${fixed_temps[@]}"; do
+    safe_remove "$ft" "temp: $ft"
+done
+
+# Wildcard patterns - files
+wildcard_file_patterns=(
+    "haproxy-agent-*"
+    "daemon-test-agent*.sh"
+    "haproxy-failed-*.cfg"
+    "haproxy_new_*.cfg"
+    "haproxy-merged*.cfg"
+    "haproxy-global*.cfg"
+    "haproxy-defaults*.cfg"
+    "haproxy-listen*.cfg"
+    "haproxy-agent-upgrade-complete-*"
+    "haproxy-agent-upgrade-test-*"
+    "haproxy-agent-*.pid"
+    "haproxy-agent-ssl-sync-*"
+    "heartbeat_payload_*.json"
+    "heartbeat_response_*.txt"
+    "ssl_cert_*.pem"
+)
+
+for wp in "${wildcard_file_patterns[@]}"; do
+    for search_dir in "/tmp" "/var/tmp"; do
+        if [[ -d "$search_dir" ]]; then
+            found=$(find "$search_dir" -maxdepth 1 -name "$wp" 2>/dev/null || true)
+            if [[ -n "$found" ]]; then
+                while IFS= read -r f; do
+                    safe_remove "$f" "temp: $f"
+                done <<< "$found"
+            fi
+        fi
+    done
+done
+
+# Wildcard patterns - sockets
+for search_dir in "/tmp" "/var/run"; do
+    if [[ -d "$search_dir" ]]; then
+        found_sockets=$(find "$search_dir" -maxdepth 1 -name "haproxy-agent-*" -type s 2>/dev/null || true)
+        if [[ -n "$found_sockets" ]]; then
+            while IFS= read -r sock; do
+                safe_remove "$sock" "socket: $sock"
+            done <<< "$found_sockets"
+        fi
+    fi
+done
+echo ""
+
+# --------------------------------------------
+# 6. Verification
+# --------------------------------------------
+echo "[6/6] Verifying cleanup..."
+
+remaining_procs=$(pgrep -f "haproxy-agent" 2>/dev/null | wc -l || echo "0")
+remaining_svcs=$(launchctl list 2>/dev/null | grep -c "haproxy.agent\|haproxy-agent" || echo "0")
+remaining_bins=$(find /usr /opt /Applications -name "haproxy-agent" -type f 2>/dev/null | wc -l || echo "0")
+remaining_conf=$(test -d "/etc/haproxy-agent" && echo "1" || echo "0")
 
 echo ""
-if [[ $remaining_processes -eq 0 && $remaining_services -eq 0 && $remaining_binaries -eq 0 ]]; then
-    echo "✅ COMPLETE AGENT CLEANUP VERIFIED - Agent completely removed!"
+if [[ $remaining_procs -eq 0 && $remaining_svcs -eq 0 && $remaining_bins -eq 0 && $remaining_conf -eq 0 ]]; then
+    echo "CLEANUP VERIFIED - Agent completely removed."
 else
-    echo "⚠️  Some agent remnants detected:"
-    [[ $remaining_processes -gt 0 ]] && echo "   - $remaining_processes agent processes still running"
-    [[ $remaining_services -gt 0 ]] && echo "   - $remaining_services agent services still loaded"
-    [[ $remaining_binaries -gt 0 ]] && echo "   - $remaining_binaries agent binaries still found"
-    
-    if [[ $remaining_binaries -gt 0 ]]; then
-        echo "   📋 Remaining agent binaries:"
-        find /usr /opt /Applications 2>/dev/null -name "haproxy-agent" -type f 2>/dev/null | while read -r binary; do
-            echo "     - $binary"
+    echo "WARNING: Some agent remnants detected:"
+    [[ $remaining_procs -gt 0 ]] && echo "  - $remaining_procs agent process(es) still running"
+    [[ $remaining_svcs -gt 0 ]] && echo "  - $remaining_svcs agent service(s) still loaded"
+    [[ $remaining_bins -gt 0 ]] && echo "  - $remaining_bins agent binary(ies) still found"
+    [[ $remaining_conf -gt 0 ]] && echo "  - /etc/haproxy-agent/ config directory still exists"
+
+    if [[ $remaining_bins -gt 0 ]]; then
+        echo "  Remaining binaries:"
+        find /usr /opt /Applications -name "haproxy-agent" -type f 2>/dev/null | while read -r b; do
+            echo "    - $b"
         done
     fi
-    
-    if [[ $remaining_processes -gt 0 ]]; then
-        echo "   📋 Remaining agent processes:"
+
+    if [[ $remaining_procs -gt 0 ]]; then
+        echo "  Remaining processes:"
         pgrep -f "haproxy-agent" 2>/dev/null | while read -r pid; do
             ps -p "$pid" -o pid,ppid,command 2>/dev/null || true
         done
@@ -345,21 +291,27 @@ else
 fi
 
 echo ""
-echo "🎉 HAProxy Agent Uninstaller Completed!"
+echo "=========================================="
+echo "HAProxy Agent Uninstall Complete"
+echo "=========================================="
 echo ""
-echo "📋 Complete cleanup summary:"
-echo "   • ✅ All agent processes terminated (including daemon mode)"
-echo "   • ✅ All agent launchd services removed and unloaded"
-echo "   • ✅ All agent binaries found and removed (deep search)"
-echo "   • ✅ All agent configs, logs, and data cleaned"
-echo "   • ✅ All agent-specific temp files and sockets removed"
-echo "   • ✅ System services refreshed"
-echo "   • ✅ HAProxy installation and configs UNTOUCHED"
+echo "What was removed:"
+echo "  - All agent processes (including daemon mode)"
+echo "  - All launchd services (stopped and unloaded)"
+echo "  - All agent binaries"
+echo "  - All agent config files (including config.json)"
+echo "  - All agent logs"
+echo "  - All agent temp files, markers, and sockets"
 echo ""
-echo "🚀 System ready for fresh agent installation!"
+echo "What was NOT touched:"
+echo "  - HAProxy service"
+echo "  - HAProxy configuration"
+echo "  - HAProxy SSL certificates"
+echo "  - HAProxy logs"
 echo ""
-echo "💡 Tips:"
-echo "   • HAProxy service and configurations remain intact"
-echo "   • Run 'ps aux | grep haproxy-agent' to verify no processes remain"
-echo "   • Run 'launchctl list | grep haproxy' to verify no services remain"
-echo "   • Agent can be reinstalled using the management UI"
+echo "System is ready for fresh agent installation."
+echo ""
+echo "Verify with:"
+echo "  ps aux | grep haproxy-agent"
+echo "  launchctl list | grep haproxy"
+echo "  ls -la /etc/haproxy-agent/"
