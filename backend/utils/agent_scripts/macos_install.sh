@@ -1430,8 +1430,17 @@ deploy_ssl_certificates() {
             chmod 600 "$cert_file_path"
             chown root:root "$cert_file_path" 2>/dev/null || true
             
-            SSL_CERTS_CHANGED_COUNT=$((SSL_CERTS_CHANGED_COUNT + 1))
-            log "INFO" "SSL certificate deployed (CHANGED): $cert_file_path"
+            # OPTIMIZATION: Only count toward reload if cert is actually referenced in HAProxy config
+            # This prevents unnecessary HAProxy reloads for SSL certificates that are deployed
+            # to disk but not used by any frontend/backend in this cluster's HAProxy configuration.
+            # File is ALWAYS deployed (for future use), but reload is only triggered when needed.
+            # Use -F for fixed-string matching (avoids regex interpretation of dots in filenames)
+            if [[ -f "$HAPROXY_CONFIG_PATH" ]] && grep -qF "$cert_file_path" "$HAPROXY_CONFIG_PATH" 2>/dev/null; then
+                SSL_CERTS_CHANGED_COUNT=$((SSL_CERTS_CHANGED_COUNT + 1))
+                log "INFO" "SSL certificate deployed (CHANGED & IN USE): $cert_file_path"
+            else
+                log "INFO" "SSL certificate deployed (CHANGED but NOT in HAProxy config): $cert_file_path - no reload needed"
+            fi
             
             # Log certificate details
             local cert_subject=$(openssl x509 -in "$cert_file_path" -noout -subject 2>/dev/null | sed 's/subject=//')
@@ -2907,9 +2916,15 @@ CONFIG_RESPONSE_EOF
                                     
                                     if [[ -f "$ssl_file" ]]; then
                                         chmod 600 "$ssl_file" 2>/dev/null
-                                        # Reduced logging to DEBUG to prevent spam on every check
-                                        log "DEBUG" "DAEMON: SSL certificate deployed: $ssl_file ($cert_domain)"
-                                        ssl_deployed_count=$((ssl_deployed_count + 1))
+                                        # OPTIMIZATION: Only count toward reload if cert is referenced in HAProxy config
+                                        # Use cert_file_path (API path matching config) not ssl_file (local deploy path)
+                                        # Prevents unnecessary reloads for certs not used by this cluster
+                                        if [[ -f "$HAPROXY_CONFIG" ]] && grep -qF "$cert_file_path" "$HAPROXY_CONFIG" 2>/dev/null; then
+                                            log "INFO" "DAEMON: SSL certificate deployed (CHANGED & IN USE): $ssl_file ($cert_domain)"
+                                            ssl_deployed_count=$((ssl_deployed_count + 1))
+                                        else
+                                            log "DEBUG" "DAEMON: SSL certificate deployed (CHANGED but NOT in config): $ssl_file ($cert_domain) - no reload needed"
+                                        fi
                                     else
                                         log "ERROR" "DAEMON: Failed to deploy SSL certificate: $cert_name"
                                     fi
@@ -2918,10 +2933,10 @@ CONFIG_RESPONSE_EOF
                         fi
                     done < <(echo "$ssl_certificates" | jq -c '.[]' 2>/dev/null)
                     
-                    # CRITICAL: Reload HAProxy if any SSL certificates were updated
-                    # This ensures HAProxy picks up the new SSL certificates
+                    # CRITICAL: Reload HAProxy if any SSL certificates were updated AND referenced in config
+                    # This ensures HAProxy picks up the new SSL certificates only when needed
                     if [[ $ssl_deployed_count -gt 0 ]]; then
-                        log "INFO" "DAEMON: SSL certificates updated ($ssl_deployed_count files), triggering HAProxy reload..."
+                        log "INFO" "DAEMON: SSL certificates updated ($ssl_deployed_count files in use), triggering HAProxy reload..."
                         
                         # Validate HAProxy config before reload
                         if "$HAPROXY_BIN" -c -f "$HAPROXY_CONFIG" >/dev/null 2>&1; then

@@ -47,17 +47,25 @@ def _extract_entities_from_config(config_content: str) -> dict:
 
 async def apply_ssl_related_configs(conn, trigger_cluster_id: int):
     """
-    SSL-related PENDING config'leri tespit et ve scope'larına göre apply et.
+    SSL scope-aware auto-apply: Tek Apply ile tum etkilenen cluster'lardaki SSL
+    config_versions'lari otomatik APPLIED yapar.
     
-    Mantık:
-    - Global SSL: Tüm cluster'lardaki ilgili PENDING config'leri APPLIED yap
-    - Cluster-specific SSL: İlgili cluster'lardaki PENDING config'leri APPLIED yap
+    SSL sertifikalari diger entity'lerden (frontend/backend) farklidir:
+    - Tek bir SSL birden fazla cluster'da kullanilir (global veya cluster-specific)
+    - Agent'lar SSL dosyalarini periyodik check_ssl_updates ile bagimsiz deploy eder
+    - ssl_certificates.last_config_status = 'APPLIED' olunca TUM agent'lar sertifikayi alabilir
+    - Bu nedenle tek Apply'da tum cluster'larin SSL versiyonlari APPLIED yapilir
     
-    Bu sayede tek Apply tıklaması ile SSL'in scope'u dahilindeki tüm cluster'lara yayılır.
+    Trigger cluster: Ana apply akisi tarafindan consolidated version olusturulur,
+    agent'lara bildirim gonderilir. SSL dosyasi hemen deploy edilir.
+    
+    Diger cluster'lar: SSL config_versions APPLIED yapilir (is_active=FALSE).
+    Agent'lar periyodik check_ssl_updates (~2.5 dk) ile sertifikayi deploy eder.
+    Consolidated version olusturulmaz (gereksiz, SSL ayri deploy ediliyor).
     """
     import re
     
-    # 1. Trigger cluster'daki SSL-related PENDING config'leri bul
+    # Trigger cluster'daki SSL-related PENDING config'leri bul
     ssl_pending = await conn.fetch("""
         SELECT version_name FROM config_versions
         WHERE cluster_id = $1 
@@ -66,101 +74,41 @@ async def apply_ssl_related_configs(conn, trigger_cluster_id: int):
     """, trigger_cluster_id)
     
     if not ssl_pending:
-        logger.debug(f"SSL AUTO-APPLY: No SSL-related PENDING configs found for cluster {trigger_cluster_id}")
+        logger.debug(f"SSL APPLY: No SSL-related PENDING configs in cluster {trigger_cluster_id}")
         return
     
-    logger.info(f"SSL AUTO-APPLY: Found {len(ssl_pending)} SSL-related PENDING configs in cluster {trigger_cluster_id}")
-    
-    # 2. Her SSL için scope'unu belirle ve tüm ilgili cluster'lara apply et
+    # Extract unique SSL IDs
     processed_ssl_ids = set()
-    
     for version in ssl_pending:
-        # Extract SSL ID from version_name: "ssl-5-update-123" → 5
         match = re.match(r'ssl-(\d+)-', version['version_name'])
-        if not match:
-            logger.warning(f"SSL AUTO-APPLY: Could not extract SSL ID from version name: {version['version_name']}")
-            continue
-        
-        ssl_id = int(match.group(1))
-        
-        # Aynı SSL için tekrar işlem yapma
-        if ssl_id in processed_ssl_ids:
-            continue
-        
-        processed_ssl_ids.add(ssl_id)
-        
-        # SSL'in scope'unu bul
-        ssl_info = await conn.fetchrow("""
-            SELECT cluster_id, name FROM ssl_certificates WHERE id = $1
-        """, ssl_id)
-        
-        if not ssl_info:
-            logger.warning(f"SSL AUTO-APPLY: SSL certificate {ssl_id} not found, skipping")
-            continue
-        
-        target_clusters = []
-        
-        if ssl_info['cluster_id'] is None:
-            # Global SSL → Tüm cluster'lardaki bu SSL'e ait PENDING config'leri bul
-            logger.info(f"SSL AUTO-APPLY: SSL {ssl_id} ('{ssl_info['name']}') is GLOBAL, applying to all affected clusters")
-            
-            # Use parameterized query with string formatting for LIKE pattern
-            ssl_pattern = f'ssl-{ssl_id}-%'
-            target_clusters_result = await conn.fetch("""
-                SELECT DISTINCT cluster_id FROM config_versions
-                WHERE version_name LIKE $1 AND status = 'PENDING'
-            """, ssl_pattern)
-            
-            target_clusters = [row['cluster_id'] for row in target_clusters_result]
-            
-        else:
-            # Cluster-specific SSL → İlgili cluster'lardaki bu SSL'e ait PENDING config'leri bul
-            logger.info(f"SSL AUTO-APPLY: SSL {ssl_id} ('{ssl_info['name']}') is CLUSTER-SPECIFIC, applying to associated clusters")
-            
-            # Use parameterized query with string formatting for LIKE pattern
-            ssl_pattern = f'ssl-{ssl_id}-%'
-            target_clusters_result = await conn.fetch("""
-                SELECT DISTINCT scc.cluster_id 
-                FROM ssl_certificate_clusters scc
-                JOIN config_versions cv ON cv.cluster_id = scc.cluster_id
-                WHERE scc.ssl_certificate_id = $1 
-                AND cv.status = 'PENDING'
-                AND cv.version_name LIKE $2
-            """, ssl_id, ssl_pattern)
-            
-            target_clusters = [row['cluster_id'] for row in target_clusters_result]
-        
-        if not target_clusters:
-            logger.warning(f"SSL AUTO-APPLY: No target clusters found for SSL {ssl_id}")
-            continue
-        
-        logger.info(f"SSL AUTO-APPLY: Applying SSL {ssl_id} to {len(target_clusters)} cluster(s): {target_clusters}")
-        
-        # 3. Tüm ilgili cluster'larda APPLIED olarak işaretle
-        # CRITICAL: is_active=FALSE çünkü consolidated version is_active=TRUE olacak
-        # SSL version'ları sadece history ve entity tracking için kullanılır
-        ssl_pattern = f'ssl-{ssl_id}-%'
-        for target_cluster_id in target_clusters:
-            result = await conn.execute("""
-                UPDATE config_versions 
-                SET status = 'APPLIED', is_active = FALSE
-                WHERE cluster_id = $1 
-                AND version_name LIKE $2 
-                AND status = 'PENDING'
-            """, target_cluster_id, ssl_pattern)
-            
-            logger.info(f"SSL AUTO-APPLY: Applied SSL {ssl_id} to cluster {target_cluster_id} (result: {result})")
-        
-        # 4. SSL entity status'unu APPLIED olarak güncelle
-        await conn.execute("""
-            UPDATE ssl_certificates 
-            SET last_config_status = 'APPLIED'
-            WHERE id = $1
-        """, ssl_id)
-        
-        logger.info(f"SSL AUTO-APPLY: Updated SSL {ssl_id} entity status to APPLIED")
+        if match:
+            processed_ssl_ids.add(int(match.group(1)))
     
-    logger.info(f"SSL AUTO-APPLY: Completed processing {len(processed_ssl_ids)} unique SSL certificate(s)")
+    if not processed_ssl_ids:
+        return
+    
+    logger.info(
+        f"SSL APPLY: Found {len(processed_ssl_ids)} SSL cert(s) in trigger cluster "
+        f"{trigger_cluster_id}: {processed_ssl_ids}"
+    )
+    
+    # Auto-apply: Mark SSL PENDING config_versions as APPLIED across ALL clusters
+    # Trigger cluster'in versiyonlari ana apply akisi tarafindan zaten handle edilecek,
+    # burada sadece DIGER cluster'lardaki PENDING versiyonlar APPLIED yapilir
+    for ssl_id in processed_ssl_ids:
+        result = await conn.execute("""
+            UPDATE config_versions
+            SET status = 'APPLIED', is_active = FALSE
+            WHERE cluster_id != $1
+            AND version_name LIKE $2
+            AND status = 'PENDING'
+        """, trigger_cluster_id, f"ssl-{ssl_id}-%")
+        
+        logger.info(
+            f"SSL AUTO-APPLY: SSL cert {ssl_id} - marked PENDING versions as APPLIED "
+            f"on other clusters (excluding trigger cluster {trigger_cluster_id}). "
+            f"Result: {result}"
+        )
 
 
 @router.post("", summary="Create HAProxy Cluster", response_description="Cluster created successfully")
@@ -3868,6 +3816,7 @@ async def undo_reject_config_version(
                 m_be = re.search(r'backend-(\d+)-', version_to_undo['version_name'])
                 m_wf = re.search(r'waf-(\d+)-', version_to_undo['version_name'])
                 m_srv = re.search(r'server-(\d+)-', version_to_undo['version_name'])
+                m_ssl = re.search(r'ssl-(\d+)-', version_to_undo['version_name'])
                 
                 if m_fe:
                     fe_id = int(m_fe.group(1))
@@ -3894,6 +3843,40 @@ async def undo_reject_config_version(
                         srv_id, cluster_id
                     )
                     logger.info(f"UNDO REJECT: Marked server {srv_id} as PENDING")
+                elif m_ssl:
+                    ssl_id = int(m_ssl.group(1))
+                    ssl_pattern = f'ssl-{ssl_id}-%'
+                    
+                    # SSL AUTO-UNDO: Undo ALL REJECTED ssl versions on ALL clusters
+                    # Consistent with auto-reject: if reject is global, undo is global
+                    auto_undo_result = await conn.execute("""
+                        UPDATE config_versions
+                        SET status = 'PENDING', updated_at = CURRENT_TIMESTAMP
+                        WHERE version_name LIKE $1
+                        AND status = 'REJECTED'
+                    """, ssl_pattern)
+                    auto_undo_count = int(auto_undo_result.split()[-1]) if auto_undo_result else 0
+                    logger.info(f"SSL AUTO-UNDO: Restored {auto_undo_count} REJECTED SSL {ssl_id} versions to PENDING across all clusters")
+                    
+                    # Determine last_config_status based on whether any cluster already APPLIED
+                    has_applied = await conn.fetchval("""
+                        SELECT EXISTS(
+                            SELECT 1 FROM config_versions
+                            WHERE version_name LIKE $1
+                            AND status = 'APPLIED'
+                        )
+                    """, ssl_pattern)
+                    
+                    if has_applied:
+                        # Some cluster already deployed - keep APPLIED so agents can continue fetching
+                        logger.info(f"UNDO REJECT: SSL {ssl_id} has APPLIED versions on other clusters, keeping last_config_status = APPLIED")
+                    else:
+                        # No cluster deployed - set PENDING so changes await Apply
+                        await conn.execute(
+                            "UPDATE ssl_certificates SET last_config_status = 'PENDING' WHERE id = $1",
+                            ssl_id
+                        )
+                        logger.info(f"UNDO REJECT: Marked SSL certificate {ssl_id} as PENDING (no cluster has applied)")
             except Exception as e:
                 logger.warning(f"Could not update entity status for version {version_to_undo['version_name']}: {e}")
         
@@ -3946,6 +3929,20 @@ async def get_ssl_certificate_agent_sync_status(cluster_id: int, cert_id: int, a
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="SSL certificate not found")
 
+        # Check if SSL has a PENDING config version for this cluster (not yet applied)
+        # This is critical for Deployment Status tab accuracy
+        ssl_pending_version = await conn.fetchval("""
+            SELECT cv.status
+            FROM config_versions cv
+            WHERE cv.cluster_id = $1 
+            AND cv.version_name LIKE $2
+            AND cv.status = 'PENDING'
+            ORDER BY cv.created_at DESC
+            LIMIT 1
+        """, cluster_id, f"ssl-{cert_id}-%")
+        
+        ssl_config_status_for_cluster = 'PENDING' if ssl_pending_version else None
+        
         # FIXED: Use same logic as generic entity-sync endpoint
         # Get both version name and timestamp in one query
         ssl_specific_version_info = await conn.fetchrow("""
@@ -3961,9 +3958,10 @@ async def get_ssl_certificate_agent_sync_status(cluster_id: int, cert_id: int, a
         if ssl_specific_version_info:
             latest_version = ssl_specific_version_info['version_name']
             latest_version_created_at = ssl_specific_version_info['created_at']
-            logger.info(f"SSL SYNC: Found SSL-specific version for cert {cert_id}: {latest_version}")
+            ssl_config_status_for_cluster = 'APPLIED'
+            logger.info(f"SSL SYNC: Found SSL-specific APPLIED version for cert {cert_id}: {latest_version}")
         else:
-            # No SSL-specific changes, use latest consolidated version
+            # No SSL-specific APPLIED version — check consolidated
             consolidated_version_info = await conn.fetchrow("""
                 SELECT cv.version_name, cv.created_at
                 FROM config_versions cv
@@ -3976,10 +3974,16 @@ async def get_ssl_certificate_agent_sync_status(cluster_id: int, cert_id: int, a
             if consolidated_version_info:
                 latest_version = consolidated_version_info['version_name']
                 latest_version_created_at = consolidated_version_info['created_at']
+                # If there's a PENDING SSL version but only consolidated is APPLIED,
+                # the SSL hasn't been applied to this cluster yet
+                if not ssl_config_status_for_cluster:
+                    ssl_config_status_for_cluster = 'APPLIED'
                 logger.info(f"SSL SYNC: No SSL-specific version for cert {cert_id}, using consolidated: {latest_version}")
             else:
                 latest_version = None
                 latest_version_created_at = None
+                if not ssl_config_status_for_cluster:
+                    ssl_config_status_for_cluster = None
                 logger.info(f"SSL SYNC: No version found for cert {cert_id}")
 
         # Get agents for this cluster
@@ -4096,17 +4100,33 @@ async def get_ssl_certificate_agent_sync_status(cluster_id: int, cert_id: int, a
         # Use updated_at if available, otherwise created_at
         entity_updated_at = ssl_cert_details['updated_at'] if ssl_cert_details['updated_at'] else ssl_cert_details['created_at']
         
+        # Count offline agents (enabled but not online)
+        offline_agents = sum(
+            1 for ag in agents 
+            if ag.get("enabled", True) and ag.get("status") != "online"
+        )
+        
+        # If SSL is PENDING for this cluster, override sync data to prevent misleading "SYNCED" display
+        # Admin should see "NOT APPLIED" instead of false "100% SYNCED" for unapplied clusters
+        if ssl_config_status_for_cluster == 'PENDING':
+            synced = 0
+            offline_agents = 0
+            logger.info(f"SSL SYNC: SSL cert {cert_id} is PENDING for cluster {cluster_id}, overriding sync to 0")
+        
         return {
             "sync_status": {
                 "synced_agents": synced,
                 "total_agents": total_enabled,
                 "disabled_agents": disabled_count,
-                "sync_percentage": round((synced / total_enabled * 100) if total_enabled > 0 else 100, 1),
+                "offline_agents": offline_agents,
+                "sync_percentage": round((synced / total_enabled * 100) if total_enabled > 0 else 0, 1),
                 "last_sync_check": datetime.now(timezone.utc).isoformat()
             },
+            "ssl_config_status": ssl_config_status_for_cluster,
             "entity_updated_at": entity_updated_at.isoformat() if entity_updated_at else None,
             "latest_applied_version": latest_version,
             "latest_version_created_at": latest_version_created_at.isoformat() if latest_version_created_at else None,
+            "version_applied_at": latest_version_created_at.isoformat() if latest_version_created_at else None,
             "last_applied_by": last_applied_by,
             "ssl_certificate": {
                 "name": ssl_cert["name"],
@@ -4537,21 +4557,62 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                 logger.info(f"REJECT DEBUG: entity_snapshot exists={entity_snapshot is not None}")
                 
                 if entity_snapshot:
-                    # Single entity rollback
-                    logger.info(f"REJECT DEBUG: Calling rollback for {entity_snapshot.get('entity_type')} {entity_snapshot.get('entity_id')}")
-                    logger.info(f"REJECT DEBUG: old_values exists={('old_values' in entity_snapshot)}")
-                    logger.info(f"REJECT DEBUG: operation={entity_snapshot.get('operation')}")
-                    
-                    success = await rollback_entity_from_snapshot(conn, entity_snapshot)
-                    
-                    logger.info(f"REJECT DEBUG: Rollback result={success}")
-                    
-                    if success:
-                        rollback_success_count += 1
-                        logger.info(f"REJECT ROLLBACK: Rolled back {entity_snapshot['entity_type']} {entity_snapshot['entity_id']}")
+                    # SSL entity rollback: KOSULLU - AYNI guncelleme baska cluster'da APPLIED ise ATLA
+                    if entity_snapshot.get('entity_type') == 'ssl_certificate':
+                        ssl_entity_id = entity_snapshot.get('entity_id')
+                        ssl_version_pattern = f'ssl-{ssl_entity_id}-%'
+                        
+                        # Check if THIS SPECIFIC UPDATE has been APPLIED on another cluster
+                        # Uses time-based matching: versions from the same update cycle are created
+                        # within seconds of each other (ssl.py creates them in a loop)
+                        # A 120-second window safely captures same-update versions across many clusters
+                        # while excluding versions from previous/different updates
+                        version_created_at = version['created_at']
+                        has_same_update_applied = await conn.fetchval("""
+                            SELECT EXISTS(
+                                SELECT 1 FROM config_versions
+                                WHERE version_name LIKE $1
+                                AND status = 'APPLIED'
+                                AND cluster_id != $2
+                                AND ABS(EXTRACT(EPOCH FROM (created_at - $3))) < 120
+                            )
+                        """, ssl_version_pattern, cluster_id, version_created_at)
+                        
+                        if has_same_update_applied:
+                            logger.info(
+                                f"REJECT: Skipping SSL certificate {ssl_entity_id} "
+                                f"entity rollback (same update already applied on another cluster - "
+                                f"content preserved to prevent cross-cluster downgrade)"
+                            )
+                            rollback_skip_count += 1
+                        else:
+                            logger.info(
+                                f"REJECT: Rolling back SSL certificate {ssl_entity_id} "
+                                f"(this specific update not applied on any other cluster - safe to rollback)"
+                            )
+                            success = await rollback_entity_from_snapshot(conn, entity_snapshot)
+                            if success:
+                                rollback_success_count += 1
+                                logger.info(f"REJECT ROLLBACK: Rolled back SSL certificate {ssl_entity_id}")
+                            else:
+                                rollback_fail_count += 1
+                                logger.warning(f"REJECT ROLLBACK: Failed to rollback SSL certificate {ssl_entity_id}")
                     else:
-                        rollback_fail_count += 1
-                        logger.warning(f"REJECT ROLLBACK: Failed to rollback {entity_snapshot.get('entity_type')} {entity_snapshot.get('entity_id')}")
+                        # Single entity rollback (non-SSL)
+                        logger.info(f"REJECT DEBUG: Calling rollback for {entity_snapshot.get('entity_type')} {entity_snapshot.get('entity_id')}")
+                        logger.info(f"REJECT DEBUG: old_values exists={('old_values' in entity_snapshot)}")
+                        logger.info(f"REJECT DEBUG: operation={entity_snapshot.get('operation')}")
+                        
+                        success = await rollback_entity_from_snapshot(conn, entity_snapshot)
+                        
+                        logger.info(f"REJECT DEBUG: Rollback result={success}")
+                        
+                        if success:
+                            rollback_success_count += 1
+                            logger.info(f"REJECT ROLLBACK: Rolled back {entity_snapshot['entity_type']} {entity_snapshot['entity_id']}")
+                        else:
+                            rollback_fail_count += 1
+                            logger.warning(f"REJECT ROLLBACK: Failed to rollback {entity_snapshot.get('entity_type')} {entity_snapshot.get('entity_id')}")
                 
                 # Check for bulk snapshots (bulk import, restore)
                 bulk_snapshots = metadata.get('bulk_snapshots', [])
@@ -4561,6 +4622,29 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                     for snapshot_wrapper in bulk_snapshots:
                         entity_snap = snapshot_wrapper.get('entity_snapshot')
                         if entity_snap:
+                            # SSL entity rollback: bulk'ta da kosullu (same-update check)
+                            if entity_snap.get('entity_type') == 'ssl_certificate':
+                                ssl_eid = entity_snap.get('entity_id')
+                                ssl_vp = f'ssl-{ssl_eid}-%'
+                                version_created_at_bulk = version['created_at']
+                                has_applied_bulk = await conn.fetchval("""
+                                    SELECT EXISTS(
+                                        SELECT 1 FROM config_versions
+                                        WHERE version_name LIKE $1
+                                        AND status = 'APPLIED'
+                                        AND cluster_id != $2
+                                        AND ABS(EXTRACT(EPOCH FROM (created_at - $3))) < 120
+                                    )
+                                """, ssl_vp, cluster_id, version_created_at_bulk)
+                                if has_applied_bulk:
+                                    logger.info(
+                                        f"REJECT: Skipping SSL certificate {ssl_eid} "
+                                        f"bulk entity rollback (same update applied on another cluster)"
+                                    )
+                                    rollback_skip_count += 1
+                                    continue
+                                else:
+                                    logger.info(f"REJECT: Rolling back SSL certificate {ssl_eid} (this update not applied elsewhere - safe)")
                             success = await rollback_entity_from_snapshot(conn, entity_snap)
                             if success:
                                 rollback_success_count += 1
@@ -4681,12 +4765,39 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                     WHERE id = ANY($1) AND cluster_id = $2
                 """, srv_ids, cluster_id)
                 logger.info(f"REJECT: Updated {len(srv_ids)} servers status to APPLIED (rolled back)")
+            # SSL status update + auto-reject in a SINGLE transaction for atomicity
+            # Prevents partial state where SSL is APPLIED but other clusters still PENDING
             if ssl_ids:
-                await conn.execute("""
-                    UPDATE ssl_certificates SET last_config_status = 'APPLIED' 
-                    WHERE id = ANY($1)
-                """, ssl_ids)
-                logger.info(f"REJECT: Updated {len(ssl_ids)} SSL certificates status to APPLIED (rolled back)")
+                async with conn.transaction():
+                    await conn.execute("""
+                        UPDATE ssl_certificates SET last_config_status = 'APPLIED' 
+                        WHERE id = ANY($1)
+                    """, ssl_ids)
+                    logger.info(f"REJECT: Updated {len(ssl_ids)} SSL certificates status to APPLIED (rolled back)")
+                    
+                    # SSL AUTO-REJECT: Reject ALL remaining PENDING SSL config_versions on ALL other clusters
+                    # SSL is a global entity - reject on one cluster means reject everywhere
+                    unique_ssl_ids = list(set(ssl_ids))
+                    total_auto_rejected = 0
+                    for ssl_id in unique_ssl_ids:
+                        ssl_pattern = f'ssl-{ssl_id}-%'
+                        auto_result = await conn.execute("""
+                            UPDATE config_versions
+                            SET status = 'REJECTED', updated_at = CURRENT_TIMESTAMP
+                            WHERE cluster_id != $1
+                            AND version_name LIKE $2
+                            AND status = 'PENDING'
+                        """, cluster_id, ssl_pattern)
+                        auto_count = int(auto_result.split()[-1]) if auto_result else 0
+                        total_auto_rejected += auto_count
+                        if auto_count > 0:
+                            logger.info(
+                                f"SSL AUTO-REJECT: Rejected {auto_count} PENDING versions for SSL {ssl_id} "
+                                f"on other clusters (triggered by cluster {cluster_id} reject)"
+                            )
+                    if total_auto_rejected > 0:
+                        logger.info(f"SSL AUTO-REJECT: Total {total_auto_rejected} versions auto-rejected across all other clusters")
+                        rejected_count += total_auto_rejected
             
             # CRITICAL FIX: Verify bulk import entities were properly rolled back (deleted)
             if bulk_import_entity_ids["frontends"] or bulk_import_entity_ids["backends"] or bulk_import_entity_ids["servers"]:

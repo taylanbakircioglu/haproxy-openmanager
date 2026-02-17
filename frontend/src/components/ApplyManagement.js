@@ -1099,9 +1099,22 @@ const ApplyManagement = () => {
                         <SafetyCertificateOutlined style={{ marginRight: 8 }} />
                         SSL Certificate Changes ({pendingChanges.ssl_certificates.length})
                       </Title>
-                      {pendingChanges.ssl_certificates.map(item => 
-                        renderPendingItem(item, 'ssl_certificate', <SafetyCertificateOutlined style={{ color: '#eb2f96' }} />)
-                      )}
+                      {pendingChanges.ssl_certificates.map(item => (
+                        <div key={`ssl-wrapper-${item.id}`}>
+                          {renderPendingItem(item, 'ssl_certificate', <SafetyCertificateOutlined style={{ color: '#eb2f96' }} />)}
+                          {item.cluster_names && item.cluster_names.length > 1 && (
+                            <Alert
+                              type="info"
+                              showIcon
+                              message={`This certificate is used in ${item.cluster_names.length} clusters. Applying here will auto-apply SSL changes to all clusters.`}
+                              description={item.pending_cluster_names?.length > 0
+                                ? `Currently pending in: ${item.pending_cluster_names.join(', ')}`
+                                : null}
+                              style={{ marginBottom: 8, marginLeft: 30 }}
+                            />
+                          )}
+                        </div>
+                      ))}
                     </div>
                   )}
 

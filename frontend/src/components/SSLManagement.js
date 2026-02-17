@@ -10,7 +10,9 @@ import {
   PlusOutlined, DeleteOutlined, ReloadOutlined,
   LockOutlined, EyeOutlined, WarningOutlined,
   SafetyCertificateOutlined, SearchOutlined,
-  PlayCircleOutlined, EditOutlined
+  PlayCircleOutlined, EditOutlined,
+  CloudServerOutlined, CheckCircleOutlined, SyncOutlined,
+  ExclamationCircleOutlined, CloseCircleOutlined, ClockCircleOutlined
 } from '@ant-design/icons';
 import axios from 'axios';
 import { useCluster } from '../contexts/ClusterContext';
@@ -32,6 +34,8 @@ const SSLManagement = () => {
   const [selectedCertificate, setSelectedCertificate] = useState(null);
   const [pendingChanges, setPendingChanges] = useState(false);
   const [usageSearch, setUsageSearch] = useState('');
+  const [deploymentData, setDeploymentData] = useState([]);
+  const [deploymentLoading, setDeploymentLoading] = useState(false);
   const [form] = Form.useForm();
   
   // Filter states with localStorage persistence
@@ -425,6 +429,52 @@ const SSLManagement = () => {
     if (days <= 7) return { status: 'error', text: `${days} days left` };
     if (days <= 30) return { status: 'warning', text: `${days} days left` };
     return { status: 'success', text: `${days} days left` };
+  };
+
+  const fetchDeploymentStatus = async (cert) => {
+    if (!cert) return;
+    setDeploymentLoading(true);
+    setDeploymentData([]);
+    
+    try {
+      const token = localStorage.getItem('token');
+      const targetClusters = cert.cluster_names && cert.cluster_names.length > 0
+        ? clusters.filter(c => cert.cluster_names.includes(c.name))
+        : clusters;
+      
+      const results = await Promise.allSettled(
+        targetClusters.map(async (cluster) => {
+          try {
+            const response = await axios.get(
+              `/api/clusters/${cluster.id}/ssl_certificates/${cert.id}/agent-sync`,
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+            return {
+              cluster_id: cluster.id,
+              cluster_name: cluster.name,
+              ...response.data.sync_status,
+              ssl_config_status: response.data.ssl_config_status,
+              version_applied_at: response.data.version_applied_at,
+              latest_applied_version: response.data.latest_applied_version,
+              agents: response.data.agents || [],
+              error: null
+            };
+          } catch (err) {
+            return {
+              cluster_id: cluster.id,
+              cluster_name: cluster.name,
+              error: err.response?.status === 404 ? 'No data' : err.message
+            };
+          }
+        })
+      );
+      
+      setDeploymentData(results.map(r => r.status === 'fulfilled' ? r.value : { error: 'Request failed' }));
+    } catch (error) {
+      console.error('Failed to fetch deployment status:', error);
+    } finally {
+      setDeploymentLoading(false);
+    }
   };
 
   const columns = [
@@ -1188,6 +1238,162 @@ MIIEvgIBADANBgkqhkiG9w0BAQEF...
                   description="This certificate is not referenced by any frontend or backend server."
                   type="warning"
                   showIcon
+                />
+              )}
+            </TabPane>
+            <TabPane tab={
+              <span>
+                <CloudServerOutlined /> Deployment Status
+              </span>
+            } key="5">
+              <div style={{ marginBottom: 16 }}>
+                <Button
+                  type="primary"
+                  icon={<ReloadOutlined />}
+                  onClick={() => fetchDeploymentStatus(selectedCertificate)}
+                  loading={deploymentLoading}
+                >
+                  Refresh Deployment Status
+                </Button>
+              </div>
+              {deploymentLoading ? (
+                <div style={{ textAlign: 'center', padding: 40 }}>
+                  <Spin size="large" />
+                  <p style={{ marginTop: 16 }}>Fetching deployment status from all clusters...</p>
+                </div>
+              ) : deploymentData.length > 0 ? (
+                <Table
+                  dataSource={deploymentData.filter(d => !d.error)}
+                  rowKey="cluster_id"
+                  size="small"
+                  pagination={false}
+                  columns={[
+                    {
+                      title: 'Cluster',
+                      dataIndex: 'cluster_name',
+                      key: 'cluster_name',
+                      render: (text) => <strong>{text}</strong>
+                    },
+                    {
+                      title: 'Synced Agents',
+                      key: 'sync',
+                      render: (_, record) => (
+                        <span>
+                          {record.synced_agents ?? '-'}/{record.total_agents ?? '-'}
+                        </span>
+                      )
+                    },
+                    {
+                      title: 'Sync %',
+                      key: 'sync_pct',
+                      render: (_, record) => {
+                        const pct = record.sync_percentage ?? 0;
+                        return (
+                          <Progress
+                            percent={pct}
+                            size="small"
+                            status={pct === 100 ? 'success' : 'active'}
+                            style={{ width: 120 }}
+                          />
+                        );
+                      }
+                    },
+                    {
+                      title: 'Offline',
+                      key: 'offline',
+                      render: (_, record) => {
+                        const offline = record.offline_agents || 0;
+                        return offline > 0
+                          ? <Tag color="orange" icon={<ExclamationCircleOutlined />}>{offline}</Tag>
+                          : <Tag color="green">0</Tag>;
+                      }
+                    },
+                    {
+                      title: 'Status',
+                      key: 'status',
+                      render: (_, record) => {
+                        if (record.error) return <Tag color="red">Error</Tag>;
+                        if (record.ssl_config_status === 'PENDING') return <Tag color="orange" icon={<ClockCircleOutlined />}>NOT APPLIED</Tag>;
+                        const pct = record.sync_percentage ?? 0;
+                        if (pct === 100) return <Tag color="green" icon={<CheckCircleOutlined />}>SYNCED</Tag>;
+                        if (record.synced_agents > 0) return <Tag color="blue" icon={<SyncOutlined spin />}>APPLYING</Tag>;
+                        return <Tag color="orange" icon={<ExclamationCircleOutlined />}>PENDING</Tag>;
+                      }
+                    },
+                    {
+                      title: 'Applied At',
+                      key: 'applied_at',
+                      render: (_, record) => {
+                        if (record.ssl_config_status === 'PENDING') return <Text type="secondary">-</Text>;
+                        return record.version_applied_at
+                          ? new Date(record.version_applied_at).toLocaleString()
+                          : '-';
+                      }
+                    }
+                  ]}
+                  expandable={{
+                    expandedRowRender: (record) => (
+                      <Table
+                        dataSource={record.agents || []}
+                        rowKey="name"
+                        size="small"
+                        pagination={false}
+                        columns={[
+                          { title: 'Agent', dataIndex: 'name', key: 'name' },
+                          {
+                            title: 'Status',
+                            dataIndex: 'status',
+                            key: 'status',
+                            render: (v) => (
+                              <Tag color={v === 'online' ? 'green' : 'red'}>
+                                {v?.toUpperCase() || 'UNKNOWN'}
+                              </Tag>
+                            )
+                          },
+                          {
+                            title: 'HAProxy',
+                            dataIndex: 'haproxy_status',
+                            key: 'haproxy_status',
+                            render: (v) => (
+                              <Tag color={v === 'running' ? 'green' : v === 'stopped' ? 'red' : 'default'}>
+                                {v?.toUpperCase() || 'UNKNOWN'}
+                              </Tag>
+                            )
+                          },
+                          {
+                            title: 'SSL Deployed',
+                            dataIndex: 'ssl_file_deployed',
+                            key: 'ssl_file_deployed',
+                            render: (v) => v === true
+                              ? <CheckCircleOutlined style={{ color: '#52c41a' }} />
+                              : v === false
+                                ? <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
+                                : '-'
+                          },
+                          {
+                            title: 'Config Version',
+                            dataIndex: 'delivered_version',
+                            key: 'delivered_version',
+                            render: (v) => v ? <Text code style={{ fontSize: 11 }}>{v}</Text> : '-'
+                          }
+                        ]}
+                      />
+                    )
+                  }}
+                />
+              ) : (
+                <Alert
+                  message="Click 'Refresh Deployment Status' to load per-cluster deployment information."
+                  type="info"
+                  showIcon
+                />
+              )}
+              {deploymentData.length > 0 && deploymentData.some(d => d.error) && (
+                <Alert
+                  message={`${deploymentData.filter(d => d.error).length} cluster(s) could not be reached`}
+                  type="warning"
+                  showIcon
+                  style={{ marginTop: 8 }}
                 />
               )}
             </TabPane>

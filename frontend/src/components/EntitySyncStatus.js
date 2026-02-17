@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Tag, Tooltip, Spin } from 'antd';
-import { CheckCircleOutlined, ClockCircleOutlined, SyncOutlined } from '@ant-design/icons';
+import { CheckCircleOutlined, ClockCircleOutlined, SyncOutlined, ExclamationCircleOutlined } from '@ant-design/icons';
 import { getConfigStatusColor } from '../utils/colors';
 import { useProgress } from '../contexts/ProgressContext';
 import axios from 'axios';
@@ -48,7 +48,9 @@ const EntitySyncStatus = ({
           entity_updated_at: response.data.entity_updated_at,
           latest_applied_version: response.data.latest_applied_version,
           latest_version_created_at: response.data.latest_version_created_at,
-          latest_version_metadata: response.data.latest_version_metadata
+          latest_version_metadata: response.data.latest_version_metadata,
+          version_applied_at: response.data.version_applied_at,
+          offline_agents: response.data.sync_status?.offline_agents || 0
         });
         
         // Store last_applied_by info for tooltip
@@ -115,11 +117,12 @@ const EntitySyncStatus = ({
         const latestVersionMetadata = realSyncData?.latest_version_metadata;
         if (latestVersionMetadata && latestVersionMetadata.changed_entities) {
           // Restore or selective update - check if THIS entity is in changed list
-          // Normalize entity types: frontends -> frontend, backends -> backend, waf_rules -> waf_rule
+          // Normalize entity types: frontends -> frontend, backends -> backend, waf_rules -> waf_rule, ssl_certificates -> ssl_certificate
           const normalizedType = entityType === 'frontends' ? 'frontend' : 
                                 entityType === 'backends' ? 'backend' : 
                                 entityType === 'waf_rules' ? 'waf_rule' :
                                 entityType === 'backend_servers' ? 'backend_server' :
+                                entityType === 'ssl_certificates' ? 'ssl_certificate' :
                                 entityType;
           
           const isInChangedList = latestVersionMetadata.changed_entities.some(
@@ -166,8 +169,26 @@ const EntitySyncStatus = ({
           if (isEntityInLatestApply) {
             // Entity was part of latest apply - check agent sync status
             if (synced_agents < total_agents) {
-              setSyncStatus('applying');
-              console.log(`🎯 ENTERPRISE LOGIC: ${entityType}/${entityId} - In latest apply, agents not synced (${synced_agents}/${total_agents}), showing APPLYING`);
+              // Check for timeout: if applying for more than 10 minutes, show PARTIAL
+              const APPLYING_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+              let elapsedMs = 0;
+              
+              if (latest_version_created_at) {
+                try {
+                  const versionTime = new Date(latest_version_created_at);
+                  elapsedMs = Date.now() - versionTime.getTime();
+                } catch (e) {
+                  console.warn(`Failed to parse version time for timeout check: ${e.message}`);
+                }
+              }
+              
+              if (elapsedMs > APPLYING_TIMEOUT_MS) {
+                setSyncStatus('partial');
+                console.log(`🎯 ENTERPRISE LOGIC: ${entityType}/${entityId} - TIMEOUT: applying for ${Math.round(elapsedMs / 60000)}min (>${APPLYING_TIMEOUT_MS/60000}min), ${synced_agents}/${total_agents} synced, showing PARTIAL`);
+              } else {
+                setSyncStatus('applying');
+                console.log(`🎯 ENTERPRISE LOGIC: ${entityType}/${entityId} - In latest apply, agents not synced (${synced_agents}/${total_agents}), showing APPLYING`);
+              }
             } else {
               setSyncStatus('synced');
               console.log(`🎯 ENTERPRISE LOGIC: ${entityType}/${entityId} - In latest apply, all agents synced (${synced_agents}/${total_agents}), showing SYNCED`);
@@ -211,6 +232,24 @@ const EntitySyncStatus = ({
           icon: <SyncOutlined spin />,
           tooltip: 'Applying changes to agents...'
         };
+      
+      case 'partial': {
+        const syncedCount = realSyncData?.synced_agents || 0;
+        const totalCount = realSyncData?.total_agents || 0;
+        const offlineCount = realSyncData?.offline_agents || (totalCount - syncedCount);
+        let elapsedMin = '?';
+        try {
+          if (realSyncData?.latest_version_created_at) {
+            elapsedMin = Math.round((Date.now() - new Date(realSyncData.latest_version_created_at).getTime()) / 60000);
+          }
+        } catch (_) { /* ignore */ }
+        return {
+          status: 'PARTIAL',
+          color: 'orange',
+          icon: <ExclamationCircleOutlined />,
+          tooltip: `${syncedCount}/${totalCount} agents synced. ${offlineCount} agent(s) may be offline. (Elapsed: ${elapsedMin}m)`
+        };
+      }
       
       case 'loading':
         return {
