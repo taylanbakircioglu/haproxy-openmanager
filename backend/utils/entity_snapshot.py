@@ -412,9 +412,23 @@ async def _rollback_update(
             return True
             
         elif entity_type == "ssl_certificate":
-            # SSL certificate'i eski değerlerine geri yükle
-            # SCHEMA: ssl_certificates (ALL FIELDS from migrations.py line 2120-2140)
-            # CRITICAL: expiry_date is a business field (datetime), don't restore from str, skip it
+            # SSL certificate'i eski degerlerine geri yukle
+            # expiry_date snapshot'ta string olarak saklanir, datetime'a cevirilmesi gerekir
+            expiry_date_val = None
+            raw_expiry = old_values.get('expiry_date')
+            if raw_expiry:
+                try:
+                    from datetime import datetime as dt_parse
+                    if isinstance(raw_expiry, str):
+                        # Parse ISO format string back to datetime
+                        clean = raw_expiry.replace('Z', '+00:00')
+                        expiry_date_val = dt_parse.fromisoformat(clean).replace(tzinfo=None)
+                    else:
+                        expiry_date_val = raw_expiry
+                except Exception as ed_err:
+                    logger.warning(f"ROLLBACK: Could not parse expiry_date '{raw_expiry}': {ed_err}, skipping expiry_date restore")
+                    expiry_date_val = None
+            
             await conn.execute("""
                 UPDATE ssl_certificates SET
                     name = $1, primary_domain = $2, certificate_content = $3,
@@ -422,9 +436,9 @@ async def _rollback_update(
                     issuer = $6, status = $7,
                     fingerprint = $8, days_until_expiry = $9, all_domains = $10,
                     cluster_id = $11, last_config_status = $12, usage_type = $13,
-                    is_active = $14, 
+                    is_active = $14, expiry_date = $15,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = $15
+                WHERE id = $16
             """,
                 old_values.get('name'),
                 old_values.get('primary_domain'),
@@ -440,9 +454,10 @@ async def _rollback_update(
                 old_values.get('last_config_status'),
                 old_values.get('usage_type'),
                 old_values.get('is_active'),
+                expiry_date_val,
                 entity_id
             )
-            logger.info(f"ROLLBACK UPDATE: SSL certificate {entity_id} restored to previous state")
+            logger.info(f"ROLLBACK UPDATE: SSL certificate {entity_id} restored to previous state (including content and expiry)")
             return True
             
         elif entity_type == "server":
