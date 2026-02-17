@@ -58,6 +58,10 @@ class AgentHeartbeat(BaseModel):
     haproxy_status: Optional[str] = None
     haproxy_version: Optional[str] = None
     
+    # Keepalive (VRRP) state
+    keepalive_state: Optional[str] = None   # "MASTER", "BACKUP", or None
+    keepalive_ip: Optional[str] = None      # Virtual IP managed by keepalived
+    
     # Server status from HAProxy stats socket
     server_statuses: Optional[Dict[str, Dict[str, str]]] = None  # {backend_name: {server_name: status}}
     

@@ -388,17 +388,19 @@ async def get_agents_status(
     Returns agent names, last seen, health status
     """
     try:
-        from database.connection import get_database_connection, close_database_connection
+        from database.connection import get_database_connection, close_database_connection, redis_client
         import time
+        import json
         from datetime import datetime
         
         conn = await get_database_connection()
         
-        # Get agents for this cluster
+        # Get agents for this cluster (include keepalive columns)
         agents = await conn.fetch("""
             SELECT 
                 a.id, a.name, a.platform, a.version, a.status,
-                a.last_seen, a.enabled, a.pool_id
+                a.last_seen, a.enabled, a.pool_id,
+                a.keepalive_state, a.keepalive_ip
             FROM agents a
             JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
             WHERE hc.id = $1
@@ -436,6 +438,21 @@ async def get_agents_status(
                 health_percentage = 0
                 seconds_ago = None
             
+            # Get keepalive state: try Redis first (fresh), fall back to DB
+            keepalive_state = None
+            keepalive_ip = None
+            try:
+                cached = redis_client.get(f"haproxy:agent:{agent['id']}:keepalive")
+                if cached:
+                    keepalive_data = json.loads(cached)
+                    keepalive_state = keepalive_data.get("state") or None
+                    keepalive_ip = keepalive_data.get("ip") or None
+            except Exception:
+                pass
+            if not keepalive_state:
+                keepalive_state = agent['keepalive_state'] or None
+                keepalive_ip = agent['keepalive_ip'] or None
+            
             agent_status_list.append({
                 "id": agent['id'],
                 "name": agent['name'],
@@ -446,7 +463,9 @@ async def get_agents_status(
                 "health_percentage": health_percentage,
                 "last_seen": last_seen.isoformat() if last_seen else None,
                 "seconds_ago": seconds_ago,
-                "enabled": agent['enabled']
+                "enabled": agent['enabled'],
+                "keepalive_state": keepalive_state,
+                "keepalive_ip": keepalive_ip
             })
         
         return {

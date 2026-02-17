@@ -131,6 +131,18 @@ const AgentStatusCard = ({ agent }) => {
             <Text type="secondary">Version:</Text>
             <Text style={{ fontSize: 11 }}>{agent.version || '-'}</Text>
           </div>
+
+          {agent.keepalive_state && agent.keepalive_state !== 'NONE' && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+              <Text type="secondary">Keepalive:</Text>
+              <Tag 
+                color={agent.keepalive_state === 'MASTER' ? 'green' : 'orange'}
+                style={{ margin: 0, fontSize: 11 }}
+              >
+                {agent.keepalive_state}
+              </Tag>
+            </div>
+          )}
         </div>
 
         {/* Status Label */}

@@ -253,6 +253,7 @@ async def get_agents(pool_id: Optional[int] = None, authorization: str = Header(
                            a.uptime, a.cpu_count, a.memory_total, a.disk_space,
                            a.network_interfaces, a.capabilities, a.status, a.last_seen, a.last_action_time,
                            a.haproxy_status, a.haproxy_version, a.config_version, a.applied_config_version,
+                           a.keepalive_state, a.keepalive_ip,
                            COALESCE(a.enabled, TRUE) as enabled,
                            a.created_at, a.updated_at,
                            p.name as pool_name, p.environment as pool_environment
@@ -268,6 +269,7 @@ async def get_agents(pool_id: Optional[int] = None, authorization: str = Header(
                            a.uptime, a.cpu_count, a.memory_total, a.disk_space,
                            a.network_interfaces, a.capabilities, a.status, a.last_seen, a.last_action_time,
                            a.haproxy_status, a.haproxy_version, a.config_version, a.applied_config_version,
+                           a.keepalive_state, a.keepalive_ip,
                            COALESCE(a.enabled, TRUE) as enabled,
                            a.created_at, a.updated_at,
                            p.name as pool_name, p.environment as pool_environment
@@ -322,6 +324,8 @@ async def get_agents(pool_id: Optional[int] = None, authorization: str = Header(
                 "status": agent.get("status", "unknown"),
                 "haproxy_status": agent.get("haproxy_status", "unknown"),
                 "haproxy_version": agent.get("haproxy_version", "unknown"),
+                "keepalive_state": agent.get("keepalive_state"),
+                "keepalive_ip": agent.get("keepalive_ip"),
                 "config_version": agent.get("config_version"),
                 "applied_config_version": agent.get("applied_config_version"),
                 "pool_environment": agent.get("pool_environment"),
@@ -1620,6 +1624,8 @@ async def agent_heartbeat_by_name(
                 haproxy_status = COALESCE($15, haproxy_status),
                 haproxy_version = COALESCE($16, haproxy_version),
                 applied_config_version = CASE WHEN $19 THEN $17 ELSE applied_config_version END,
+                keepalive_state = COALESCE(NULLIF($20, ''), keepalive_state),
+                keepalive_ip = COALESCE(NULLIF($21, ''), keepalive_ip),
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
         """, agent_id, heartbeat_data.hostname, detected_platform, 
@@ -1631,7 +1637,21 @@ async def agent_heartbeat_by_name(
             heartbeat_data.network_interfaces if isinstance(heartbeat_data.network_interfaces, str) else json.dumps(heartbeat_data.network_interfaces or []),
             heartbeat_data.capabilities if isinstance(heartbeat_data.capabilities, str) else json.dumps(heartbeat_data.capabilities or []),
             heartbeat_data.ip_address, heartbeat_data.haproxy_status, heartbeat_data.haproxy_version,
-            heartbeat_data.applied_config_version, new_status, update_applied_version)
+            heartbeat_data.applied_config_version, new_status, update_applied_version,
+            heartbeat_data.keepalive_state, heartbeat_data.keepalive_ip)
+
+        # Cache keepalive state in Redis for fast dashboard access
+        _keepalive_state = heartbeat_data.keepalive_state
+        if _keepalive_state and _keepalive_state not in ("", "NONE"):
+            try:
+                from database.connection import redis_client
+                redis_client.setex(
+                    f"haproxy:agent:{agent_id}:keepalive",
+                    90,
+                    json.dumps({"state": _keepalive_state, "ip": heartbeat_data.keepalive_ip or ""})
+                )
+            except Exception:
+                pass  # Redis failure should never break heartbeat
 
         # API key validation is already done at the beginning - no need for final check
         # Multi-agent token system allows multiple agents to use the same token

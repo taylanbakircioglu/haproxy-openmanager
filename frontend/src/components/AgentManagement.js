@@ -1198,6 +1198,21 @@ const AgentManagement = () => {
               HAProxy: {record.haproxy_version}
             </Text>
           )}
+          {record.keepalive_state && record.keepalive_state !== 'NONE' && (
+            <Space size={4}>
+              <Tag 
+                color={record.keepalive_state === 'MASTER' ? 'green' : 'orange'} 
+                style={{ fontSize: '10px', lineHeight: '16px', padding: '0 4px' }}
+              >
+                {record.keepalive_state}
+              </Tag>
+              {record.keepalive_ip && (
+                <Text type="secondary" style={{ fontSize: '10px' }}>
+                  VIP: {record.keepalive_ip}
+                </Text>
+              )}
+            </Space>
+          )}
         </Space>
       ),
       width: 220,

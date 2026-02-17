@@ -1288,6 +1288,59 @@ collect_system_info() {
 SYSTEM_INFO_EOF
 }
 
+# Detect keepalived VRRP state (MASTER/BACKUP) and virtual IP
+get_keepalive_state() {
+    local state=""
+    local vip=""
+
+    # Fast exit: Check if keepalived is running (instant check, <5ms)
+    if ! systemctl is-active --quiet keepalived 2>/dev/null; then
+        if ! pgrep -x keepalived >/dev/null 2>&1; then
+            echo "|"
+            return 0
+        fi
+    fi
+
+    # Method 1: journalctl (most reliable on RHEL/CentOS/Ubuntu with systemd)
+    if command -v journalctl &>/dev/null; then
+        state=$(journalctl -u keepalived -n 50 --no-pager 2>/dev/null \
+            | grep -oE "(MASTER|BACKUP)" | tail -1)
+    fi
+
+    # Method 2: Fallback to log files (for non-systemd or restricted journalctl)
+    if [[ -z "$state" ]]; then
+        for logfile in /var/log/messages /var/log/syslog /var/log/keepalived.log; do
+            if [[ -r "$logfile" ]]; then
+                state=$(tail -200 "$logfile" 2>/dev/null \
+                    | grep -i keepalived | grep -oE "(MASTER|BACKUP)" | tail -1)
+                [[ -n "$state" ]] && break
+            fi
+        done
+    fi
+
+    # Method 3: Check VIP presence on network interfaces (confirms MASTER)
+    if [[ -z "$state" ]] && [[ -r /etc/keepalived/keepalived.conf ]]; then
+        local conf_vip=$(grep -A10 'virtual_ipaddress' /etc/keepalived/keepalived.conf 2>/dev/null \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        if [[ -n "$conf_vip" ]]; then
+            if ip addr show 2>/dev/null | grep -q "$conf_vip"; then
+                state="MASTER"
+            else
+                state="BACKUP"
+            fi
+        fi
+    fi
+
+    # Extract VIP from keepalived.conf
+    if [[ -r /etc/keepalived/keepalived.conf ]]; then
+        vip=$(grep -A10 'virtual_ipaddress' /etc/keepalived/keepalived.conf 2>/dev/null \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    fi
+
+    echo "${state}|${vip}"
+    return 0
+}
+
 # Send heartbeat
 send_heartbeat() {
     local haproxy_status=$(get_haproxy_status)
@@ -1304,6 +1357,11 @@ send_heartbeat() {
     # Ensure platform is available (global variable set during registration)
     [[ -z "$platform" ]] && platform=$(uname -s | tr '[:upper:]' '[:lower:]')
     
+    # Detect keepalived VRRP state
+    local keepalive_info=$(get_keepalive_state)
+    local keepalive_state=$(echo "$keepalive_info" | cut -d'|' -f1)
+    local keepalive_ip=$(echo "$keepalive_info" | cut -d'|' -f2)
+    
     local heartbeat_payload
     # Include stats CSV if available
     if [[ -n "$haproxy_stats_csv" && "$server_statuses" != "{}" ]]; then
@@ -1319,6 +1377,8 @@ send_heartbeat() {
     $system_info,
     "haproxy_status": "$haproxy_status",
     "haproxy_version": "$haproxy_version",
+    "keepalive_state": "$keepalive_state",
+    "keepalive_ip": "$keepalive_ip",
     "cluster_id": $CLUSTER_ID,
     "applied_config_version": "${last_applied_version}",
     "server_statuses": $server_statuses,
@@ -1339,6 +1399,8 @@ STATS_HEARTBEAT_EOF
     $system_info,
     "haproxy_status": "$haproxy_status",
     "haproxy_version": "$haproxy_version",
+    "keepalive_state": "$keepalive_state",
+    "keepalive_ip": "$keepalive_ip",
     "cluster_id": $CLUSTER_ID,
     "applied_config_version": "${last_applied_version}",
     "server_statuses": $server_statuses
@@ -1358,6 +1420,8 @@ SIMPLE_HEARTBEAT_EOF
     $system_info,
     "haproxy_status": "$haproxy_status",
     "haproxy_version": "$haproxy_version",
+    "keepalive_state": "$keepalive_state",
+    "keepalive_ip": "$keepalive_ip",
     "cluster_id": $CLUSTER_ID,
     "applied_config_version": "${last_applied_version}"
 }
@@ -2697,6 +2761,54 @@ if [[ "$SKIP_TO_DAEMON" == "true" ]]; then
 SYSTEM_INFO_EOF
     }
     
+    # Detect keepalived VRRP state (MASTER/BACKUP) and virtual IP (DAEMON version)
+    get_keepalive_state() {
+        local state=""
+        local vip=""
+
+        if ! systemctl is-active --quiet keepalived 2>/dev/null; then
+            if ! pgrep -x keepalived >/dev/null 2>&1; then
+                echo "|"
+                return 0
+            fi
+        fi
+
+        if command -v journalctl &>/dev/null; then
+            state=$(journalctl -u keepalived -n 50 --no-pager 2>/dev/null \
+                | grep -oE "(MASTER|BACKUP)" | tail -1)
+        fi
+
+        if [[ -z "$state" ]]; then
+            for logfile in /var/log/messages /var/log/syslog /var/log/keepalived.log; do
+                if [[ -r "$logfile" ]]; then
+                    state=$(tail -200 "$logfile" 2>/dev/null \
+                        | grep -i keepalived | grep -oE "(MASTER|BACKUP)" | tail -1)
+                    [[ -n "$state" ]] && break
+                fi
+            done
+        fi
+
+        if [[ -z "$state" ]] && [[ -r /etc/keepalived/keepalived.conf ]]; then
+            local conf_vip=$(grep -A10 'virtual_ipaddress' /etc/keepalived/keepalived.conf 2>/dev/null \
+                | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            if [[ -n "$conf_vip" ]]; then
+                if ip addr show 2>/dev/null | grep -q "$conf_vip"; then
+                    state="MASTER"
+                else
+                    state="BACKUP"
+                fi
+            fi
+        fi
+
+        if [[ -r /etc/keepalived/keepalived.conf ]]; then
+            vip=$(grep -A10 'virtual_ipaddress' /etc/keepalived/keepalived.conf 2>/dev/null \
+                | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        fi
+
+        echo "${state}|${vip}"
+        return 0
+    }
+    
     # Send heartbeat (DAEMON version - includes all stats)
     send_heartbeat() {
         local haproxy_status=$(get_haproxy_status)
@@ -2715,6 +2827,11 @@ SYSTEM_INFO_EOF
             platform=$(uname -s | tr '[:upper:]' '[:lower:]')
         fi
         
+        # Detect keepalived VRRP state
+        local keepalive_info=$(get_keepalive_state)
+        local keepalive_state=$(echo "$keepalive_info" | cut -d'|' -f1)
+        local keepalive_ip=$(echo "$keepalive_info" | cut -d'|' -f2)
+        
         # Prepare heartbeat payload with all data
         local heartbeat_payload="{
             \"name\": \"$AGENT_NAME\",
@@ -2728,6 +2845,14 @@ SYSTEM_INFO_EOF
             \"cluster_id\": $CLUSTER_ID,
             \"server_statuses\": $server_statuses,
             \"system_info\": $system_info"
+        
+        # Add keepalive state if detected
+        if [[ -n "$keepalive_state" ]]; then
+            heartbeat_payload+=",\"keepalive_state\": \"$keepalive_state\""
+            if [[ -n "$keepalive_ip" ]]; then
+                heartbeat_payload+=",\"keepalive_ip\": \"$keepalive_ip\""
+            fi
+        fi
         
         # CRITICAL: Add haproxy_stats_csv only if available (for dashboard metrics)
         if [[ -n "$haproxy_stats_csv" && "$haproxy_stats_csv" != "" ]]; then
