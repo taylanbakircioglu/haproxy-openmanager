@@ -237,7 +237,7 @@ const ClusterManagement = () => {
       const descMatch = cluster.description && cluster.description.toLowerCase().includes(value.toLowerCase());
       const agents = clusterAgents[cluster.id] || [];
       const keepaliveMatch = agents.some(a => 
-        a.keepalive_ip && a.keepalive_ip.includes(value)
+        a.keepalive_ip && a.keepalive_ip.toLowerCase().includes(value.toLowerCase())
       );
       return nameMatch || descMatch || keepaliveMatch;
     });
@@ -436,9 +436,13 @@ const ClusterManagement = () => {
           return <Text type="secondary" style={{ fontSize: '11px' }}>-</Text>;
         }
         
+        const displayAgents = keepaliveAgents.slice(0, 4);
+        const remaining = keepaliveAgents.length - displayAgents.length;
+        const uniqueVips = [...new Set(keepaliveAgents.map(a => a.keepalive_ip).filter(Boolean))];
+        
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-            {keepaliveAgents.map((a, idx) => (
+            {displayAgents.map((a, idx) => (
               <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'nowrap' }}>
                 <Text style={{ fontSize: '10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '80px' }}>{a.name}</Text>
                 <Tag 
@@ -449,9 +453,12 @@ const ClusterManagement = () => {
                 </Tag>
               </div>
             ))}
-            {keepaliveAgents[0]?.keepalive_ip && (
-              <Text type="secondary" style={{ fontSize: '10px' }}>
-                VIP: {keepaliveAgents[0].keepalive_ip}
+            {remaining > 0 && (
+              <Text type="secondary" style={{ fontSize: '10px' }}>+{remaining} more</Text>
+            )}
+            {uniqueVips.length > 0 && (
+              <Text type="secondary" style={{ fontSize: '10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '170px' }}>
+                VIP: {uniqueVips.join(', ')}
               </Text>
             )}
           </div>
