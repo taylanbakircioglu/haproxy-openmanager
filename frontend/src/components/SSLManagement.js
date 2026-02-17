@@ -785,26 +785,6 @@ const SSLManagement = () => {
         </Col>
       </Row>
 
-      {expiringSoon.length > 0 && (
-        <Alert
-          message="Certificates Expiring Soon"
-          description={
-            <div>
-              {expiringSoon.map(cert => (
-                <div key={cert.id}>
-                  <strong>{cert.name}</strong> ({cert.domain}) - 
-                  {getExpiryStatus(cert.expiry_date).text}
-                </div>
-              ))}
-            </div>
-          }
-          type="warning"
-          showIcon
-          icon={<WarningOutlined />}
-          style={{ marginBottom: 16 }}
-        />
-      )}
-
       {!selectedCluster && (
         <Alert
           message="No Cluster Selected"
@@ -833,12 +813,29 @@ const SSLManagement = () => {
           </Card>
         </Col>
         <Col span={6}>
-          <Card size="small" style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 20, fontWeight: 'bold', color: '#faad14' }}>
-              {expiringSoon.length}
-            </div>
-            <div>Expiring Soon</div>
-          </Card>
+          <Tooltip
+            title={expiringSoon.length > 0 ? (
+              <div>
+                <div style={{ fontWeight: 'bold', marginBottom: 4, borderBottom: '1px solid rgba(255,255,255,0.2)', paddingBottom: 4 }}>
+                  Certificates Expiring Soon
+                </div>
+                {expiringSoon.map(cert => (
+                  <div key={cert.id} style={{ padding: '2px 0' }}>
+                    <strong>{cert.name}</strong> ({cert.domain}) - {getExpiryStatus(cert.expiry_date).text}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            mouseEnterDelay={0.4}
+            placement="bottom"
+          >
+            <Card size="small" style={{ textAlign: 'center', cursor: expiringSoon.length > 0 ? 'pointer' : 'default' }}>
+              <div style={{ fontSize: 20, fontWeight: 'bold', color: '#faad14' }}>
+                {expiringSoon.length}
+              </div>
+              <div>Expiring Soon</div>
+            </Card>
+          </Tooltip>
         </Col>
         <Col span={6}>
           <Card size="small" style={{ textAlign: 'center' }}>
