@@ -319,7 +319,26 @@ const ClusterManagement = () => {
       title: 'Description',
       dataIndex: 'description',
       key: 'description',
-      render: (text) => text || <Text type="secondary">No description</Text>,
+      width: 200,
+      render: (text) => {
+        if (!text) return <Text type="secondary">No description</Text>;
+        return (
+          <Tooltip title={text} mouseEnterDelay={0.5}>
+            <div style={{
+              fontSize: '12px',
+              lineHeight: '1.4',
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              wordBreak: 'break-word',
+            }}>
+              {text}
+            </div>
+          </Tooltip>
+        );
+      },
     },
     {
       title: 'Agent Pool',
@@ -337,12 +356,13 @@ const ClusterManagement = () => {
       },
     },
     {
-      title: 'Connection Type',
+      title: 'Connection',
       dataIndex: 'connection_type',
       key: 'connection_type',
+      width: 110,
       render: (type) => (
-        <Tag color={type === 'agent' ? 'green' : 'purple'}>
-          {type === 'agent' ? 'Agent Connection' : 'Sidecar Agent'}
+        <Tag color={type === 'agent' ? 'green' : 'purple'} style={{ fontSize: '11px' }}>
+          {type === 'agent' ? 'Agent' : 'Sidecar'}
         </Tag>
       ),
     },
@@ -361,9 +381,9 @@ const ClusterManagement = () => {
       ),
     },
     {
-      title: 'HAProxy Version',
+      title: 'HAProxy Ver.',
       key: 'haproxy_version',
-      width: 220,
+      width: 170,
       render: (_, record) => {
         const versionInfo = getHAProxyVersionInfo(record.id);
         
@@ -418,7 +438,7 @@ const ClusterManagement = () => {
     {
       title: 'Keepalive',
       key: 'keepalive',
-      width: 180,
+      width: 155,
       render: (_, record) => {
         const agents = clusterAgents[record.id] || [];
         const keepaliveAgents = agents.filter(a => a.keepalive_state && a.keepalive_state !== 'NONE' && a.keepalive_state !== '');
@@ -444,7 +464,7 @@ const ClusterManagement = () => {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
             {displayAgents.map((a, idx) => (
               <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'nowrap' }}>
-                <Text style={{ fontSize: '10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '80px' }}>{a.name}</Text>
+                <Text style={{ fontSize: '10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '70px' }}>{a.name}</Text>
                 <Tag 
                   color={a.keepalive_state === 'MASTER' ? 'green' : 'orange'} 
                   style={{ fontSize: '10px', lineHeight: '16px', padding: '0 3px', margin: 0, flexShrink: 0 }}
@@ -457,7 +477,7 @@ const ClusterManagement = () => {
               <Text type="secondary" style={{ fontSize: '10px' }}>+{remaining} more</Text>
             )}
             {uniqueVips.length > 0 && (
-              <Text type="secondary" style={{ fontSize: '10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '170px' }}>
+              <Text type="secondary" style={{ fontSize: '10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '145px' }}>
                 VIP: {uniqueVips.join(', ')}
               </Text>
             )}
@@ -570,7 +590,7 @@ const ClusterManagement = () => {
           dataSource={filteredClusters}
           rowKey="id"
           loading={loading}
-          scroll={{ x: 'max-content' }}
+          scroll={{ x: 1100 }}
           pagination={{
             pageSize: 10,
             showSizeChanger: true,
