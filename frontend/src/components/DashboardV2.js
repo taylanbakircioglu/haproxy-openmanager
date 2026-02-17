@@ -550,7 +550,11 @@ const DashboardV2 = () => {
           fetchSlowestBackends();
           break;
         
-        // 'overview', 'capacity', 'frontends', 'backends' use statsData (already refreshed above)
+        case 'overview':
+          fetchAgentsStatus();
+          break;
+        
+        // 'capacity', 'frontends', 'backends' use statsData (already refreshed above)
         default:
           break;
       }
