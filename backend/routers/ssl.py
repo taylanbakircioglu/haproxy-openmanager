@@ -242,7 +242,7 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                     all_domains = [cert['domain']] if cert['domain'] else []
                 
                 # Debug expiry information
-                logger.info(f"📅 SSL {cert['name']}: expiry_date={cert['expiry_date']}, status={cert.get('status')}, days_until_expiry={cert.get('days_until_expiry')}")
+                logger.info(f"SSL {cert['name']}: expiry_date={cert['expiry_date']}, status={cert.get('status')}, days_until_expiry={cert.get('days_until_expiry')}")
                 
                 cert_dict = {
                     'id': cert['id'],
@@ -411,7 +411,7 @@ async def create_ssl_certificate(certificate: SSLCertificateCreate, request: Req
                 logger.error(f"Timezone conversion failed: {tz_error}")
                 # Fallback: set to None if timezone conversion fails
                 expiry_date = None
-                logger.warning("🚨 SSL CREATE: Using NULL expiry_date due to timezone error")
+                logger.warning("SSL CREATE: Using NULL expiry_date due to timezone error")
         
         issuer = cert_info["issuer"]
         status = cert_info["status"]

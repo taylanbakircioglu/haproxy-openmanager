@@ -3446,7 +3446,7 @@ async def confirm_restore_config_version(
                         WHERE name = $1 AND cluster_id = $2
                     """, waf_name, cluster_id)
                     changes_summary["waf_rules_deactivated"] += 1
-                    logger.info(f"🔕 RESTORE: Deactivated WAF rule '{waf_name}'")
+                    logger.info(f"RESTORE: Deactivated WAF rule '{waf_name}'")
             
             # Create PENDING config version (for Apply Management)
             # Include metadata to track which entities were actually changed
@@ -3662,7 +3662,7 @@ async def confirm_restore_config_version(
                         "name": waf_name,
                         "action": "deactivate"
                     })
-                    logger.info(f"🔕 METADATA: WAF rule '{waf_name}' deactivated, adding to changed_entities")
+                    logger.info(f"METADATA: WAF rule '{waf_name}' deactivated, adding to changed_entities")
             
             # CRITICAL: Revert last_config_status to APPLIED for unchanged entities
             # This ensures only changed entities show as PENDING in UI
@@ -4557,46 +4557,22 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                 logger.info(f"REJECT DEBUG: entity_snapshot exists={entity_snapshot is not None}")
                 
                 if entity_snapshot:
-                    # SSL entity rollback: KOSULLU - AYNI guncelleme baska cluster'da APPLIED ise ATLA
+                    # SSL entity rollback: Always rollback since Auto-Reject handles cross-cluster consistency
+                    # Auto-Reject (below) marks ALL remaining PENDING SSL versions as REJECTED on all clusters,
+                    # so there's no cross-cluster downgrade risk from rolling back the SSL content
                     if entity_snapshot.get('entity_type') == 'ssl_certificate':
                         ssl_entity_id = entity_snapshot.get('entity_id')
-                        ssl_version_pattern = f'ssl-{ssl_entity_id}-%'
                         
-                        # Check if THIS SPECIFIC UPDATE has been APPLIED on another cluster
-                        # Uses time-based matching: versions from the same update cycle are created
-                        # within seconds of each other (ssl.py creates them in a loop)
-                        # A 120-second window safely captures same-update versions across many clusters
-                        # while excluding versions from previous/different updates
-                        version_created_at = version['created_at']
-                        has_same_update_applied = await conn.fetchval("""
-                            SELECT EXISTS(
-                                SELECT 1 FROM config_versions
-                                WHERE version_name LIKE $1
-                                AND status = 'APPLIED'
-                                AND cluster_id != $2
-                                AND ABS(EXTRACT(EPOCH FROM (created_at - $3))) < 120
-                            )
-                        """, ssl_version_pattern, cluster_id, version_created_at)
-                        
-                        if has_same_update_applied:
-                            logger.info(
-                                f"REJECT: Skipping SSL certificate {ssl_entity_id} "
-                                f"entity rollback (same update already applied on another cluster - "
-                                f"content preserved to prevent cross-cluster downgrade)"
-                            )
-                            rollback_skip_count += 1
+                        logger.info(
+                            f"REJECT: Rolling back SSL certificate {ssl_entity_id} content to pre-update state"
+                        )
+                        success = await rollback_entity_from_snapshot(conn, entity_snapshot)
+                        if success:
+                            rollback_success_count += 1
+                            logger.info(f"REJECT ROLLBACK: Rolled back SSL certificate {ssl_entity_id}")
                         else:
-                            logger.info(
-                                f"REJECT: Rolling back SSL certificate {ssl_entity_id} "
-                                f"(this specific update not applied on any other cluster - safe to rollback)"
-                            )
-                            success = await rollback_entity_from_snapshot(conn, entity_snapshot)
-                            if success:
-                                rollback_success_count += 1
-                                logger.info(f"REJECT ROLLBACK: Rolled back SSL certificate {ssl_entity_id}")
-                            else:
-                                rollback_fail_count += 1
-                                logger.warning(f"REJECT ROLLBACK: Failed to rollback SSL certificate {ssl_entity_id}")
+                            rollback_fail_count += 1
+                            logger.warning(f"REJECT ROLLBACK: Failed to rollback SSL certificate {ssl_entity_id}")
                     else:
                         # Single entity rollback (non-SSL)
                         logger.info(f"REJECT DEBUG: Calling rollback for {entity_snapshot.get('entity_type')} {entity_snapshot.get('entity_id')}")
@@ -4622,29 +4598,10 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                     for snapshot_wrapper in bulk_snapshots:
                         entity_snap = snapshot_wrapper.get('entity_snapshot')
                         if entity_snap:
-                            # SSL entity rollback: bulk'ta da kosullu (same-update check)
+                            # SSL entity rollback in bulk: Always rollback (Auto-Reject handles cross-cluster)
                             if entity_snap.get('entity_type') == 'ssl_certificate':
                                 ssl_eid = entity_snap.get('entity_id')
-                                ssl_vp = f'ssl-{ssl_eid}-%'
-                                version_created_at_bulk = version['created_at']
-                                has_applied_bulk = await conn.fetchval("""
-                                    SELECT EXISTS(
-                                        SELECT 1 FROM config_versions
-                                        WHERE version_name LIKE $1
-                                        AND status = 'APPLIED'
-                                        AND cluster_id != $2
-                                        AND ABS(EXTRACT(EPOCH FROM (created_at - $3))) < 120
-                                    )
-                                """, ssl_vp, cluster_id, version_created_at_bulk)
-                                if has_applied_bulk:
-                                    logger.info(
-                                        f"REJECT: Skipping SSL certificate {ssl_eid} "
-                                        f"bulk entity rollback (same update applied on another cluster)"
-                                    )
-                                    rollback_skip_count += 1
-                                    continue
-                                else:
-                                    logger.info(f"REJECT: Rolling back SSL certificate {ssl_eid} (this update not applied elsewhere - safe)")
+                                logger.info(f"REJECT: Rolling back SSL certificate {ssl_eid} from bulk snapshot")
                             success = await rollback_entity_from_snapshot(conn, entity_snap)
                             if success:
                                 rollback_success_count += 1

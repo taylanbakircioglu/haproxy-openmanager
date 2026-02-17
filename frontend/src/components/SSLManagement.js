@@ -47,6 +47,10 @@ const SSLManagement = () => {
     const saved = localStorage.getItem('ssl_filter_cluster');
     return saved !== null ? JSON.parse(saved) : true;
   });
+  const [showInUseOnly, setShowInUseOnly] = useState(() => {
+    const saved = localStorage.getItem('ssl_filter_in_use');
+    return saved !== null ? JSON.parse(saved) : false;
+  });
 
   // Filter toggle handlers
   const toggleGlobalFilter = () => {
@@ -59,6 +63,12 @@ const SSLManagement = () => {
     const newValue = !showClusterSpecific;
     setShowClusterSpecific(newValue);
     localStorage.setItem('ssl_filter_cluster', JSON.stringify(newValue));
+  };
+
+  const toggleInUseFilter = () => {
+    const newValue = !showInUseOnly;
+    setShowInUseOnly(newValue);
+    localStorage.setItem('ssl_filter_in_use', JSON.stringify(newValue));
   };
 
   // Apply filters whenever certificates or filter states change
@@ -74,6 +84,11 @@ const SSLManagement = () => {
       });
     }
     
+    // Apply In-Use filter
+    if (showInUseOnly) {
+      filtered = filtered.filter(cert => cert.usage_count > 0);
+    }
+    
     // Apply search filter
     if (searchText) {
       filtered = filtered.filter(cert =>
@@ -84,7 +99,7 @@ const SSLManagement = () => {
     }
     
     setFilteredCertificates(filtered);
-  }, [certificates, showGlobal, showClusterSpecific, searchText]);
+  }, [certificates, showGlobal, showClusterSpecific, showInUseOnly, searchText]);
 
   useEffect(() => {
     if (selectedCluster) {
@@ -419,7 +434,7 @@ const SSLManagement = () => {
     }
   };
 
-  const getExpiryStatus = (expiryDate, expiresSoon) => {
+  const getExpiryStatus = (expiryDate) => {
     if (!expiryDate) return { status: 'default', text: 'No expiry set' };
     
     const days = Math.ceil((new Date(expiryDate) - new Date()) / (1000 * 60 * 60 * 24));
@@ -539,7 +554,7 @@ const SSLManagement = () => {
       dataIndex: 'expiry_date',
       key: 'expiry_status',
       render: (expiryDate, record) => {
-        const status = getExpiryStatus(expiryDate, record.expires_soon);
+        const status = getExpiryStatus(expiryDate);
         return (
           <Badge 
             status={status.status} 
@@ -654,7 +669,11 @@ const SSLManagement = () => {
     },
   ];
 
-  const expiringSoon = certificates?.filter(cert => cert.expires_soon) || [];
+  const expiringSoon = certificates?.filter(cert => {
+    if (!cert.expiry_date) return false;
+    const days = Math.ceil((new Date(cert.expiry_date) - new Date()) / (1000 * 60 * 60 * 24));
+    return days >= 0 && days <= 30;
+  }) || [];
 
   return (
     <div>
@@ -685,6 +704,14 @@ const SSLManagement = () => {
               <Switch
                 checked={showClusterSpecific}
                 onChange={toggleClusterFilter}
+                size="small"
+              />
+            </Space>
+            <Space>
+              <span style={{ fontSize: 12 }}>In Use</span>
+              <Switch
+                checked={showInUseOnly}
+                onChange={toggleInUseFilter}
                 size="small"
               />
             </Space>
@@ -766,7 +793,7 @@ const SSLManagement = () => {
               {expiringSoon.map(cert => (
                 <div key={cert.id}>
                   <strong>{cert.name}</strong> ({cert.domain}) - 
-                  {getExpiryStatus(cert.expiry_date, cert.expires_soon).text}
+                  {getExpiryStatus(cert.expiry_date).text}
                 </div>
               ))}
             </div>
@@ -971,11 +998,27 @@ MIIDXTCCAkWgAwIBAgIJAKoK/OvD...
 
           <Form.Item
             noStyle
-            shouldUpdate={(prevValues, currentValues) => prevValues.usage_type !== currentValues.usage_type}
+            shouldUpdate={(prevValues, currentValues) => 
+              prevValues.usage_type !== currentValues.usage_type || 
+              prevValues.private_key_content !== currentValues.private_key_content
+            }
           >
             {({ getFieldValue }) => {
               const usageType = getFieldValue('usage_type');
+              const privateKeyValue = getFieldValue('private_key_content');
               const isRequired = usageType === 'frontend';
+              const hasValue = privateKeyValue && privateKeyValue.trim();
+              
+              let extraMessage;
+              if (isRequired) {
+                extraMessage = hasValue 
+                  ? <span style={{ color: '#52c41a' }}>Private key provided</span>
+                  : <span style={{ color: '#ff4d4f' }}>Required for Frontend SSL</span>;
+              } else {
+                extraMessage = hasValue
+                  ? <span style={{ color: '#52c41a' }}>Private key provided (optional for Server SSL)</span>
+                  : <span style={{ color: '#999' }}>Optional for Server SSL (used for backend verification)</span>;
+              }
               
               return (
                 <Form.Item
@@ -994,7 +1037,6 @@ MIIDXTCCAkWgAwIBAgIJAKoK/OvD...
                     },
                     {
                       validator: (_, value) => {
-                        // If value provided, validate format
                         if (value && value.trim()) {
                           if (!value.includes('-----BEGIN') || !value.includes('-----END')) {
                             return Promise.reject('Private key must be in PEM format');
@@ -1004,10 +1046,7 @@ MIIDXTCCAkWgAwIBAgIJAKoK/OvD...
                       }
                     }
                   ]}
-                  extra={isRequired ? 
-                    <span style={{ color: '#ff4d4f' }}>Required for Frontend SSL</span> : 
-                    <span style={{ color: '#52c41a' }}>Optional for Server SSL (used for backend verification)</span>
-                  }
+                  extra={extraMessage}
                 >
                   <TextArea
                     rows={8}
