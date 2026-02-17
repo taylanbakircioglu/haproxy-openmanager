@@ -166,11 +166,12 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                                array_agg(DISTINCT c.name ORDER BY c.name) FILTER (WHERE c.name IS NOT NULL), 
                                ARRAY[]::text[]
                            ) as cluster_names,
-                           -- Get latest config status for SSL-related versions
+                           -- Get latest config status for SSL-related versions (REJECTED filtered out)
                            (SELECT cv.status 
                             FROM config_versions cv 
                             WHERE cv.cluster_id = $1 
                             AND cv.version_name LIKE 'ssl-' || s.id || '-%'
+                            AND cv.status != 'REJECTED'
                             ORDER BY cv.created_at DESC 
                             LIMIT 1) as last_config_status,
                            -- Check if SSL has pending config changes
@@ -180,6 +181,13 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                                AND cv2.version_name LIKE 'ssl-' || s.id || '-%'
                                AND cv2.status = 'PENDING'
                            ) as has_pending_config,
+                           -- Get cluster names where SSL has PENDING config versions
+                           (SELECT array_agg(DISTINCT hc.name)
+                            FROM config_versions cv3
+                            JOIN haproxy_clusters hc ON hc.id = cv3.cluster_id
+                            WHERE cv3.version_name LIKE 'ssl-' || s.id || '-%'
+                            AND cv3.status = 'PENDING'
+                           ) as pending_cluster_names,
                            (SELECT COUNT(*) FROM frontends f
                             WHERE f.is_active = TRUE AND (f.ssl_certificate_id = s.id OR f.ssl_certificate_ids @> to_jsonb(s.id)))
                            +
@@ -255,7 +263,8 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                     'is_active': cert['is_active'],
                     'usage_count': cert.get('usage_count', 0),
                     'last_config_status': cert.get('last_config_status'),
-                    'has_pending_config': cert.get('has_pending_config', False)
+                    'has_pending_config': cert.get('has_pending_config', False),
+                    'pending_cluster_names': list(cert.get('pending_cluster_names') or [])
                 }
                 result.append(cert_dict)
             
