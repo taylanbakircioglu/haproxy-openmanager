@@ -73,7 +73,9 @@ const ClusterManagement = () => {
               agentsByCluster[cluster.id] = agents.map(a => ({
                 name: a.name,
                 haproxy_version: a.haproxy_version,
-                status: a.status
+                status: a.status,
+                keepalive_state: a.keepalive_state,
+                keepalive_ip: a.keepalive_ip
               }));
             });
           }
@@ -230,10 +232,15 @@ const ClusterManagement = () => {
   };
 
   const handleSearch = (value) => {
-    const filtered = clusters.filter(cluster => 
-      cluster.name.toLowerCase().includes(value.toLowerCase()) ||
-      (cluster.description && cluster.description.toLowerCase().includes(value.toLowerCase()))
-    );
+    const filtered = clusters.filter(cluster => {
+      const nameMatch = cluster.name.toLowerCase().includes(value.toLowerCase());
+      const descMatch = cluster.description && cluster.description.toLowerCase().includes(value.toLowerCase());
+      const agents = clusterAgents[cluster.id] || [];
+      const keepaliveMatch = agents.some(a => 
+        a.keepalive_ip && a.keepalive_ip.includes(value)
+      );
+      return nameMatch || descMatch || keepaliveMatch;
+    });
     setFilteredClusters(filtered);
     setSearchText(value);
   };
@@ -404,6 +411,49 @@ const ClusterManagement = () => {
                 </div>
               ))}
             </div>
+          </div>
+        );
+      },
+    },
+    {
+      title: 'Keepalive',
+      key: 'keepalive',
+      width: 180,
+      render: (_, record) => {
+        const agents = clusterAgents[record.id] || [];
+        const keepaliveAgents = agents.filter(a => a.keepalive_state && a.keepalive_state !== 'NONE' && a.keepalive_state !== '');
+        
+        if (loadingAgents) {
+          return (
+            <Space size={4}>
+              <LoadingOutlined style={{ fontSize: '12px', color: '#1890ff' }} spin />
+              <Text type="secondary" style={{ fontSize: '11px' }}>Loading...</Text>
+            </Space>
+          );
+        }
+        
+        if (keepaliveAgents.length === 0) {
+          return <Text type="secondary" style={{ fontSize: '11px' }}>-</Text>;
+        }
+        
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+            {keepaliveAgents.map((a, idx) => (
+              <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'nowrap' }}>
+                <Text style={{ fontSize: '10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '80px' }}>{a.name}</Text>
+                <Tag 
+                  color={a.keepalive_state === 'MASTER' ? 'green' : 'orange'} 
+                  style={{ fontSize: '10px', lineHeight: '16px', padding: '0 3px', margin: 0, flexShrink: 0 }}
+                >
+                  {a.keepalive_state}
+                </Tag>
+              </div>
+            ))}
+            {keepaliveAgents[0]?.keepalive_ip && (
+              <Text type="secondary" style={{ fontSize: '10px' }}>
+                VIP: {keepaliveAgents[0].keepalive_ip}
+              </Text>
+            )}
           </div>
         );
       },

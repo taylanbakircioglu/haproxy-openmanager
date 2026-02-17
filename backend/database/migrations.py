@@ -180,7 +180,9 @@ async def ensure_agents_table():
                 'config_version': "ALTER TABLE agents ADD COLUMN config_version VARCHAR(100);",
                 'applied_config_version': "ALTER TABLE agents ADD COLUMN applied_config_version VARCHAR(100);",
                 'last_validation_error': "ALTER TABLE agents ADD COLUMN last_validation_error TEXT;",
-                'last_validation_error_at': "ALTER TABLE agents ADD COLUMN last_validation_error_at TIMESTAMP;"
+                'last_validation_error_at': "ALTER TABLE agents ADD COLUMN last_validation_error_at TIMESTAMP;",
+                'keepalive_state': "ALTER TABLE agents ADD COLUMN keepalive_state VARCHAR(20) DEFAULT NULL;",
+                'keepalive_ip': "ALTER TABLE agents ADD COLUMN keepalive_ip VARCHAR(45) DEFAULT NULL;"
             },
             'haproxy_cluster_pools': {
                 'location': "ALTER TABLE haproxy_cluster_pools ADD COLUMN location VARCHAR(255);",
@@ -1924,6 +1926,8 @@ async def create_essential_tables(conn):
                 status VARCHAR(20) DEFAULT 'offline',
                 haproxy_status VARCHAR(20) DEFAULT 'unknown',
                 haproxy_version VARCHAR(50),
+                keepalive_state VARCHAR(20) DEFAULT NULL,
+                keepalive_ip VARCHAR(45) DEFAULT NULL,
                 pool_id INTEGER REFERENCES haproxy_cluster_pools(id) ON DELETE SET NULL,
                 enabled BOOLEAN DEFAULT TRUE,
                 is_active BOOLEAN DEFAULT TRUE,

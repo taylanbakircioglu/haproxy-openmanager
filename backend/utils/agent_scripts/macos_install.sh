@@ -1153,6 +1153,12 @@ collect_system_info() {
 SYSTEM_INFO_EOF
 }
 
+# Detect keepalived VRRP state - macOS stub (keepalived is Linux-only)
+get_keepalive_state() {
+    echo "|"
+    return 0
+}
+
 # Send heartbeat
 send_heartbeat() {
     local haproxy_status=$(get_haproxy_status)
@@ -1169,6 +1175,11 @@ send_heartbeat() {
     # Ensure platform is available (global variable set during registration)
     [[ -z "$platform" ]] && platform=$(uname -s | tr '[:upper:]' '[:lower:]')
     
+    # Detect keepalived VRRP state
+    local keepalive_info=$(get_keepalive_state)
+    local keepalive_state=$(echo "$keepalive_info" | cut -d'|' -f1)
+    local keepalive_ip=$(echo "$keepalive_info" | cut -d'|' -f2)
+    
     local heartbeat_payload
     # Include stats CSV if available
     if [[ -n "$haproxy_stats_csv" && "$server_statuses" != "{}" ]]; then
@@ -1184,6 +1195,8 @@ send_heartbeat() {
     $system_info,
     "haproxy_status": "$haproxy_status",
     "haproxy_version": "$haproxy_version",
+    "keepalive_state": "$keepalive_state",
+    "keepalive_ip": "$keepalive_ip",
     "cluster_id": $CLUSTER_ID,
     "applied_config_version": "${last_applied_version}",
     "server_statuses": $server_statuses,
@@ -1204,6 +1217,8 @@ STATS_HEARTBEAT_EOF
     $system_info,
     "haproxy_status": "$haproxy_status",
     "haproxy_version": "$haproxy_version",
+    "keepalive_state": "$keepalive_state",
+    "keepalive_ip": "$keepalive_ip",
     "cluster_id": $CLUSTER_ID,
     "applied_config_version": "${last_applied_version}",
     "server_statuses": $server_statuses
@@ -1223,6 +1238,8 @@ SIMPLE_HEARTBEAT_EOF
     $system_info,
     "haproxy_status": "$haproxy_status",
     "haproxy_version": "$haproxy_version",
+    "keepalive_state": "$keepalive_state",
+    "keepalive_ip": "$keepalive_ip",
     "cluster_id": $CLUSTER_ID,
     "applied_config_version": "${last_applied_version}"
 }
@@ -2593,6 +2610,12 @@ if [[ "$SKIP_TO_DAEMON" == "true" ]]; then
 SYSTEM_INFO_EOF
     }
     
+    # Detect keepalived VRRP state - macOS stub (keepalived is Linux-only) (DAEMON version)
+    get_keepalive_state() {
+        echo "|"
+        return 0
+    }
+    
     # Send heartbeat (DAEMON version - includes all stats)
     send_heartbeat() {
         local haproxy_status=$(get_haproxy_status)
@@ -2611,6 +2634,11 @@ SYSTEM_INFO_EOF
             platform=$(uname -s | tr '[:upper:]' '[:lower:]')
         fi
         
+        # Detect keepalived VRRP state
+        local keepalive_info=$(get_keepalive_state)
+        local keepalive_state=$(echo "$keepalive_info" | cut -d'|' -f1)
+        local keepalive_ip=$(echo "$keepalive_info" | cut -d'|' -f2)
+        
         # Prepare heartbeat payload with all data
         local heartbeat_payload="{
             \"name\": \"$AGENT_NAME\",
@@ -2624,6 +2652,14 @@ SYSTEM_INFO_EOF
             \"cluster_id\": $CLUSTER_ID,
             \"server_statuses\": $server_statuses,
             \"system_info\": $system_info"
+        
+        # Add keepalive state if detected
+        if [[ -n "$keepalive_state" ]]; then
+            heartbeat_payload+=",\"keepalive_state\": \"$keepalive_state\""
+            if [[ -n "$keepalive_ip" ]]; then
+                heartbeat_payload+=",\"keepalive_ip\": \"$keepalive_ip\""
+            fi
+        fi
         
         # CRITICAL: Add haproxy_stats_csv only if available (for dashboard metrics)
         if [[ -n "$haproxy_stats_csv" && "$haproxy_stats_csv" != "" ]]; then
