@@ -677,8 +677,8 @@ const SSLManagement = () => {
 
   return (
     <div>
-      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-        <Col span={12}>
+      <Row gutter={[16, 16]} style={{ marginBottom: 16 }} align="middle">
+        <Col flex="auto">
           <Title level={2} style={{ margin: 0 }}>
             <LockOutlined style={{ marginRight: 8, color: '#52c41a' }} />
             SSL Certificate Management
@@ -689,9 +689,9 @@ const SSLManagement = () => {
             )}
           </Title>
         </Col>
-        <Col span={12} style={{ textAlign: 'right' }}>
-          <Space wrap size={[8, 8]}>
-            <Space>
+        <Col>
+          <Space size={[12, 8]} align="center">
+            <Space size={4}>
               <span style={{ fontSize: 12 }}>Global</span>
               <Switch
                 checked={showGlobal}
@@ -699,7 +699,7 @@ const SSLManagement = () => {
                 size="small"
               />
             </Space>
-            <Space>
+            <Space size={4}>
               <span style={{ fontSize: 12 }}>Cluster-specific</span>
               <Switch
                 checked={showClusterSpecific}
@@ -707,7 +707,7 @@ const SSLManagement = () => {
                 size="small"
               />
             </Space>
-            <Space>
+            <Space size={4}>
               <span style={{ fontSize: 12 }}>In Use</span>
               <Switch
                 checked={showInUseOnly}
@@ -718,7 +718,7 @@ const SSLManagement = () => {
             <div style={{ 
               position: 'relative', 
               display: 'inline-block',
-              width: 250
+              width: 180
             }}>
               <SearchOutlined style={{
                 position: 'absolute',
