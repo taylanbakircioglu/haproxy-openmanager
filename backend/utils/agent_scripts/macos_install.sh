@@ -2653,13 +2653,8 @@ SYSTEM_INFO_EOF
             \"server_statuses\": $server_statuses,
             \"system_info\": $system_info"
         
-        # Add keepalive state if detected
-        if [[ -n "$keepalive_state" ]]; then
-            heartbeat_payload+=",\"keepalive_state\": \"$keepalive_state\""
-            if [[ -n "$keepalive_ip" ]]; then
-                heartbeat_payload+=",\"keepalive_ip\": \"$keepalive_ip\""
-            fi
-        fi
+        # Always send keepalive state (even empty) so backend can clear stale data
+        heartbeat_payload+=",\"keepalive_state\": \"$keepalive_state\",\"keepalive_ip\": \"$keepalive_ip\""
         
         # CRITICAL: Add haproxy_stats_csv only if available (for dashboard metrics)
         if [[ -n "$haproxy_stats_csv" && "$haproxy_stats_csv" != "" ]]; then

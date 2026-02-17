@@ -135,12 +135,14 @@ const AgentStatusCard = ({ agent }) => {
           {agent.keepalive_state && agent.keepalive_state !== 'NONE' && (
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
               <Text type="secondary">Keepalive:</Text>
-              <Tag 
-                color={agent.keepalive_state === 'MASTER' ? 'green' : 'orange'}
-                style={{ margin: 0, fontSize: 11 }}
-              >
-                {agent.keepalive_state}
-              </Tag>
+              <Tooltip title={agent.keepalive_ip ? `VIP: ${agent.keepalive_ip}` : agent.keepalive_state}>
+                <Tag 
+                  color={agent.keepalive_state === 'MASTER' ? 'green' : 'orange'}
+                  style={{ margin: 0, fontSize: 11, cursor: 'pointer' }}
+                >
+                  {agent.keepalive_state}
+                </Tag>
+              </Tooltip>
             </div>
           )}
         </div>
