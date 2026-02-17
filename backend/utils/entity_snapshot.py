@@ -129,12 +129,31 @@ async def save_entity_snapshot(
                     # Everything else: convert to string
                     serializable_old_values[key] = str(value)
         
+        # CRITICAL FIX: Serialize new_values the same way as old_values
+        # Without this, datetime objects in new_values (e.g., expiry_date from SSL update)
+        # cause the final JSON serialization test to FAIL, resulting in empty snapshot ({})
+        # which means reject/rollback can NEVER find the snapshot to restore old values
+        serializable_new_values = {}
+        if new_values:
+            for key, value in new_values.items():
+                try:
+                    json_test.dumps(value)
+                    serializable_new_values[key] = value
+                except (TypeError, ValueError):
+                    if value is None:
+                        serializable_new_values[key] = None
+                    elif hasattr(value, 'isoformat'):
+                        serializable_new_values[key] = str(value)
+                    else:
+                        serializable_new_values[key] = str(value)
+        
         # Calculate changed fields for UPDATE operations
+        # Compare serialized old_values with serialized new_values for consistent comparison
         changed_fields = []
-        if operation in ["UPDATE", "UPDATE_RESTORE"] and new_values:
+        if operation in ["UPDATE", "UPDATE_RESTORE"] and serializable_new_values:
             changed_fields = [
-                field for field, new_val in new_values.items()
-                if field in old_values and old_values[field] != new_val
+                field for field, new_val in serializable_new_values.items()
+                if field in serializable_old_values and serializable_old_values[field] != new_val
             ]
         
         # Build snapshot
@@ -148,10 +167,10 @@ async def save_entity_snapshot(
         }
         
         # For UPDATE: add new_values (compaction - only changed fields)
-        if operation in ["UPDATE", "UPDATE_RESTORE"] and new_values:
+        if operation in ["UPDATE", "UPDATE_RESTORE"] and serializable_new_values:
             # Only store changed fields to save space (compaction)
             snapshot["new_values"] = {
-                field: new_values[field]
+                field: serializable_new_values[field]
                 for field in changed_fields
             }
         
