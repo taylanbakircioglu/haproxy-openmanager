@@ -87,7 +87,7 @@ const EntitySyncStatus = ({
     }
 
     const checkSyncStatus = () => {
-      console.log(`🔍 ENTITY SYNC STATUS: ${entityType}/${entityId} - lastConfigStatus: ${lastConfigStatus}, isProgressActive: ${isProgressActive()}, realSyncData:`, realSyncData);
+      console.log(`ENTITY SYNC STATUS: ${entityType}/${entityId} - lastConfigStatus: ${lastConfigStatus}, isProgressActive: ${isProgressActive()}, realSyncData:`, realSyncData);
       
       // ENTERPRISE LOGIC: Version-based tracking for accurate sync status
       // 1. PENDING entity → Show "PENDING" (not applied yet, not sent to agents)
@@ -99,7 +99,7 @@ const EntitySyncStatus = ({
       // IMMEDIATE CHECK: Handle PENDING status without waiting for API data
       if (lastConfigStatus === 'PENDING') {
         setSyncStatus('pending');  // PENDING entities show "PENDING", not "APPLYING"
-        console.log(`🎯 ENTERPRISE LOGIC: ${entityType}/${entityId} - Entity is PENDING, showing PENDING (not applied yet)`);
+        console.log(`SYNC: ${entityType}/${entityId} - Entity is PENDING, showing PENDING (not applied yet)`);
         return;
       }
 
@@ -132,10 +132,10 @@ const EntitySyncStatus = ({
           
           if (isInChangedList) {
             isEntityInLatestApply = true;
-            console.log(`🎯 METADATA CHECK: ${entityType}/${entityId} - Entity IS in changed_entities list, showing in latest apply`);
+            console.log(`SYNC METADATA: ${entityType}/${entityId} - Entity IS in changed_entities list, showing in latest apply`);
           } else {
             isEntityInLatestApply = false;
-            console.log(`🎯 METADATA CHECK: ${entityType}/${entityId} - Entity NOT in changed_entities list, showing as already synced`);
+            console.log(`SYNC METADATA: ${entityType}/${entityId} - Entity NOT in changed_entities list, showing as already synced`);
           }
         } else if (entity_updated_at && latest_version_created_at) {
           // Fallback to timestamp-based detection (for non-restore operations)
@@ -158,9 +158,9 @@ const EntitySyncStatus = ({
             const agentsNotSynced = synced_agents < total_agents;
             isEntityInLatestApply = entityUpdatedAfterVersion && withinReasonableWindow;
             
-            console.log(`🔍 ENTERPRISE TRACKING: ${entityType}/${entityId} - entity_time: ${entity_updated_at}, version_time: ${latest_version_created_at}, diff: ${timeDiffMinutes.toFixed(1)}min, updated_after: ${entityUpdatedAfterVersion}, agents_synced: ${synced_agents}/${total_agents}, in_latest: ${isEntityInLatestApply}`);
+            console.log(`SYNC TRACKING: ${entityType}/${entityId} - entity_time: ${entity_updated_at}, version_time: ${latest_version_created_at}, diff: ${timeDiffMinutes.toFixed(1)}min, updated_after: ${entityUpdatedAfterVersion}, agents_synced: ${synced_agents}/${total_agents}, in_latest: ${isEntityInLatestApply}`);
           } catch (error) {
-            console.log(`🔍 VERSION TRACKING ERROR: ${entityType}/${entityId} - ${error.message}`);
+            console.log(`SYNC TRACKING ERROR: ${entityType}/${entityId} - ${error.message}`);
             isEntityInLatestApply = false;
           }
         }
@@ -169,47 +169,54 @@ const EntitySyncStatus = ({
           if (isEntityInLatestApply) {
             // Entity was part of latest apply - check agent sync status
             if (synced_agents < total_agents) {
-              // Check for timeout: if applying for more than 10 minutes, show PARTIAL
-              const APPLYING_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
-              let elapsedMs = 0;
-              
-              if (latest_version_created_at) {
-                try {
-                  const versionTime = new Date(latest_version_created_at);
-                  elapsedMs = Date.now() - versionTime.getTime();
-                } catch (e) {
-                  console.warn(`Failed to parse version time for timeout check: ${e.message}`);
+              // SSL certificates have a special "incomplete" state for long-running deployments
+              // Other entities (frontend, backend, waf) keep showing APPLYING until all agents sync
+              if (entityType === 'ssl_certificates') {
+                const SSL_DEPLOY_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+                let elapsedMs = 0;
+                
+                if (latest_version_created_at) {
+                  try {
+                    const versionTime = new Date(latest_version_created_at);
+                    elapsedMs = Date.now() - versionTime.getTime();
+                  } catch (e) {
+                    console.warn(`Failed to parse version time for timeout check: ${e.message}`);
+                  }
                 }
-              }
-              
-              if (elapsedMs > APPLYING_TIMEOUT_MS) {
-                setSyncStatus('partial');
-                console.log(`🎯 ENTERPRISE LOGIC: ${entityType}/${entityId} - TIMEOUT: applying for ${Math.round(elapsedMs / 60000)}min (>${APPLYING_TIMEOUT_MS/60000}min), ${synced_agents}/${total_agents} synced, showing PARTIAL`);
+                
+                if (elapsedMs > SSL_DEPLOY_TIMEOUT_MS) {
+                  setSyncStatus('ssl_incomplete');
+                  console.log(`SYNC: ${entityType}/${entityId} - SSL deployment incomplete: ${Math.round(elapsedMs / 60000)}min elapsed, ${synced_agents}/${total_agents} synced`);
+                } else {
+                  setSyncStatus('applying');
+                  console.log(`SYNC: ${entityType}/${entityId} - SSL deploying, agents not synced (${synced_agents}/${total_agents}), showing APPLYING`);
+                }
               } else {
+                // Non-SSL entities: always show APPLYING until all agents sync (original behavior)
                 setSyncStatus('applying');
-                console.log(`🎯 ENTERPRISE LOGIC: ${entityType}/${entityId} - In latest apply, agents not synced (${synced_agents}/${total_agents}), showing APPLYING`);
+                console.log(`SYNC: ${entityType}/${entityId} - In latest apply, agents not synced (${synced_agents}/${total_agents}), showing APPLYING`);
               }
             } else {
               setSyncStatus('synced');
-              console.log(`🎯 ENTERPRISE LOGIC: ${entityType}/${entityId} - In latest apply, all agents synced (${synced_agents}/${total_agents}), showing SYNCED`);
+              console.log(`SYNC: ${entityType}/${entityId} - In latest apply, all agents synced (${synced_agents}/${total_agents}), showing SYNCED`);
             }
           } else {
             // Entity not in latest apply - already synced from previous operations
             setSyncStatus('synced');
-            console.log(`🎯 ENTERPRISE LOGIC: ${entityType}/${entityId} - Not in latest apply, showing SYNCED (already synced from previous operations)`);
+            console.log(`SYNC: ${entityType}/${entityId} - Not in latest apply, showing SYNCED (already synced from previous operations)`);
           }
           return;
         } else {
           // APPLIED entity but no API data yet - show loading state briefly
           setSyncStatus('loading');
-          console.log(`🔍 ENTERPRISE LOGIC: ${entityType}/${entityId} - APPLIED entity, waiting for API data`);
+          console.log(`SYNC: ${entityType}/${entityId} - APPLIED entity, waiting for API data`);
           return;
         }
       }
 
       // Default case for unknown config status
       setSyncStatus('unknown');
-      console.log(`🔍 ENTERPRISE LOGIC: ${entityType}/${entityId} - Unknown config status: ${lastConfigStatus}`);
+      console.log(`SYNC: ${entityType}/${entityId} - Unknown config status: ${lastConfigStatus}`);
     };
 
     checkSyncStatus();
@@ -233,10 +240,10 @@ const EntitySyncStatus = ({
           tooltip: 'Applying changes to agents...'
         };
       
-      case 'partial': {
+      case 'ssl_incomplete': {
         const syncedCount = realSyncData?.synced_agents || 0;
         const totalCount = realSyncData?.total_agents || 0;
-        const offlineCount = realSyncData?.offline_agents || (totalCount - syncedCount);
+        const unreachableCount = totalCount - syncedCount;
         let elapsedMin = '?';
         try {
           if (realSyncData?.latest_version_created_at) {
@@ -244,10 +251,10 @@ const EntitySyncStatus = ({
           }
         } catch (_) { /* ignore */ }
         return {
-          status: 'PARTIAL',
+          status: 'INCOMPLETE',
           color: 'orange',
           icon: <ExclamationCircleOutlined />,
-          tooltip: `${syncedCount}/${totalCount} agents synced. ${offlineCount} agent(s) may be offline. (Elapsed: ${elapsedMin}m)`
+          tooltip: `SSL deployment incomplete: ${syncedCount}/${totalCount} agents synced, ${unreachableCount} agent(s) not responding (${elapsedMin} min elapsed)`
         };
       }
       

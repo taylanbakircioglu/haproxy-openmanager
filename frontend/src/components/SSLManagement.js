@@ -115,7 +115,7 @@ const SSLManagement = () => {
       });
       // Handle different response formats
       const certs = response.data.certificates || response.data || [];
-      console.log('🎯 SSL FETCH DEBUG: Response structure:', {
+      console.log('SSL FETCH DEBUG: Response structure:', {
         'response.data': Object.keys(response.data),
         'certificates count': certs.length,
         'sample cert': certs[0] ? {
@@ -164,8 +164,7 @@ const SSLManagement = () => {
     if (!selectedCluster) return;
     
     try {
-      console.log('🎯 SSL APPLY DEBUG: Checking pending changes for cluster:', selectedCluster.id);
-      console.log('🔄 Frontend deployment check - v2.0');
+      console.log('SSL APPLY DEBUG: Checking pending changes for cluster:', selectedCluster.id);
       const response = await axios.get(`/api/clusters/${selectedCluster.id}/config-versions`, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`
@@ -173,10 +172,10 @@ const SSLManagement = () => {
       });
       
       const versions = response.data.config_versions || response.data.versions || response.data || [];
-      console.log('🎯 SSL APPLY DEBUG: Versions type:', typeof versions, 'Array?', Array.isArray(versions), 'Value:', versions);
+      console.log('SSL APPLY DEBUG: Versions type:', typeof versions, 'Array?', Array.isArray(versions), 'Value:', versions);
       
       if (!Array.isArray(versions)) {
-        console.error('🎯 SSL APPLY DEBUG: versions is not an array!', versions);
+        console.error('SSL APPLY DEBUG: versions is not an array!', versions);
         setPendingChanges(false);
         return;
       }
@@ -186,14 +185,14 @@ const SSLManagement = () => {
         version.version_name.includes('ssl-')
       );
       
-      console.log('🎯 SSL APPLY DEBUG: Total versions:', versions.length);
-      console.log('🎯 SSL APPLY DEBUG: SSL pending versions:', pendingVersions.length);
-      console.log('🎯 SSL APPLY DEBUG: Pending SSL versions:', pendingVersions.map(v => v.version_name));
+      console.log('SSL APPLY DEBUG: Total versions:', versions.length);
+      console.log('SSL APPLY DEBUG: SSL pending versions:', pendingVersions.length);
+      console.log('SSL APPLY DEBUG: Pending SSL versions:', pendingVersions.map(v => v.version_name));
       
       setPendingChanges(pendingVersions.length > 0);
       
     } catch (error) {
-      console.error('🎯 SSL APPLY DEBUG: Failed to check pending changes:', error);
+      console.error('SSL APPLY DEBUG: Failed to check pending changes:', error);
       setPendingChanges(false);
     }
   };
@@ -282,7 +281,7 @@ const SSLManagement = () => {
             <div>
               <div><strong>SSL certificate deleted successfully</strong></div>
               <div style={{ marginTop: 4, fontSize: '12px' }}>
-                ✅ {successCount}/{totalNodes} nodes updated successfully
+                {successCount}/{totalNodes} nodes updated successfully
               </div>
             </div>,
             6
@@ -292,8 +291,8 @@ const SSLManagement = () => {
             <div>
               <div><strong>SSL certificate deleted with warnings</strong></div>
               <div style={{ marginTop: 4, fontSize: '12px' }}>
-                ✅ {successCount}/{totalNodes} nodes updated successfully
-                <br />⚠️ Some nodes may need manual cleanup
+                {successCount}/{totalNodes} nodes updated successfully
+                <br />Some nodes may need manual cleanup
               </div>
             </div>,
             8
@@ -339,7 +338,7 @@ const SSLManagement = () => {
             <div>
               <div><strong>SSL certificate {isEditing ? 'updated' : 'added'} successfully</strong></div>
               <div style={{ marginTop: 4, fontSize: '12px' }}>
-                ✅ {successCount}/{totalNodes} nodes updated successfully
+                {successCount}/{totalNodes} nodes updated successfully
               </div>
             </div>,
             6
@@ -349,8 +348,8 @@ const SSLManagement = () => {
             <div>
               <div><strong>SSL certificate {isEditing ? 'updated' : 'added'} with warnings</strong></div>
               <div style={{ marginTop: 4, fontSize: '12px' }}>
-                ✅ {successCount}/{totalNodes} nodes updated successfully
-                <br />⚠️ Some nodes may need manual certificate deployment
+                {successCount}/{totalNodes} nodes updated successfully
+                <br />Some nodes may need manual certificate deployment
               </div>
             </div>,
             8
@@ -864,7 +863,7 @@ const SSLManagement = () => {
                   { required: true, message: 'Please enter certificate name' },
                   { pattern: /^[a-zA-Z0-9_-]+$/, message: 'Only alphanumeric, underscore and dash allowed' }
                 ]}
-                extra={selectedCertificate && selectedCertificate.id ? "🔒 Certificate name cannot be changed (used as file path on servers)" : "Used as file path: /etc/ssl/haproxy/{name}.pem"}
+                extra={selectedCertificate && selectedCertificate.id ? "Certificate name cannot be changed (used as file path on servers)" : "Used as file path: /etc/ssl/haproxy/{name}.pem"}
                 tooltip={selectedCertificate && selectedCertificate.id ? "Certificate name is immutable after creation to maintain file system references" : null}
               >
                 <Input 
@@ -1006,8 +1005,8 @@ MIIDXTCCAkWgAwIBAgIJAKoK/OvD...
                     }
                   ]}
                   extra={isRequired ? 
-                    <span style={{ color: '#ff4d4f' }}>⚠️ Required for Frontend SSL</span> : 
-                    <span style={{ color: '#52c41a' }}>✓ Optional for Server SSL (used for backend verification)</span>
+                    <span style={{ color: '#ff4d4f' }}>Required for Frontend SSL</span> : 
+                    <span style={{ color: '#52c41a' }}>Optional for Server SSL (used for backend verification)</span>
                   }
                 >
                   <TextArea

@@ -271,7 +271,7 @@ const ApplyManagement = () => {
             const key = `${entity.type}-${entity.id}`;
             // 404 means entity was deleted - consider it as synced
             if (error.response && error.response.status === 404) {
-              console.log(`🗑️ ENTITY DELETED: ${entity.type}/${entity.id} - marking as synced (successfully removed)`);
+              console.log(`ENTITY DELETED: ${entity.type}/${entity.id} - marking as synced (successfully removed)`);
               newSyncStates[key] = { status: 'synced', synced_agents: 1, total_agents: 1 };
             } else {
               console.error(`Failed to fetch sync state for ${entity.type}/${entity.id}:`, error);
@@ -312,19 +312,19 @@ const ApplyManagement = () => {
             const syncStatus = response.data.sync_status;
             // If sync_status is null or has 0 enabled agents, consider as synced - nothing to wait for
             if (!syncStatus || syncStatus.total_agents === 0) {
-              console.log(`🔍 REAL SYNC CHECK: ${entity.type}/${entity.id} - No enabled agents, considering as synced`);
+              console.log(`REAL SYNC CHECK: ${entity.type}/${entity.id} - No enabled agents, considering as synced`);
               return true;
             }
             const isFullySynced = syncStatus?.synced_agents === syncStatus?.total_agents && 
                                  syncStatus?.synced_agents > 0;
             
-            console.log(`🔍 REAL SYNC CHECK: ${entity.type}/${entity.id} - ${syncStatus?.synced_agents}/${syncStatus?.total_agents} - ${isFullySynced ? 'SYNCED' : 'PENDING'}`);
+            console.log(`REAL SYNC CHECK: ${entity.type}/${entity.id} - ${syncStatus?.synced_agents}/${syncStatus?.total_agents} - ${isFullySynced ? 'SYNCED' : 'PENDING'}`);
             
             return isFullySynced;
           } catch (error) {
             // 404 means entity was deleted - consider it as synced (successfully removed)
             if (error.response && error.response.status === 404) {
-              console.log(`🗑️ ENTITY DELETED: ${entity.type}/${entity.id} - considering as synced (successfully removed)`);
+              console.log(`ENTITY DELETED: ${entity.type}/${entity.id} - considering as synced (successfully removed)`);
               return true;
             }
             console.error(`Failed to verify sync for ${entity.type}/${entity.id}:`, error);
@@ -334,7 +334,7 @@ const ApplyManagement = () => {
       );
       
       const allSynced = syncResults.every(result => result === true);
-      console.log(`🔍 REAL SYNC VERIFICATION: ${syncResults.filter(r => r).length}/${syncResults.length} entities synced - Overall: ${allSynced ? 'ALL SYNCED' : 'PENDING'}`);
+      console.log(`REAL SYNC VERIFICATION: ${syncResults.filter(r => r).length}/${syncResults.length} entities synced - Overall: ${allSynced ? 'ALL SYNCED' : 'PENDING'}`);
       
       return allSynced;
     } catch (error) {
@@ -352,22 +352,22 @@ const ApplyManagement = () => {
     }
 
     Modal.confirm({
-      title: '🚀 Apply All Configuration Changes',
+      title: 'Apply All Configuration Changes',
       content: (
         <div>
           <p>You are about to apply <strong>{effectiveTotal}</strong> pending changes:</p>
           <ul style={{ marginTop: 10, marginBottom: 10 }}>
             {pendingChanges.frontends.length > 0 && (
-              <li>✅ <strong>{pendingChanges.frontends.length}</strong> Frontend changes</li>
+              <li><strong>{pendingChanges.frontends.length}</strong> Frontend changes</li>
             )}
             {pendingChanges.backends.length > 0 && (
-              <li>✅ <strong>{pendingChanges.backends.length}</strong> Backend changes</li>
+              <li><strong>{pendingChanges.backends.length}</strong> Backend changes</li>
             )}
             {pendingChanges.waf_rules.length > 0 && (
-              <li>✅ <strong>{pendingChanges.waf_rules.length}</strong> WAF rule changes</li>
+              <li><strong>{pendingChanges.waf_rules.length}</strong> WAF rule changes</li>
             )}
             {pendingChanges.ssl_certificates.length > 0 && (
-              <li>✅ <strong>{pendingChanges.ssl_certificates.length}</strong> SSL certificate changes</li>
+              <li><strong>{pendingChanges.ssl_certificates.length}</strong> SSL certificate changes</li>
             )}
           </ul>
           <Alert
@@ -660,22 +660,22 @@ const ApplyManagement = () => {
     }
 
     Modal.confirm({
-      title: '🗑️ Reject All Configuration Changes',
+      title: 'Reject All Configuration Changes',
       content: (
         <div>
           <p>You are about to reject <strong>{effectiveTotal}</strong> pending changes:</p>
           <ul style={{ marginTop: 10, marginBottom: 10 }}>
             {pendingChanges.frontends.length > 0 && (
-              <li>❌ <strong>{pendingChanges.frontends.length}</strong> Frontend changes</li>
+              <li><strong>{pendingChanges.frontends.length}</strong> Frontend changes</li>
             )}
             {pendingChanges.backends.length > 0 && (
-              <li>❌ <strong>{pendingChanges.backends.length}</strong> Backend changes</li>
+              <li><strong>{pendingChanges.backends.length}</strong> Backend changes</li>
             )}
             {pendingChanges.waf_rules.length > 0 && (
-              <li>❌ <strong>{pendingChanges.waf_rules.length}</strong> WAF rule changes</li>
+              <li><strong>{pendingChanges.waf_rules.length}</strong> WAF rule changes</li>
             )}
             {pendingChanges.ssl_certificates.length > 0 && (
-              <li>❌ <strong>{pendingChanges.ssl_certificates.length}</strong> SSL certificate changes</li>
+              <li><strong>{pendingChanges.ssl_certificates.length}</strong> SSL certificate changes</li>
             )}
           </ul>
           <Alert
