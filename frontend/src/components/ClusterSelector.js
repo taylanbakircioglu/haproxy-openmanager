@@ -85,31 +85,18 @@ const ClusterSelector = () => {
   const isUnselected = !selectedCluster;
 
   return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: '10px',
-      minWidth: 0,
-      padding: '4px 12px',
-      borderRadius: 8,
-      background: isUnselected ? 'rgba(24, 144, 255, 0.06)' : 'rgba(24, 144, 255, 0.03)',
-      border: isUnselected ? '1.5px dashed rgba(24, 144, 255, 0.45)' : '1px solid transparent',
-      transition: 'all 0.3s ease',
-      animation: isUnselected ? 'clusterPulse 2.5s ease-in-out infinite' : 'none',
-    }}>
-      <style>{`
-        @keyframes clusterPulse {
-          0%, 100% { border-color: rgba(24, 144, 255, 0.25); background: rgba(24, 144, 255, 0.04); }
-          50% { border-color: rgba(24, 144, 255, 0.55); background: rgba(24, 144, 255, 0.09); }
-        }
-      `}</style>
-      <CloudServerOutlined style={{ color: '#1890ff', flexShrink: 0, fontSize: 16 }} />
+    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
       {isUnselected && (
-        <span style={{ fontSize: 12, color: '#1890ff', fontWeight: 500, whiteSpace: 'nowrap', flexShrink: 0 }}>
-          Cluster:
-        </span>
+        <style>{`
+          .cluster-select-unselected .ant-select-selector {
+            border-color: #1890ff !important;
+            box-shadow: 0 0 0 2px rgba(24, 144, 255, 0.15) !important;
+          }
+        `}</style>
       )}
+      <CloudServerOutlined style={{ color: '#1890ff', flexShrink: 0 }} />
       <Select
+        className={isUnselected ? 'cluster-select-unselected' : undefined}
         value={selectedCluster?.id}
         showSearch
         style={{
@@ -117,7 +104,7 @@ const ClusterSelector = () => {
           minWidth: 180,
           maxWidth: 500,
         }}
-        placeholder="Select HAProxy Cluster"
+        placeholder="⬅ Select a Cluster"
         onChange={(clusterId) => {
           const cluster = clusters.find(c => c.id === clusterId);
           if (cluster) {
