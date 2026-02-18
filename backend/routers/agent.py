@@ -860,8 +860,8 @@ async def agent_heartbeat(agent_id: int, heartbeat_data: AgentHeartbeat):
                 hostname = COALESCE($2, hostname),
                 haproxy_status = COALESCE($3, haproxy_status),
                 haproxy_version = COALESCE($4, haproxy_version),
-                keepalive_state = CASE WHEN $5 IS NOT NULL THEN NULLIF($5, '') ELSE keepalive_state END,
-                keepalive_ip = CASE WHEN $6 IS NOT NULL THEN NULLIF($6, '') ELSE keepalive_ip END,
+                keepalive_state = CASE WHEN $5::text IS NOT NULL THEN NULLIF($5::text, '') ELSE keepalive_state END,
+                keepalive_ip = CASE WHEN $6::text IS NOT NULL THEN NULLIF($6::text, '') ELSE keepalive_ip END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
         """, agent_id, heartbeat_data.hostname, heartbeat_data.haproxy_status, heartbeat_data.haproxy_version,
@@ -1627,8 +1627,8 @@ async def agent_heartbeat_by_name(
                 haproxy_status = COALESCE($15, haproxy_status),
                 haproxy_version = COALESCE($16, haproxy_version),
                 applied_config_version = CASE WHEN $19 THEN $17 ELSE applied_config_version END,
-                keepalive_state = CASE WHEN $20 IS NOT NULL THEN NULLIF($20, '') ELSE keepalive_state END,
-                keepalive_ip = CASE WHEN $21 IS NOT NULL THEN NULLIF($21, '') ELSE keepalive_ip END,
+                keepalive_state = CASE WHEN $20::text IS NOT NULL THEN NULLIF($20::text, '') ELSE keepalive_state END,
+                keepalive_ip = CASE WHEN $21::text IS NOT NULL THEN NULLIF($21::text, '') ELSE keepalive_ip END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
         """, agent_id, heartbeat_data.hostname, detected_platform, 
