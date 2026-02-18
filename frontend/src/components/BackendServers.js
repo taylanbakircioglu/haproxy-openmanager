@@ -1047,28 +1047,28 @@ const BackendServers = () => {
       title: 'Servers',
       dataIndex: 'servers',
       key: 'servers',
+      width: 100,
       render: (servers = []) => {
-        // CRITICAL FIX: Handle null/undefined servers array for backends without servers
         if (!servers || !Array.isArray(servers)) {
           return (
-            <Space>
-              <Tag color="red">0</Tag>
-              <span>/0</span>
-              <Text type="secondary">active</Text>
-              <Tooltip title="No servers configured. Please add at least one server.">
-                <Tag color="warning" style={{ marginLeft: 4, fontSize: '10px' }}>⚠️ Empty</Tag>
-              </Tooltip>
-            </Space>
+            <Tooltip title="No servers configured. Please add at least one server.">
+              <Tag color="red" style={{ cursor: 'pointer' }}>0 / 0</Tag>
+            </Tooltip>
           );
         }
         const activeServers = servers.filter(s => s.is_active).length;
         const totalServers = servers.length;
+        const allActive = activeServers === totalServers;
+        const tooltipText = `${activeServers} active / ${totalServers} total server${totalServers !== 1 ? 's' : ''}`;
         return (
-          <Space>
-            <Tag color="green">{activeServers}</Tag>
-            <span>/{totalServers}</span>
-            <Text type="secondary">active</Text>
-          </Space>
+          <Tooltip title={tooltipText}>
+            <Tag
+              color={allActive ? 'green' : 'orange'}
+              style={{ cursor: 'default', fontWeight: 500 }}
+            >
+              {activeServers} / {totalServers}
+            </Tag>
+          </Tooltip>
         );
       },
     },
