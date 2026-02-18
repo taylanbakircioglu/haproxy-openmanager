@@ -14,6 +14,7 @@ Modern, web-based management interface for HAProxy load balancers with multi-clu
    - [Configuration Management](#configuration-management)
    - [Bulk Configuration Import](#bulk-configuration-import)
    - [Apply Management & Version Control](#apply-management--version-control)
+   - [IP Inventory - Cross-Cluster IP Search](#ip-inventory---cross-cluster-ip-search)
    - [Agent & Security Management](#agent--security-management)
 3. [Key Capabilities](#key-capabilities)
    - [Configuration & Entity Management](#configuration--entity-management)
@@ -33,6 +34,7 @@ Modern, web-based management interface for HAProxy load balancers with multi-clu
    - [Dashboard](#dashboard---main-overview--real-time-monitoring)
    - [Frontend Management](#frontend-management---virtual-host--routing-configuration)
    - [Backend Servers](#backend-servers---server-pool-management)
+   - [IP Inventory](#ip-inventory---cross-cluster-ip-search--discovery)
    - [SSL Certificates](#ssl-certificates---centralized-tlsssl-certificate-management)
    - [WAF Management](#waf-management---web-application-firewall)
    - [Configuration](#configuration---haproxy-config-file-management)
@@ -95,6 +97,8 @@ This architecture provides better security (no inbound connections to HAProxy se
 ✅ **WAF Rules** - Web Application Firewall management and deployment  
 ✅ **Agent Script Versioning** - Update agents via UI (Monaco editor) with auto-upgrade  
 ✅ **Token-Based Agent Auth** - Secure token management with revoke/renew  
+✅ **IP Inventory** - Cross-cluster IP search to identify agents, VIPs, and backend servers by IP  
+✅ **Keepalived VRRP Detection** - Automatic MASTER/BACKUP state and VIP detection from keepalived  
 ✅ **Role-Based User Management** - Admin and user roles with granular permissions and access control  
 ✅ **User Activity Audit Logs** - Complete audit trail of all system events  
 ✅ **REST API** - Full programmatic access for automation and CI/CD integration
@@ -111,6 +115,9 @@ This architecture provides better security (no inbound connections to HAProxy se
 
 **Dashboard** - Health Matrix showing backend servers with detailed health check status and response times
 ![Dashboard - Health Matrix](docs/screenshots/health-matrix.png)
+
+**Dashboard** - Response Time Heatmap (24h) with color-coded latency visualization per backend
+![Dashboard - Response Time Heatmap](docs/screenshots/response-time-heatmap.png)
 
 **Backend Management** - Backends & Servers tab with 165 servers across 56 backends, health status overview
 ![Backend Management - Backends & Servers](docs/screenshots/backends-servers.png)
@@ -154,6 +161,11 @@ This architecture provides better security (no inbound connections to HAProxy se
 
 **Version History** - Complete version history with restore capabilities and deployment status
 ![Version History - Timeline](docs/screenshots/version-history.png)
+
+### IP Inventory - Cross-Cluster IP Search
+
+**IP Inventory** - Unified view of all IPs across clusters with search capability to identify which cluster, agent, or backend server an IP belongs to
+![IP Inventory](docs/screenshots/ip-inventory.png)
 
 ### Agent & Security Management
 
@@ -618,6 +630,26 @@ The dashboard displays comprehensive real-time metrics collected by agents from 
 - **Backup Servers**: Failover server configuration for high availability
 - **Connection Limits**: Per-server connection and rate limiting
 - **Monitoring Dashboard**: Real-time server status and performance metrics
+
+### 🔍 **IP Inventory** - *Cross-Cluster IP Search & Discovery*
+
+The IP Inventory page provides a unified view of all IP addresses across every cluster, independent of the global cluster selector. It enables quick identification of which cluster, agent, or backend server a given IP belongs to.
+
+**Key Features:**
+- **Cross-Cluster Search**: Search any IP address across all clusters simultaneously
+- **IP Type Identification**: Instantly determine if an IP is an agent server IP, a keepalived VIP, or a backend server address
+- **Unified Results Card**: Search results show matched IP type (Server IP, VIP, Backend), agent/server name, cluster association, and status
+- **Agent Tab**: Browse all agents with cluster name, hostname, agent IP, VIP (keepalive), VRRP state (MASTER/BACKUP), status, platform, and last seen time
+- **Backend Servers Tab**: Browse all backend servers with cluster, backend name, server address, status, weight, and check status
+- **Cluster Color Coding**: Each cluster is assigned a consistent color tag for quick visual identification
+- **Auto-Refresh**: Data refreshes automatically every 30 seconds
+- **Filters**: Filter by cluster and status within each tab
+
+**Use Cases:**
+- Identify which HAProxy cluster an IP belongs to during incident response
+- Find which agent is running as MASTER or BACKUP in a keepalived pair
+- Locate a backend server IP across multiple clusters
+- Audit all IP addresses managed by the platform
 
 ### 🔒 **SSL Certificates** - *Centralized TLS/SSL Certificate Management*
 
@@ -1413,6 +1445,7 @@ haproxy-openmanager/
 │   │   │   ├── ApplyManagement.js  # Apply changes
 │   │   │   ├── Configuration.js    # Config viewer
 │   │   │   ├── BulkConfigImport.js # Bulk import
+│   │   │   ├── IPInventory.js     # IP inventory & search
 │   │   │   ├── VersionHistory.js   # Version history
 │   │   │   ├── UserManagement.js   # User management
 │   │   │   ├── Security.js         # Security & tokens
