@@ -16,7 +16,8 @@ import {
   MenuUnfoldOutlined,
   PlayCircleOutlined,
   CloudUploadOutlined,
-  ApiOutlined
+  ApiOutlined,
+  SearchOutlined
 } from '@ant-design/icons';
 
 import Dashboard from './components/DashboardV2';
@@ -38,6 +39,7 @@ import ClusterSelector from './components/ClusterSelector';
 import ClusterManagement from './components/ClusterManagement';
 import Configuration from './components/Configuration';
 import APIDocumentation from './components/APIDocumentation';
+import IPInventory from './components/IPInventory';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ClusterProvider } from './contexts/ClusterContext';
 import { ThemeProvider, useTheme } from './contexts/ThemeContext';
@@ -106,6 +108,11 @@ const { Text } = Typography;
       key: '/pools',
       icon: <GlobalOutlined />,
       label: <Link to="/pools">Agent Pools</Link>,
+    },
+    {
+      key: '/ip-inventory',
+      icon: <SearchOutlined />,
+      label: <Link to="/ip-inventory">IP Inventory</Link>,
     },
     {
       key: '/users',
@@ -290,7 +297,14 @@ function AppContent() {
               </div>
             </div>
             <div style={{ flex: 1, display: 'flex', justifyContent: 'center', padding: '0 16px', minWidth: 0 }}>
-              <ClusterSelector />
+              {location.pathname === '/ip-inventory' ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#8c8c8c' }}>
+                  <GlobalOutlined />
+                  <span style={{ fontWeight: 500 }}>All Clusters</span>
+                </div>
+              ) : (
+                <ClusterSelector />
+              )}
             </div>
             <div style={{ padding: '0 24px' }}>
               <Dropdown
@@ -341,6 +355,7 @@ function AppContent() {
               <Route path="/pools" element={<PoolManagement />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/clusters" element={<ClusterManagement />} />
+              <Route path="/ip-inventory" element={<IPInventory />} />
             </Routes>
           </Content>
                 </Layout>
