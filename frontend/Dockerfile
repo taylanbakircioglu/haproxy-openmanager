@@ -20,7 +20,7 @@ RUN npm cache clean --force \
     && npm config set fetch-retry-maxtimeout 300000 \
     && npm config set fetch-timeout 600000 \
     && npm config set registry https://registry.npmjs.org/ \
-    && npm install --no-audit --no-fund --progress=false --legacy-peer-deps --timeout=600000 \
+    && npm install --no-audit --no-fund --progress=false --timeout=600000 \
     && npm cache clean --force
 
 # Copy source code
