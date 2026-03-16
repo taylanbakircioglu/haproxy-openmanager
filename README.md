@@ -44,6 +44,7 @@ Modern, web-based management interface for HAProxy load balancers with multi-clu
 7. [📦 Installation](#installation)
    - [Docker Installation](#docker-installation)
    - [Kubernetes/OpenShift Installation](#kubernetesopenshift-installation)
+   - [Standalone Installation](docs/STANDALONE_INSTALL.md)
    - [Local Development](#local-development)
 8. [📋 Configuration](#configuration-1)
 9. [🔌 API Reference](#api-reference)
@@ -986,7 +987,7 @@ Choose your preferred installation method:
 
 <table>
 <tr>
-<td width="50%" align="center">
+<td width="33%" align="center">
 
 ### 🐳 Docker Installation
 **Recommended for:**
@@ -997,7 +998,7 @@ Choose your preferred installation method:
 [Jump to Docker Installation ↓](#docker-installation)
 
 </td>
-<td width="50%" align="center">
+<td width="33%" align="center">
 
 ### ☸️ Kubernetes/OpenShift Installation
 **Recommended for:**
@@ -1006,6 +1007,17 @@ Choose your preferred installation method:
 - Enterprise deployments
 
 [Jump to Kubernetes Installation ↓](#kubernetesopenshift-installation)
+
+</td>
+<td width="33%" align="center">
+
+### 🖥️ Standalone Installation
+**Recommended for:**
+- Bare-metal servers, VMs, LXC
+- No Docker or Kubernetes required
+- Full control over services
+
+[Standalone Install Guide →](docs/STANDALONE_INSTALL.md)
 
 </td>
 </tr>
