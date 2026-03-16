@@ -35,11 +35,13 @@ services:
       timeout: 3s
       retries: 5
 
-  # Backend API
+  # Backend API - pulls from Docker Hub by default
+  # To build locally instead, uncomment the build section and run: docker compose build backend
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: taylanbakircioglu/haproxy-openmanager-backend:latest
+    # build:
+    #   context: ./backend
+    #   dockerfile: Dockerfile
     container_name: haproxy-openmanager-backend
     environment:
       - DATABASE_URL=postgresql://haproxy_user:haproxy_pass@postgres:5432/haproxy_openmanager
@@ -50,7 +52,6 @@ services:
       - PUBLIC_URL=http://localhost:8080
       - MANAGEMENT_BASE_URL=http://localhost:8080
     volumes:
-      - ./backend:/app
       - haproxy_configs:/etc/haproxy
     expose:
       - "8000"
@@ -62,17 +63,19 @@ services:
     networks:
       - haproxy-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
 
-  # Frontend React App
+  # Frontend React App - pulls from Docker Hub by default
+  # To build locally instead, uncomment the build section and run: docker compose build frontend
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    image: taylanbakircioglu/haproxy-openmanager-frontend:latest
+    # build:
+    #   context: ./frontend
+    #   dockerfile: Dockerfile
     container_name: haproxy-openmanager-frontend
     environment:
       - REACT_APP_API_URL=
