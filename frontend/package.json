@@ -52,5 +52,9 @@
       "last 1 safari version"
     ]
   },
-  "proxy": "http://backend:8000"
+  "proxy": "http://backend:8000",
+  "overrides": {
+    "@babel/core": "^7.24.0",
+    "@babel/plugin-proposal-private-property-in-object": "^7.21.0"
+  }
 }
