@@ -15,6 +15,7 @@ import axios from 'axios';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useCluster } from '../contexts/ClusterContext';
 import { VersionHistory } from './VersionHistory';
+import ACLRuleBuilder from './ACLRuleBuilder';
 
 // Error Boundary Component
 class FrontendErrorBoundary extends React.Component {
@@ -126,6 +127,8 @@ const FrontendManagement = () => {
   const [pendingChanges, setPendingChanges] = useState(false);
   const [versionModalVisible, setVersionModalVisible] = useState(false);
   const [selectedEntityForVersion, setSelectedEntityForVersion] = useState(null);
+  const [aclBuilderData, setAclBuilderData] = useState({ aclRules: [], useBackendRules: [], redirectRules: [] });
+  const [aclBuilderKey, setAclBuilderKey] = useState(0);
   const [form] = Form.useForm();
 
   // SSL visibility control - fields start visible for proper form registration
@@ -174,12 +177,16 @@ const FrontendManagement = () => {
       if (frontendToEdit) {
         // Open edit modal for the frontend
         setEditingFrontend(frontendToEdit);
+        setAclBuilderData({
+          aclRules: frontendToEdit.acl_rules || [],
+          useBackendRules: frontendToEdit.use_backend_rules || [],
+          redirectRules: frontendToEdit.redirect_rules || [],
+        });
+        setAclBuilderKey(k => k + 1);
         form.setFieldsValue({
           ...frontendToEdit,
           ssl_enabled: frontendToEdit.ssl_enabled || false,
           ssl_certificate_ids: frontendToEdit.ssl_certificate_ids || [],
-          acl_rules: frontendToEdit.acl_rules || [],
-          use_backend_rules: frontendToEdit.use_backend_rules || [],
         });
         setModalVisible(true);
         
@@ -562,7 +569,9 @@ const FrontendManagement = () => {
       ssl_enabled: false,
       ssl_certificate_ids: []
     });
-    
+    setAclBuilderData({ aclRules: [], useBackendRules: [], redirectRules: [] });
+    setAclBuilderKey(k => k + 1);
+
     // Update SSL field visibility for new frontend
     setTimeout(() => {
       updateSSLVisibility(false);
@@ -603,31 +612,18 @@ const FrontendManagement = () => {
       sslCertIds = [frontend.ssl_certificate_id];
     }
     
-    // Format ACL rules for textarea (array to multi-line string)
-    let formattedAclRules = frontend.acl_rules;
-    if (Array.isArray(frontend.acl_rules)) {
-      formattedAclRules = frontend.acl_rules.join('\n');
-    }
-    
-    // Format redirect rules for textarea (array to multi-line string)
-    let formattedRedirectRules = frontend.redirect_rules;
-    if (Array.isArray(frontend.redirect_rules)) {
-      formattedRedirectRules = frontend.redirect_rules.join('\n');
-    }
-    
-    // Format use_backend rules for textarea (array to multi-line string)
-    let formattedUseBackendRules = frontend.use_backend_rules;
-    if (Array.isArray(frontend.use_backend_rules)) {
-      formattedUseBackendRules = frontend.use_backend_rules.join('\n');
-    }
-    
+    // Parse ACL rules for ACLRuleBuilder (keep as arrays)
+    setAclBuilderData({
+      aclRules: Array.isArray(frontend.acl_rules) ? frontend.acl_rules : [],
+      useBackendRules: Array.isArray(frontend.use_backend_rules) ? frontend.use_backend_rules : [],
+      redirectRules: Array.isArray(frontend.redirect_rules) ? frontend.redirect_rules : [],
+    });
+    setAclBuilderKey(k => k + 1);
+
     form.setFieldsValue({
       ...frontend,
       ssl_enabled: frontend.ssl_enabled || false,
       ssl_certificate_ids: sslCertIds,
-      acl_rules: formattedAclRules,
-      redirect_rules: formattedRedirectRules,
-      use_backend_rules: formattedUseBackendRules,
       // Explicitly set options field to handle null/undefined case (NEW field)
       options: frontend.options || '',
       // BUGFIX: Explicitly set tcp_request_rules field to handle null/undefined case
@@ -789,7 +785,10 @@ const FrontendManagement = () => {
       
       const requestData = {
         ...values,
-        cluster_id: selectedCluster.id
+        cluster_id: selectedCluster.id,
+        acl_rules: aclBuilderData.aclRules || [],
+        use_backend_rules: aclBuilderData.useBackendRules || [],
+        redirect_rules: aclBuilderData.redirectRules || [],
       };
       
       // DEBUG: Log request data to see final payload
@@ -1759,58 +1758,16 @@ const FrontendManagement = () => {
               </Row>
             </Panel>
 
-            {/* ACL Rules */}
+            {/* ACL Rules -- Visual Builder */}
             <Panel header="Access Control Lists (ACL)" key="4" forceRender>
-              <Alert
-                message="ACL Rules"
-                description="Define rules to match requests and route them to specific backends. Each rule is evaluated in order."
-                type="info"
-                style={{ marginBottom: 16 }}
+              <ACLRuleBuilder
+                key={aclBuilderKey}
+                aclRules={aclBuilderData.aclRules}
+                useBackendRules={aclBuilderData.useBackendRules}
+                redirectRules={aclBuilderData.redirectRules}
+                backends={backends}
+                onChange={(data) => setAclBuilderData(data)}
               />
-              
-              <Form.Item
-                name="acl_rules"
-                label="ACL Rules"
-                extra="One rule per line. Format: acl_name condition value"
-              >
-                <TextArea
-                  rows={6}
-                  placeholder={`Examples:
-acl is_api path_beg /api
-acl is_static path_end .css .js .png .jpg
-acl is_admin src 192.168.1.0/24
-acl host_example hdr(host) -i example.com`}
-                />
-              </Form.Item>
-
-              <Form.Item
-                name="use_backend_rules"
-                label="Backend Routing Rules"
-                extra="Route requests to specific backends based on ACL conditions"
-              >
-                <TextArea
-                  rows={4}
-                  placeholder={`Examples:
-use_backend api_servers if is_api
-use_backend static_servers if is_static
-use_backend admin_servers if is_admin`}
-                />
-              </Form.Item>
-
-              <Form.Item
-                name="redirect_rules"
-                label="HTTP Redirect Rules"
-                extra="Define HTTP redirect rules (HTTP to HTTPS, domain redirects, etc.)"
-                tooltip="Redirect rules are applied before backend routing"
-              >
-                <TextArea
-                  rows={4}
-                  placeholder={`Examples:
-redirect scheme https if !{ ssl_fc }
-redirect prefix https://www.example.com code 301 if { hdr(host) -i example.com }
-redirect location https://newsite.com code 302`}
-                />
-              </Form.Item>
             </Panel>
 
             {/* Header Manipulation */}
