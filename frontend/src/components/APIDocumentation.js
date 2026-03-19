@@ -19,7 +19,7 @@ const APIDocumentation = () => {
       
       <Alert
         message="Interactive API Documentation Available"
-        description="HAProxy Open Manager provides comprehensive, interactive API documentation via Swagger UI and ReDoc. You can test API endpoints directly from the documentation interface."
+        description="HAProxy OpenManager provides comprehensive, interactive API documentation via Swagger UI and ReDoc. You can test API endpoints directly from the documentation interface."
         type="info"
         showIcon
         style={{ marginBottom: 24 }}
@@ -206,7 +206,7 @@ curl -X POST "${baseUrl}/api/backends" \\
       >
         <Title level={4}>Agent-Pull Architecture</Title>
         <Paragraph>
-          HAProxy Open Manager uses an <Text strong>agent-pull architecture</Text>:
+          HAProxy OpenManager uses an <Text strong>agent-pull architecture</Text>:
         </Paragraph>
         <ol>
           <li>
