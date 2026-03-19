@@ -14,7 +14,7 @@ import {
 import { 
   UserOutlined, 
   LockOutlined, 
-  SecurityScanOutlined 
+  ClusterOutlined 
 } from '@ant-design/icons';
 import axios from 'axios';
 import { useAuth } from '../contexts/AuthContext';
@@ -97,12 +97,12 @@ const Login = () => {
         >
           <Card className="login-card">
             <div className="login-header">
-              <SecurityScanOutlined className="login-icon" />
+              <ClusterOutlined className="login-icon" />
               <Title level={2} className="login-title">
-                HAProxy Management
+                HAProxy OpenManager
               </Title>
               <Text type="secondary" className="login-subtitle">
-                Sign in to your account
+                Multi-Cluster Load Balancer Management
               </Text>
             </div>
 
@@ -166,25 +166,9 @@ const Login = () => {
             </Form>
 
             <div className="login-footer">
-              <div className="demo-accounts">
-                <Title level={5} style={{ color: '#666', marginBottom: 8 }}>
-                  Demo Accounts:
-                </Title>
-                <div className="demo-account-list">
-                  <div className="demo-account">
-                    <Text strong>admin</Text> - Super Administrator
-                  </div>
-                  <div className="demo-account">
-                    <Text strong>operator1</Text> - Daily Operations
-                  </div>
-                  <div className="demo-account">
-                    <Text strong>security1</Text> - Security Management
-                  </div>
-                  <div className="demo-account">
-                    <Text strong>viewer1</Text> - Read-only Access
-                  </div>
-                </div>
-              </div>
+              <Text type="secondary" style={{ fontSize: 12, display: 'block', textAlign: 'center' }}>
+                Centralized management for multiple HAProxy clusters
+              </Text>
             </div>
           </Card>
         </Col>

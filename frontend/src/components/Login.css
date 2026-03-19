@@ -55,9 +55,9 @@
 }
 
 .login-icon {
-  font-size: 48px;
+  font-size: 52px;
   color: #1890ff;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
   display: block;
 }
 
@@ -149,34 +149,9 @@
 }
 
 .login-footer {
-  margin-top: 30px;
-  padding-top: 20px;
+  margin-top: 24px;
+  padding-top: 16px;
   border-top: 1px solid #f0f0f0;
-}
-
-.demo-accounts {
-  background: #fafafa;
-  border-radius: 8px;
-  padding: 16px;
-  border: 1px solid #f0f0f0;
-}
-
-.demo-account-list {
-  margin-top: 8px;
-}
-
-.demo-account {
-  padding: 4px 0;
-  font-size: 14px;
-  color: #595959;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.demo-account .ant-typography {
-  color: #1890ff;
-  font-weight: 500;
 }
 
 /* Error alert customization */
@@ -232,17 +207,6 @@
     font-size: 42px;
   }
   
-  .demo-account {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
-    padding: 6px 0;
-  }
-  
-  .demo-accounts {
-    padding: 12px;
-  }
-  
   .ant-input-affix-wrapper,
   .ant-input {
     height: 32px;
@@ -284,13 +248,6 @@
     margin-top: 16px;
   }
   
-  .demo-accounts {
-    padding: 10px;
-  }
-  
-  .demo-account-list .ant-typography {
-    font-size: 13px;
-  }
 }
 
 @media screen and (max-width: 360px) {
@@ -333,9 +290,6 @@
     margin-top: 12px;
   }
   
-  .demo-accounts {
-    padding: 8px;
-  }
 }
 
 /* High DPI displays */

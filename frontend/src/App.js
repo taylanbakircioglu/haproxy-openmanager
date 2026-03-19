@@ -17,7 +17,8 @@ import {
   PlayCircleOutlined,
   CloudUploadOutlined,
   ApiOutlined,
-  SearchOutlined
+  SearchOutlined,
+  ClusterOutlined
 } from '@ant-design/icons';
 
 import Dashboard from './components/DashboardV2';
@@ -232,28 +233,24 @@ function AppContent() {
             overflow: 'hidden'
           }}>
             {collapsed ? (
-              <div style={{ 
-                fontSize: '20px',
+              <ClusterOutlined style={{ 
+                fontSize: '22px',
                 color: '#1890ff',
                 textShadow: '0 0 10px rgba(24, 144, 255, 0.5)'
-              }}>
-                H
-              </div>
+              }} />
             ) : (
               <div style={{ 
                 display: 'flex', 
                 alignItems: 'center', 
                 gap: '8px',
-                fontSize: '16px'
+                fontSize: '14px'
               }}>
-                <div style={{ 
-                  fontSize: '24px', 
+                <ClusterOutlined style={{ 
+                  fontSize: '22px', 
                   color: '#1890ff',
                   textShadow: '0 0 10px rgba(24, 144, 255, 0.5)'
-                }}>
-                  ⚡
-                </div>
-                <span>HAProxy Management</span>
+                }} />
+                <span>HAProxy OpenManager</span>
               </div>
             )}
           </div>
@@ -293,7 +290,7 @@ function AppContent() {
                 marginLeft: '8px',
                 whiteSpace: 'nowrap'
               }}>
-                HAProxy Load Balancer Management
+                HAProxy OpenManager
               </div>
             </div>
             <div style={{ flex: 1, display: 'flex', justifyContent: 'center', padding: '0 16px', minWidth: 0 }}>
