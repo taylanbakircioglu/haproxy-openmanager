@@ -538,7 +538,13 @@ function RedirectRuleCard({ rule, index, onChange, onDelete }) {
         <Col flex="100px">
           <Select
             value={rule.type}
-            onChange={(val) => onChange(index, { ...rule, type: val })}
+            onChange={(val) => {
+              const newRule = { ...rule, type: val };
+              if (val === 'scheme' && rule.target !== 'http' && rule.target !== 'https') {
+                newRule.target = 'https';
+              }
+              onChange(index, newRule);
+            }}
             placeholder="Type"
             size="small"
             style={{ width: '100%' }}
