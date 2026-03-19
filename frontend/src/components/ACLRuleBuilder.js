@@ -348,7 +348,15 @@ function ACLDefinitionCard({ rule, index, onChange, onDelete }) {
           <Select
             mode="multiple"
             value={rule.flags || []}
-            onChange={(val) => onChange(index, { ...rule, flags: val })}
+            onChange={(val) => {
+              const mFlags = val.filter(f => f.startsWith('-m'));
+              if (mFlags.length > 1) {
+                const otherFlags = val.filter(f => !f.startsWith('-m'));
+                onChange(index, { ...rule, flags: [...otherFlags, mFlags[mFlags.length - 1]] });
+              } else {
+                onChange(index, { ...rule, flags: val });
+              }
+            }}
             placeholder={FLAG_HINTS[matchDef?.category] || 'Flags'}
             size="small"
             style={{ width: '100%' }}
@@ -363,23 +371,34 @@ function ACLDefinitionCard({ rule, index, onChange, onDelete }) {
           </Select>
         </Col>
         <Col flex="auto">
-          {rule.matchType === 'ssl_fc' ? (
-            <Text type="secondary" style={{ fontSize: 12 }}>(no value needed)</Text>
-          ) : rule.matchType === 'custom' ? (
-            <Input
-              value={rule.value}
-              onChange={(e) => onChange(index, { ...rule, value: e.target.value })}
-              placeholder="Custom expression..."
-              size="small"
-            />
-          ) : (
-            <Input
-              value={rule.value}
-              onChange={(e) => onChange(index, { ...rule, value: e.target.value })}
-              placeholder={(rule.flags || []).includes('-f') ? '/path/to/patterns.txt' : (matchDef?.placeholder || 'Value')}
-              size="small"
-            />
-          )}
+          {(() => {
+            const hasFileFlag = (rule.flags || []).includes('-f');
+            const badFilePath = hasFileFlag && rule.value && !rule.value.startsWith('/');
+            if (rule.matchType === 'ssl_fc') {
+              return <Text type="secondary" style={{ fontSize: 12 }}>(no value needed)</Text>;
+            }
+            if (rule.matchType === 'custom') {
+              return (
+                <Input
+                  value={rule.value}
+                  onChange={(e) => onChange(index, { ...rule, value: e.target.value })}
+                  placeholder="Custom expression..."
+                  size="small"
+                />
+              );
+            }
+            return (
+              <Tooltip title={badFilePath ? 'Flag -f requires an absolute file path (e.g. /etc/haproxy/patterns.txt)' : ''} open={badFilePath ? undefined : false}>
+                <Input
+                  value={rule.value}
+                  onChange={(e) => onChange(index, { ...rule, value: e.target.value })}
+                  placeholder={hasFileFlag ? '/path/to/patterns.txt' : (matchDef?.placeholder || 'Value')}
+                  size="small"
+                  status={badFilePath ? 'error' : undefined}
+                />
+              </Tooltip>
+            );
+          })()}
         </Col>
         <Col flex="none">
           <Tooltip title="Delete rule">
@@ -532,12 +551,25 @@ function RedirectRuleCard({ rule, index, onChange, onDelete }) {
           </Select>
         </Col>
         <Col flex="auto">
-          <Input
-            value={rule.target}
-            onChange={(e) => onChange(index, { ...rule, target: e.target.value })}
-            placeholder={rule.type === 'scheme' ? 'https' : 'https://example.com'}
-            size="small"
-          />
+          {rule.type === 'scheme' ? (
+            <Select
+              value={rule.target === 'http' || rule.target === 'https' ? rule.target : undefined}
+              onChange={(val) => onChange(index, { ...rule, target: val })}
+              placeholder="Select scheme"
+              size="small"
+              style={{ width: '100%' }}
+            >
+              <Option value="https">https</Option>
+              <Option value="http">http</Option>
+            </Select>
+          ) : (
+            <Input
+              value={rule.target}
+              onChange={(e) => onChange(index, { ...rule, target: e.target.value })}
+              placeholder="https://example.com"
+              size="small"
+            />
+          )}
         </Col>
         <Col flex="120px">
           <Select
