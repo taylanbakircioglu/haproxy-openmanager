@@ -357,9 +357,11 @@ const FrontendManagement = () => {
       
       setSslCertificates(certs);
     } catch (error) {
-      console.error('🔍 SSL FETCH DEBUG: Failed to fetch SSL certificates:', error);
-      console.error('🔍 SSL FETCH DEBUG: Error response:', error.response?.data);
-      console.error('🔍 SSL FETCH DEBUG: Error status:', error.response?.status);
+      console.error('SSL FETCH: Failed to fetch SSL certificates:', error);
+      const detail = error.response?.data?.detail || error.message;
+      if (error.response?.status === 500) {
+        message.error(`Failed to load SSL certificates: ${detail}`);
+      }
       setSslCertificates([]);
     } finally {
       setSslLoading(false);

@@ -214,7 +214,8 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                 where_clause = " AND ".join(where_clauses)
                 
                 certificates = await conn.fetch(f"""
-                    SELECT id, name, domain, expiry_date, issuer, fingerprint, status, 
+                    SELECT id, name, primary_domain as domain, 
+                           expiry_date, issuer, fingerprint, status, 
                            days_until_expiry, all_domains, is_active, cluster_id, usage_type,
                            created_at, updated_at,
                            (SELECT COUNT(*) FROM frontends f
@@ -271,18 +272,28 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
             return result
             
         except Exception as table_error:
-            logger.warning(f"Error checking/querying SSL certificates table: {table_error}")
-            await close_database_connection(conn)
-            return []  # Return empty list if table doesn't exist or has issues
+            logger.error(f"SSL LIST ERROR: Query failed for cluster_id={cluster_id}, usage_type={usage_type}: {table_error}", exc_info=True)
+            try:
+                await close_database_connection(conn)
+            except:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to fetch SSL certificates. Please check server logs. Error: {str(table_error)}"
+            )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error fetching SSL certificates: {e}")
+        logger.error(f"SSL LIST ERROR: Connection/setup failed: {e}", exc_info=True)
         try:
             await close_database_connection(conn)
         except:
             pass
-        # Return empty list instead of error to prevent frontend crashes
-        return []
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch SSL certificates: {str(e)}"
+        )
 
 @router.post("/certificates")
 async def create_ssl_certificate(certificate: SSLCertificateCreate, request: Request, authorization: str = Header(None)):
@@ -357,42 +368,7 @@ async def create_ssl_certificate(certificate: SSLCertificateCreate, request: Req
                     if cluster_existing:
                         existing = cluster_existing
                         break
-        if existing:
-            if existing['is_active']:
-                # Active certificate with same name exists
-                await close_database_connection(conn)
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"SSL certificate with name '{certificate.name}' already exists. Please choose a different name or delete the existing certificate first."
-                )
-            else:
-                # Soft-deleted certificate exists - reactivate it instead of creating new one
-                logger.info(f"SSL REACTIVATE: Found soft-deleted SSL '{certificate.name}', reactivating instead of creating new")
-                
-                # Update the existing soft-deleted certificate with new content
-                await conn.execute("""
-                    UPDATE ssl_certificates 
-                    SET is_active = TRUE, 
-                        last_config_status = 'PENDING',
-                        certificate_content = $2,
-                        private_key_content = $3,
-                        chain_content = $4,
-                        primary_domain = $5,
-                        all_domains = $6,
-                        expiry_date = $7,
-                        usage_type = $8,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = $1
-                """, existing['id'], certificate.certificate_content, certificate.private_key_content,
-                    certificate.chain_content, primary_domain, all_domains, expiry_date, certificate.usage_type)
-                
-                cert_id = existing['id']
-                logger.info(f"SSL REACTIVATED: SSL certificate '{certificate.name}' (ID: {cert_id}) reactivated successfully")
-                
-                # Continue with the rest of the creation logic (cluster associations, config versions, etc.)
-                # Skip the INSERT part since we're reusing existing certificate
-        
-        # Extract parsed information
+        # Extract parsed information before any DB operations that need them
         primary_domain = cert_info["primary_domain"]
         all_domains = cert_info["all_domains"]
         expiry_date = cert_info["expiry_date"]
@@ -404,12 +380,10 @@ async def create_ssl_certificate(certificate: SSLCertificateCreate, request: Req
                     expiry_date = expiry_date.replace(tzinfo=timezone.utc)
                     logger.info(f"SSL CREATE: Fixed timezone for expiry_date: {expiry_date}")
                 else:
-                    # Convert to UTC if it has different timezone
                     expiry_date = expiry_date.astimezone(timezone.utc)
                     logger.info(f"SSL CREATE: Converted expiry_date to UTC: {expiry_date}")
             except Exception as tz_error:
                 logger.error(f"Timezone conversion failed: {tz_error}")
-                # Fallback: set to None if timezone conversion fails
                 expiry_date = None
                 logger.warning("SSL CREATE: Using NULL expiry_date due to timezone error")
         
@@ -423,7 +397,6 @@ async def create_ssl_certificate(certificate: SSLCertificateCreate, request: Req
                 now = datetime.now(timezone.utc)
                 days_until_expiry = (expiry_date - now).days
                 
-                # Recalculate status based on days
                 if days_until_expiry < 0:
                     status = "expired"
                 elif days_until_expiry < 30:
@@ -440,12 +413,50 @@ async def create_ssl_certificate(certificate: SSLCertificateCreate, request: Req
         
         # Convert timezone-aware datetime to timezone-naive UTC for database insertion
         if expiry_date and hasattr(expiry_date, 'tzinfo') and expiry_date.tzinfo is not None:
-            # Convert timezone-aware datetime to UTC and then make it naive
             expiry_date_utc = expiry_date.astimezone(timezone.utc).replace(tzinfo=None)
             logger.info(f"SSL CREATE: Converted timezone-aware {expiry_date} to timezone-naive UTC {expiry_date_utc}")
             expiry_date = expiry_date_utc
         
-        # Debug all values before database insertion
+        if existing:
+            if existing['is_active']:
+                await close_database_connection(conn)
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"SSL certificate with name '{certificate.name}' already exists. Please choose a different name or delete the existing certificate first."
+                )
+            else:
+                # Soft-deleted certificate exists - reactivate it
+                logger.info(f"SSL REACTIVATE: Found soft-deleted SSL '{certificate.name}', reactivating instead of creating new")
+                
+                # Clean up old junction table entries before re-creating
+                await conn.execute("""
+                    DELETE FROM ssl_certificate_clusters WHERE ssl_certificate_id = $1
+                """, existing['id'])
+                
+                await conn.execute("""
+                    UPDATE ssl_certificates 
+                    SET is_active = TRUE, 
+                        last_config_status = 'PENDING',
+                        certificate_content = $2,
+                        private_key_content = $3,
+                        chain_content = $4,
+                        primary_domain = $5,
+                        all_domains = $6,
+                        expiry_date = $7,
+                        usage_type = $8,
+                        issuer = $9,
+                        fingerprint = $10,
+                        status = $11,
+                        days_until_expiry = $12,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                """, existing['id'], certificate.certificate_content, certificate.private_key_content,
+                    certificate.chain_content, primary_domain, json.dumps(all_domains), expiry_date,
+                    certificate.usage_type, issuer, fingerprint, status, days_until_expiry)
+                
+                cert_id = existing['id']
+                logger.info(f"SSL REACTIVATED: SSL certificate '{certificate.name}' (ID: {cert_id}) reactivated successfully")
+        
         # Only insert if not reactivating existing certificate
         if not existing or existing['is_active']:
             logger.info(f"SSL CREATE: About to insert - expiry_date={expiry_date}, type={type(expiry_date)}")
