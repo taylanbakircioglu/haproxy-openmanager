@@ -787,12 +787,13 @@ async def ensure_ssl_certificates_new_columns():
         
         # Add missing columns if they don't exist
         columns_to_add = [
+            ("primary_domain", "VARCHAR(255)"),
             ("issuer", "VARCHAR(255)"),
             ("fingerprint", "VARCHAR(128)"),
             ("status", "VARCHAR(20) DEFAULT 'valid'"),
             ("days_until_expiry", "INTEGER DEFAULT 0"),
             ("all_domains", "JSONB DEFAULT '[]'"),
-            ("usage_type", "VARCHAR(50) DEFAULT 'frontend'")  # CRITICAL: Frontend/Server SSL differentiation
+            ("usage_type", "VARCHAR(50) DEFAULT 'frontend'")
         ]
         
         for column_name, column_def in columns_to_add:
@@ -809,6 +810,35 @@ async def ensure_ssl_certificates_new_columns():
                     ADD COLUMN {column_name} {column_def}
                 """)
                 logger.info(f"Added column '{column_name}' to ssl_certificates table")
+        
+        # Backfill primary_domain from legacy domain column for upgraded installations
+        has_domain_col = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'ssl_certificates' AND column_name = 'domain'
+            )
+        """)
+        if has_domain_col:
+            await conn.execute("""
+                UPDATE ssl_certificates 
+                SET primary_domain = domain 
+                WHERE primary_domain IS NULL AND domain IS NOT NULL
+            """)
+            logger.info("Backfilled primary_domain from legacy domain column")
+        
+        # Make legacy domain column nullable (new code uses primary_domain)
+        if has_domain_col:
+            domain_not_null = await conn.fetchval("""
+                SELECT is_nullable = 'NO' 
+                FROM information_schema.columns 
+                WHERE table_name = 'ssl_certificates' AND column_name = 'domain'
+            """)
+            if domain_not_null:
+                await conn.execute("""
+                    ALTER TABLE ssl_certificates 
+                    ALTER COLUMN domain DROP NOT NULL
+                """)
+                logger.info("Made legacy domain column nullable")
         
         # Update existing certificates to have valid status
         await conn.execute("""
