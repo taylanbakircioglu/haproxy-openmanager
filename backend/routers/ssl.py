@@ -157,7 +157,7 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                 certificates = await conn.fetch(f"""
                     SELECT DISTINCT s.id, s.name, s.primary_domain as domain, s.expiry_date, s.issuer, s.fingerprint, s.status, 
                            s.days_until_expiry, s.all_domains, s.is_active, s.cluster_id, s.usage_type,
-                           s.created_at, s.updated_at,
+                           s.source, s.created_at, s.updated_at,
                            CASE 
                                WHEN NOT EXISTS (SELECT 1 FROM ssl_certificate_clusters WHERE ssl_certificate_id = s.id) THEN 'Global'
                                ELSE 'Cluster-specific'
@@ -199,7 +199,7 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                     LEFT JOIN haproxy_clusters c ON scc.cluster_id = c.id
                     WHERE {where_clause}
                     GROUP BY s.id, s.name, s.primary_domain, s.expiry_date, s.issuer, s.fingerprint, s.status, 
-                             s.days_until_expiry, s.all_domains, s.is_active, s.cluster_id, s.usage_type, s.created_at, s.updated_at
+                             s.days_until_expiry, s.all_domains, s.is_active, s.cluster_id, s.usage_type, s.source, s.created_at, s.updated_at
                     ORDER BY s.created_at DESC
                 """, *params)
             else:
@@ -217,7 +217,7 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                     SELECT id, name, primary_domain as domain, 
                            expiry_date, issuer, fingerprint, status, 
                            days_until_expiry, all_domains, is_active, cluster_id, usage_type,
-                           created_at, updated_at,
+                           source, created_at, updated_at,
                            (SELECT COUNT(*) FROM frontends f
                             WHERE f.is_active = TRUE AND (f.ssl_certificate_id = ssl_certificates.id OR f.ssl_certificate_ids @> to_jsonb(ssl_certificates.id)))
                            +
@@ -263,6 +263,7 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                     'updated_at': cert['updated_at'].isoformat().replace('+00:00', 'Z') if cert['updated_at'] else None,
                     'is_active': cert['is_active'],
                     'usage_count': cert.get('usage_count', 0),
+                    'source': cert.get('source', 'manual'),
                     'last_config_status': cert.get('last_config_status'),
                     'has_pending_config': cert.get('has_pending_config', False),
                     'pending_cluster_names': list(cert.get('pending_cluster_names') or [])
@@ -617,7 +618,7 @@ async def get_ssl_certificate(cert_id: int, authorization: str = Header(None)):
         certificate = await conn.fetchrow("""
             SELECT s.id, s.name, s.primary_domain as domain, s.all_domains, s.certificate_content, 
                    s.private_key_content, s.chain_content, s.expiry_date, s.issuer, s.status, 
-                   s.days_until_expiry, s.fingerprint, s.cluster_id, s.usage_type, s.is_active, s.created_at, s.updated_at,
+                   s.days_until_expiry, s.fingerprint, s.cluster_id, s.usage_type, s.source, s.is_active, s.created_at, s.updated_at,
                    CASE 
                        WHEN NOT EXISTS (SELECT 1 FROM ssl_certificate_clusters WHERE ssl_certificate_id = s.id) THEN TRUE
                        ELSE FALSE
@@ -631,7 +632,7 @@ async def get_ssl_certificate(cert_id: int, authorization: str = Header(None)):
             WHERE s.id = $1
             GROUP BY s.id, s.name, s.primary_domain, s.all_domains, s.certificate_content, 
                      s.private_key_content, s.chain_content, s.expiry_date, s.issuer, s.status, 
-                     s.days_until_expiry, s.fingerprint, s.cluster_id, s.usage_type, s.is_active, s.created_at, s.updated_at
+                     s.days_until_expiry, s.fingerprint, s.cluster_id, s.usage_type, s.source, s.is_active, s.created_at, s.updated_at
         """, cert_id)
         
         if not certificate:
@@ -777,6 +778,20 @@ async def update_ssl_certificate(cert_id: int, certificate: SSLCertificateUpdate
         if not existing:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="SSL certificate not found")
+        
+        # Protect ACME-managed certificates from manual content edits
+        if existing.get('source') == 'letsencrypt':
+            content_fields_changed = any([
+                certificate.certificate_content,
+                certificate.private_key_content,
+                certificate.chain_content
+            ])
+            if content_fields_changed:
+                await close_database_connection(conn)
+                raise HTTPException(
+                    status_code=400,
+                    detail="ACME-managed certificates cannot be manually edited. Use the ACME Automation page to renew this certificate."
+                )
         
         logger.info(f"SSL UPDATE: Updating certificate '{existing['name']}' (ID: {cert_id}, is_global: {is_global})")
         

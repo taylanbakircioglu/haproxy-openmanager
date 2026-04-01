@@ -21,6 +21,7 @@ Modern, web-based management interface for HAProxy load balancers with multi-clu
    - [Agent & Cluster Management](#agent--cluster-management)
    - [Version Control & Change Management](#version-control--change-management)
    - [Monitoring & Security](#monitoring--security)
+   - [ACME Auto SSL / Let's Encrypt](#acme-auto-ssl--lets-encrypt)
    - [Integration & API](#integration--api)
 4. [🏗️ Architecture](#architecture)
    - [System Architecture with Agent Pull Model](#system-architecture-with-agent-pull-model)
@@ -36,6 +37,7 @@ Modern, web-based management interface for HAProxy load balancers with multi-clu
    - [Backend Servers](#backend-servers---server-pool-management)
    - [IP Inventory](#ip-inventory---cross-cluster-ip-search--discovery)
    - [SSL Certificates](#ssl-certificates---centralized-tlsssl-certificate-management)
+   - [ACME Auto SSL](#acme-auto-ssl---automated-certificate-management)
    - [WAF Management](#waf-management---web-application-firewall)
    - [Configuration](#configuration---haproxy-config-file-management)
    - [User Management](#user-management---access-control--authentication)
@@ -95,6 +97,7 @@ This architecture provides better security (no inbound connections to HAProxy se
 ✅ **Version Control & Rollback** - Every change versioned with one-click restore capability  
 ✅ **Real-Time Monitoring** - Live stats, health checks, and performance dashboards  
 ✅ **SSL Certificate Management** - Centralized SSL with expiration tracking  
+✅ **ACME Auto SSL (Let's Encrypt)** - Automated certificate issuance, renewal, and deployment via ACME protocol  
 ✅ **WAF Rules** - Web Application Firewall management and deployment  
 ✅ **Agent Script Versioning** - Update agents via UI (Monaco editor) with auto-upgrade  
 ✅ **Token-Based Agent Auth** - Secure token management with revoke/renew  
@@ -217,6 +220,17 @@ This architecture provides better security (no inbound connections to HAProxy se
 - **User Management**: Role-based access control with admin and user roles
 - **User Activity Logs**: Complete audit trail of all user actions, configuration changes, and system events
 
+#### ACME Auto SSL / Let's Encrypt
+- **Automated Certificate Issuance**: Request SSL certificates from Let's Encrypt or any ACME-compatible CA directly from the UI
+- **Automatic Renewal**: Background task monitors certificate expiry and renews automatically before expiration
+- **Zero-Touch Deployment**: Renewed certificates are automatically applied through the same PENDING -> APPLIED pipeline as manual SSL updates, with agent notification
+- **Multi-Provider Support**: Configurable ACME directory URL supports Let's Encrypt, ZeroSSL, Google Trust Services, Buypass, and custom CAs
+- **HTTP-01 Challenge**: Built-in challenge responder with automatic HAProxy routing injection
+- **ACME Account Management**: Register, view, and deactivate ACME accounts from the UI
+- **Staging Mode**: Test certificate issuance with Let's Encrypt staging environment before production
+- **External Account Binding (EAB)**: Support for CAs that require EAB (ZeroSSL, Google Trust Services)
+- **Backward Compatible**: ACME-managed and manually uploaded certificates coexist seamlessly; existing SSL workflows are completely unaffected
+
 #### Integration & API
 - **REST API**: Complete API for programmatic access and integration with CI/CD pipelines
 - **Agent Pull Architecture**: Secure polling model - no inbound connections required to HAProxy servers
@@ -280,9 +294,10 @@ graph TB
 | **Backend** | FastAPI + Python | REST API, task queue, agent coordination | 8000 |
 | **Database** | PostgreSQL 15 | Configuration storage, user management, agent tasks | 5432 |
 | **Cache** | Redis 7 | Session storage, performance metrics caching | 6379 |
-| **Reverse Proxy** | Nginx | Frontend/backend routing, SSL termination | 8080 |
+| **Reverse Proxy** | Nginx | Frontend/backend routing, SSL termination, ACME challenge routing | 8080 |
 | **HAProxy Agent** | Bash Service | Polls backend, applies configs, manages HAProxy | N/A |
 | **HAProxy Instances** | HAProxy 2.8+ | Load balancer instances being managed by agents | 8404+ |
+| **ACME Service** | Built-in (Python) | ACME protocol client for automated certificate management | - |
 
 ### Agent Pull Communication Flow - Detailed Entity Management
 
@@ -417,12 +432,35 @@ sequenceDiagram
     H-->>A: Service running normally
     
     Note over A,B: Agent now running v1.0.11<br/>Continues normal polling cycle
+
+    Note over B,D: ═══ PHASE 8: ACME AUTO-RENEWAL (Hourly) ═══
+
+    B->>D: Query expiring ACME certs (within N days)
+    D-->>B: Cert "example.com" expires in 25 days
+
+    B->>B: Create ACME renewal order
+    B->>B: Respond to HTTP-01 challenges
+    
+    Note over B: Next cycle: poll order status
+    B->>B: Order valid - download certificate
+    B->>D: Update cert content (PENDING)
+    B->>D: Create config versions (PENDING)
+    B->>D: Auto-apply: apply_ssl_related_configs()
+    B->>D: Create consolidated version (APPLIED)
+    B->>R: Notify agents via Redis
+    
+    A->>B: Poll detects new config version
+    A->>B: Download renewed certificate
+    A->>A: Write updated cert to disk
+    A->>H: Reload HAProxy (zero downtime)
+    A->>B: Report success
 ```
 
 **Key Flow Features:**
 - 🔄 **Continuous Polling**: Agents poll every 30s for tasks, stats collection, and version checks
 - 📄 **Config Management**: haproxy.cfg backup → validate → apply → rollback if needed
 - 🔐 **SSL Handling**: Secure download, file permissions (chmod 600), automatic frontend binding
+- 🤖 **ACME Auto-Renewal**: Automatic certificate renewal via ACME protocol with same Apply pipeline as manual SSL
 - 🛡️ **WAF Integration**: Stick-tables generated and integrated into config
 - 📊 **Stats Collection**: Parallel stats upload using socat + stats socket
 - 🔄 **Auto-Upgrade**: Agents detect new versions and self-upgrade with zero-touch deployment
@@ -693,14 +731,139 @@ User Updates SSL in UI → All Agents Poll Backend (30s)
 
 #### Key Features
 - **Certificate Upload**: PEM format certificate and private key upload
+- **ACME Automation**: Automatic certificate issuance and renewal via Let's Encrypt / ACME protocol (see [ACME Auto SSL](#acme-auto-ssl---automated-certificate-management))
 - **Certificate Store**: Centralized repository with encryption at rest
 - **Expiration Monitoring**: Automatic expiration tracking with alerts (30, 15, 7 days)
 - **Global Update**: Update one certificate, deploy to all clusters simultaneously
 - **Domain Binding**: Associate certificates with specific domains/frontends
 - **Certificate Validation**: Syntax and format validation before deployment
 - **Renewal Tracking**: Certificate renewal status and history
+- **Source Tracking**: Certificates display their source ("Manual" or "Auto (ACME)") for clear management
+- **ACME Protection**: ACME-managed certificates are protected from manual content edits to prevent accidental overwrites
 - **Security Profiles**: SSL/TLS protocol and cipher suite configuration
 - **Zero Downtime**: Safe HAProxy reload ensures no dropped connections
+
+### 🤖 **ACME Auto SSL** - *Automated Certificate Management*
+
+HAProxy OpenManager includes a built-in ACME client for automated SSL/TLS certificate management using the ACME protocol (RFC 8555). This enables zero-touch certificate issuance and renewal from Let's Encrypt and other ACME-compatible Certificate Authorities.
+
+#### How ACME Auto SSL Works
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Admin UI
+    participant B as Backend API
+    participant CA as ACME CA<br/>(Let's Encrypt)
+    participant H as HAProxy<br/>(via Agent)
+
+    Note over U,CA: === Certificate Request ===
+    U->>B: Request certificate for example.com
+    B->>CA: Create ACME order
+    CA-->>B: Order + HTTP-01 challenge token
+    B->>B: Store challenge token in DB
+
+    Note over CA,H: === Domain Validation ===
+    CA->>H: GET /.well-known/acme-challenge/{token}
+    H->>B: Proxy challenge request (ACME ACL)
+    B-->>H: Challenge response (key authorization)
+    H-->>CA: Challenge response
+    CA->>CA: Validate domain ownership
+
+    Note over B,CA: === Certificate Issuance ===
+    B->>CA: Finalize order (submit CSR)
+    CA-->>B: Signed certificate
+    B->>B: Store cert, status = PENDING
+    B->>B: Create config version (PENDING)
+
+    Note over U,B: === Manual Apply (New Certs) ===
+    U->>B: Click "Apply Changes"
+    B->>B: Mark APPLIED + consolidated config
+    B->>H: Notify agents
+    H->>H: Pull cert + reload HAProxy
+```
+
+#### Auto-Renewal Flow
+
+Certificates are automatically renewed before expiration through a background task that runs hourly:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant BG as Background Task<br/>(Hourly)
+    participant B as Backend
+    participant CA as ACME CA
+    participant DB as Database
+    participant H as HAProxy Agents
+
+    BG->>DB: Find certs expiring within N days
+    BG->>CA: Create renewal order
+    CA-->>BG: Challenge token
+    BG->>DB: Store challenge
+
+    Note over BG,CA: Next cycle (or same)
+    BG->>CA: Check order status
+    CA-->>BG: Status: valid
+    BG->>CA: Download renewed certificate
+
+    Note over BG,DB: Auto-Apply (same as manual Apply)
+    BG->>DB: Update cert (PENDING)
+    BG->>DB: Create config versions (PENDING)
+    BG->>DB: apply_ssl_related_configs()
+    BG->>DB: Create consolidated version (APPLIED)
+    BG->>DB: Mark cert APPLIED
+    BG->>H: Notify agents via Redis
+    H->>H: Pull updated cert + reload
+```
+
+**Key behavior**: Auto-renewed certificates follow the **exact same Apply pipeline** as manual SSL updates. The cert transitions `PENDING -> APPLIED` automatically, agents are notified, and cross-cluster propagation works identically to manual Apply. No separate deployment mechanism is used.
+
+#### ACME Features
+
+| Feature | Description |
+|---------|-------------|
+| **Certificate Request Wizard** | Step-by-step UI wizard: select domains, account, target clusters |
+| **Multi-Provider Support** | Let's Encrypt, ZeroSSL, Google Trust Services, Buypass, or custom ACME CA |
+| **Staging Mode** | Test with LE staging environment (no rate limits) before production |
+| **Account Management** | Register, view details, and deactivate ACME accounts |
+| **Order Tracking** | View all orders with status, domains, and challenge details |
+| **Auto-Renewal** | Configurable renewal window (default: 30 days before expiry) |
+| **Renewal Schedule** | Dashboard showing all ACME certs with expiry dates and renewal status |
+| **HTTP-01 Challenges** | Built-in challenge responder with automatic HAProxy ACL injection |
+| **EAB Support** | External Account Binding for CAs that require it |
+| **Certificate Protection** | ACME-managed certs are read-only in SSL Management (content cannot be manually edited) |
+| **CA Chain Import** | One-click import of CA intermediate certificates |
+| **Certificate Revocation** | Revoke compromised certificates through the ACME CA |
+
+#### ACME Configuration
+
+ACME settings are managed through **Settings > ACME / SSL Automation** tab:
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `acme.provider` | ACME CA provider selection | `letsencrypt` |
+| `acme.directory_url` | ACME directory endpoint URL | LE production URL |
+| `acme.staging_mode` | Use staging environment | `false` |
+| `acme.auto_renew_enabled` | Enable automatic certificate renewal | `false` |
+| `acme.renew_before_days` | Days before expiry to trigger renewal | `30` |
+| `acme.eab_kid` | External Account Binding Key ID (if required) | - |
+| `acme.eab_hmac_key` | External Account Binding HMAC Key (if required) | - |
+
+#### Cluster ACME Setup
+
+For HTTP-01 challenges to work, each cluster needs ACME challenge routing enabled:
+
+1. Go to **Cluster Management** > Edit cluster
+2. Enable **ACME Challenge Routing** toggle
+3. Optionally set a custom ACME backend URL
+4. Apply changes
+
+When enabled, HAProxy configuration is automatically injected with:
+- An ACL matching `/.well-known/acme-challenge/` requests
+- A `use_backend` rule directing challenge traffic to the management backend
+- A dedicated `_acme_challenge_backend` section
+
+This injection only affects HTTP-mode frontends and is completely removed when ACME is disabled.
 
 ### 🛡️ **WAF Management** - *Web Application Firewall*
 - **Rate Limiting**: Request rate limiting by IP, URL, or custom patterns
@@ -739,6 +902,7 @@ User Updates SSL in UI → All Agents Poll Backend (30s)
 
 ### 🔧 **Settings** - *System Configuration*
 - **Theme Settings**: Light/dark mode toggle and UI customization
+- **ACME / SSL Automation**: Configure ACME provider, directory URL, staging mode, auto-renewal, EAB credentials, and test CA connectivity
 - **Notification Settings**: Alert preferences and notification channels
 - **System Preferences**: Default timeouts, refresh intervals, and limits
 - **Backup Settings**: Automated backup scheduling and retention policies
@@ -976,6 +1140,7 @@ Your HAProxy server is now fully managed by HAProxy OpenManager. You can now:
 **Next Steps:**
 - Add more agents to the same pool for multi-node clusters
 - Configure SSL certificates in **SSL Management**
+- Set up ACME Auto SSL in **SSL Management > ACME Automation** for automated Let's Encrypt certificates
 - Add WAF rules in **WAF Management**
 - Monitor your cluster in **Dashboard**
 
@@ -1268,6 +1433,64 @@ GET /api/backends?cluster_id=1
 GET /api/frontends?cluster_id=1
 ```
 
+### ACME / Let's Encrypt API
+```bash
+# List ACME accounts
+GET /api/letsencrypt/accounts
+Authorization: Bearer <token>
+
+# Register ACME account
+POST /api/letsencrypt/accounts
+{
+  "email": "admin@example.com",
+  "directory_url": "https://acme-v02.api.letsencrypt.org/directory",
+  "tos_agreed": true
+}
+
+# Deactivate ACME account
+DELETE /api/letsencrypt/accounts/{account_id}
+
+# Request certificate
+POST /api/letsencrypt/certificates/request
+{
+  "domains": ["example.com", "www.example.com"],
+  "account_id": 1,
+  "cluster_ids": [1, 2]
+}
+
+# List ACME orders
+GET /api/letsencrypt/orders
+
+# Get order details
+GET /api/letsencrypt/orders/{order_id}
+
+# Retry/resume order
+POST /api/letsencrypt/orders/{order_id}/retry
+
+# Cancel order
+DELETE /api/letsencrypt/orders/{order_id}
+
+# Renew certificate (create new order)
+POST /api/letsencrypt/orders/{order_id}/renew
+
+# Complete certificate (download from CA)
+POST /api/letsencrypt/certificates/{order_id}/complete
+
+# Revoke certificate
+POST /api/letsencrypt/certificates/{cert_id}/revoke
+
+# Import CA chain certificates
+POST /api/letsencrypt/ca-chain/import
+
+# Get renewal schedule
+GET /api/letsencrypt/renewal-schedule
+
+# ACME Settings
+GET /api/settings/acme
+PUT /api/settings/acme
+GET /api/settings/acme/test-connection?directory_url=https://...
+```
+
 ### Configuration Management
 ```bash
 # Get HAProxy configuration
@@ -1414,12 +1637,15 @@ haproxy-openmanager/
 │   │   ├── frontend.py             # Frontend configuration
 │   │   ├── backend.py              # Backend configuration
 │   │   ├── ssl.py                  # SSL certificate management
+│   │   ├── letsencrypt.py          # ACME/Let's Encrypt endpoints
+│   │   ├── settings.py             # System settings (incl. ACME config)
 │   │   ├── waf.py                  # WAF rules management
 │   │   ├── dashboard.py            # Dashboard statistics
 │   │   ├── configuration.py        # Configuration viewer
 │   │   └── security.py             # Security & token management
 │   ├── services/                    # Business logic services
 │   │   ├── haproxy_config.py       # HAProxy config generation
+│   │   ├── acme_service.py         # ACME protocol client (RFC 8555)
 │   │   └── dashboard_stats_service.py # Stats aggregation
 │   ├── middleware/                  # Custom middleware
 │   │   ├── activity_logger.py      # Activity logging
@@ -1453,6 +1679,7 @@ haproxy-openmanager/
 │   │   │   ├── FrontendManagement.js # Frontend config
 │   │   │   ├── BackendServers.js   # Backend config
 │   │   │   ├── SSLManagement.js    # SSL certificates
+│   │   │   ├── ACMEAutomation.js   # ACME Auto SSL UI
 │   │   │   ├── WAFManagement.js    # WAF rules
 │   │   │   ├── ApplyManagement.js  # Apply changes
 │   │   │   ├── Configuration.js    # Config viewer
@@ -1533,7 +1760,9 @@ haproxy-openmanager/
 │   └── uninstall-agent-macos.sh     # macOS uninstaller
 │
 ├── docker-compose.yml                # Docker Compose configuration
+├── docker-compose.localtest.yml      # Local development/testing overrides
 ├── docker-compose.test.yml           # Test environment
+├── version.json                      # Application version metadata
 ├── build-images.sh                   # Build Docker images
 ├── pytest.ini                        # Pytest configuration
 ├── README.md                         # This file
@@ -1732,6 +1961,44 @@ sudo /usr/sbin/haproxy -c -f /tmp/haproxy-new-config.cfg
 - Ensure SSL certificates are uploaded before creating frontends that use them
 - Keep backend names unique and descriptive
 - Test ACL syntax before saving
+
+#### 7. ACME Certificate Issues
+
+**Symptom:** ACME certificate request stuck in "pending" or challenge validation fails.
+
+**Diagnosis:**
+```bash
+# Check backend logs for ACME errors
+kubectl logs deployment/backend -n haproxy-openmanager | grep "ACME"
+
+# Verify ACME challenge endpoint is accessible through the managed HAProxy instance
+curl http://your-domain/.well-known/acme-challenge/test
+
+# Check if ACME is enabled on the cluster
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/clusters | jq '.[].acme_enabled'
+```
+
+**Common Issues:**
+
+1. **Challenge validation failed**: Ensure HAProxy cluster has `acme_enabled=true` and HTTP-mode frontends are configured
+2. **DNS not pointing correctly**: The domain must resolve to the IP of the HAProxy instance(s) managed by the cluster's agents
+3. **Rate limited**: Let's Encrypt has rate limits; use staging mode (`acme.staging_mode=true`) for testing
+4. **Stuck orders**: Orders stuck > 24h are logged as warnings; check backend logs
+5. **Firewall blocking**: Port 80 must be open for HTTP-01 challenges from the CA
+
+**ACME Auto-Renewal Not Working:**
+```bash
+# Check if auto-renewal is enabled
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/settings/acme
+
+# Verify background task is running (check backend logs)
+kubectl logs deployment/backend -n haproxy-openmanager | grep "ACME RENEWAL"
+```
+
+Settings to verify:
+- `acme.auto_renew_enabled` must be `true`
+- `acme.renew_before_days` controls when renewal triggers (default: 30 days)
+- Certificate must have `auto_renew=true` and `source=letsencrypt`
 
 ### Debug Mode
 

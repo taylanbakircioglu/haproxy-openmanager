@@ -381,7 +381,7 @@ const BackendServers = () => {
       if (response.data.sync_results && response.data.sync_results.length > 0) {
         const agentResults = response.data.sync_results.filter(r => r.success);
         if (agentResults.length > 0) {
-          message.info(`Configuration applied to ${agentResults.length} agent(s). HAProxy reloaded.`);
+          message.info(`Configuration published. ${agentResults.length} agent(s) notified, sync in progress.`);
         }
       }
       
@@ -825,8 +825,7 @@ const BackendServers = () => {
             <div>
               <div><strong>Server deleted successfully!</strong></div>
               <div style={{ marginTop: 4, fontSize: '12px' }}>
-                ✅ Configuration removed from {successCount} cluster node(s)
-                <br />📅 Deleted: {new Date().toLocaleString()}
+                Pending config version created for {successCount} cluster(s). Go to Apply Changes to deploy.
               </div>
             </div>,
             6
@@ -836,8 +835,7 @@ const BackendServers = () => {
             <div>
               <div><strong>Server deleted with warnings</strong></div>
               <div style={{ marginTop: 4, fontSize: '12px' }}>
-                ✅ {successCount}/{totalNodes} nodes updated successfully
-                <br />⚠️ Some nodes may need manual cleanup
+                {successCount}/{totalNodes} cluster(s) have pending versions. Some may need manual cleanup.
               </div>
             </div>,
             8
@@ -890,8 +888,8 @@ const BackendServers = () => {
               <div>
                 <div><strong>Server updated successfully!</strong></div>
                 <div style={{ marginTop: 4, fontSize: '12px' }}>
-                  ✅ Configuration synchronized to {successCount} cluster node(s)
-                  <br />📅 Last update: {new Date().toLocaleString()}
+                  Pending config version created for {successCount} cluster(s).
+                  Go to Apply Changes to deploy.
                 </div>
               </div>,
               6
@@ -901,8 +899,8 @@ const BackendServers = () => {
               <div>
                 <div><strong>Server updated with warnings</strong></div>
                 <div style={{ marginTop: 4, fontSize: '12px' }}>
-                  ✅ {successCount}/{totalNodes} nodes updated successfully
-                  <br />⚠️ Some nodes may need manual intervention
+                  {successCount}/{totalNodes} cluster(s) have pending versions.
+                  Some may need manual intervention.
                 </div>
               </div>,
               8

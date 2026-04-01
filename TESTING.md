@@ -59,12 +59,14 @@ docker run --rm haproxy-frontend-test
 - ✅ Entity sync calculations
 - ✅ HAProxy config generation
 - ✅ Authentication & authorization
+- ✅ ACME service and certificate lifecycle
 - **Target: 70% coverage**
 
 **Frontend Tests (Jest):**
 - ✅ EntitySyncStatus component
 - ✅ ApplyManagement workflow
 - ✅ SSLManagement functionality
+- ✅ ACMEAutomation component
 - **Target: 70% coverage**
 
 ### 🎯 Build Behavior

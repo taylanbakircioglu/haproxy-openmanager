@@ -265,8 +265,17 @@ Edit individual component YAML files to adjust:
 - **Agent Management**: Cross-platform HAProxy agent system  
 - **Enhanced User Activity**: Detailed audit logging
 - **Multi-environment Support**: Production, Staging, Test, Development
+- **ACME Auto SSL**: Automated certificate management via Let's Encrypt / ACME protocol (v1.1.0+)
 
-All database tables and initial data are created automatically via PostgreSQL init scripts in ConfigMap.
+All database tables and initial data are created automatically via the backend migration system on startup. ACME-related tables (`letsencrypt_accounts`, `letsencrypt_orders`, `acme_challenges`) and columns (`source`, `auto_renew`, `acme_enabled`) are created automatically on both fresh and existing databases.
+
+### ACME / Let's Encrypt Notes for Kubernetes
+
+For ACME HTTP-01 challenges to work in Kubernetes:
+1. The Nginx reverse proxy includes a location block for `/.well-known/acme-challenge/` that proxies requests to the backend
+2. HAProxy clusters must have `acme_enabled=true` for challenge routing
+3. The domain being validated must resolve to the HAProxy server(s) in the cluster
+4. Port 80 must be accessible from the internet for the ACME CA to validate challenges
 
 ## 📚 Additional Resources
 

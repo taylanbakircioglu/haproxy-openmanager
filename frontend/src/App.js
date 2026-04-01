@@ -52,7 +52,7 @@ import './App.css';
 const { Header, Sider, Content } = Layout;
 const { Text } = Typography;
 
-// Force rebuild: 2024-10-21 - Added APIs menu item
+// v1.1.0 - ACME Auto SSL
 
   const menuItems = [
     {
@@ -148,10 +148,18 @@ function AppContent() {
   const [collapsed, setCollapsed] = React.useState(false);
   const { user, logout, isAuthenticated, loading, getUserRoleNames } = useAuth();
   const { isDarkMode } = useTheme();
+  const [appVersion, setAppVersion] = React.useState('');
 
   React.useEffect(() => {
     setSelectedKey(location.pathname);
   }, [location.pathname]);
+
+  React.useEffect(() => {
+    fetch('/api/version')
+      .then(res => res.ok ? res.json() : null)
+      .then(data => { if (data?.version) setAppVersion(data.version); })
+      .catch(() => {});
+  }, []);
 
   const handleLogout = async () => {
     await logout();
@@ -260,6 +268,17 @@ function AppContent() {
             selectedKeys={[selectedKey]}
             items={menuItems}
           />
+          {!collapsed && appVersion && (
+            <div style={{
+              padding: '8px 24px 12px',
+              color: 'rgba(255,255,255,0.3)',
+              fontSize: 11,
+              textAlign: 'center',
+              borderTop: '1px solid rgba(255,255,255,0.06)'
+            }}>
+              v{appVersion}
+            </div>
+          )}
         </Sider>
         <Layout>
           <Header

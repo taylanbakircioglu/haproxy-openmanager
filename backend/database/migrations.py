@@ -1596,6 +1596,9 @@ async def run_all_migrations():
     await add_ssl_advanced_options_to_frontends()
     await add_ssl_advanced_options_to_servers()
     await add_preserved_listen_blocks_to_agents()
+    await ensure_system_settings_table()
+    await ensure_acme_tables()
+    await ensure_acme_columns_on_existing_tables()
     
     logger.info("Database migrations completed successfully.")
 
@@ -2998,3 +3001,173 @@ async def add_preserved_listen_blocks_to_agents():
             await close_database_connection(conn)
         logger.error(f"❌ Error adding preserved_listen_blocks column: {e}")
         # Don't raise - not critical for system operation
+
+
+async def ensure_system_settings_table():
+    """Create system_settings table for centralized application configuration."""
+    conn = None
+    try:
+        conn = await get_database_connection()
+
+        table_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'system_settings'
+            )
+        """)
+
+        if not table_exists:
+            await conn.execute("""
+                CREATE TABLE system_settings (
+                    key VARCHAR(100) PRIMARY KEY,
+                    value JSONB NOT NULL DEFAULT '{}',
+                    category VARCHAR(50) DEFAULT 'general',
+                    description TEXT,
+                    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+                )
+            """)
+            logger.info("Created system_settings table")
+
+            await conn.execute("""
+                INSERT INTO system_settings (key, value, category, description) VALUES
+                ('acme.provider', '"letsencrypt"', 'acme', 'ACME CA provider (letsencrypt, zerossl, google, custom)'),
+                ('acme.directory_url', '"https://acme-v02.api.letsencrypt.org/directory"', 'acme', 'ACME directory URL'),
+                ('acme.staging_mode', 'false', 'acme', 'Use staging/test environment'),
+                ('acme.contact_email', '""', 'acme', 'Contact email for ACME account registration'),
+                ('acme.auto_renew_enabled', 'false', 'acme', 'Enable automatic certificate renewal'),
+                ('acme.renew_before_days', '30', 'acme', 'Days before expiry to trigger renewal'),
+                ('acme.tos_accepted', 'false', 'acme', 'Terms of Service accepted'),
+                ('acme.eab_kid', '""', 'acme', 'External Account Binding Key ID'),
+                ('acme.eab_hmac_key', '""', 'acme', 'External Account Binding HMAC Key'),
+                ('acme.challenge_backend_url', '""', 'acme', 'Override URL for ACME challenge backend (leave empty for auto-detect)')
+                ON CONFLICT (key) DO NOTHING
+            """)
+            logger.info("Seeded default ACME settings")
+        else:
+            logger.info("system_settings table already exists")
+
+        await close_database_connection(conn)
+
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"Error creating system_settings table: {e}")
+
+
+async def ensure_acme_tables():
+    """Create ACME-related tables for Let's Encrypt / ACME certificate automation."""
+    conn = None
+    try:
+        conn = await get_database_connection()
+
+        # letsencrypt_accounts
+        exists = await conn.fetchval("""
+            SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'letsencrypt_accounts')
+        """)
+        if not exists:
+            await conn.execute("""
+                CREATE TABLE letsencrypt_accounts (
+                    id SERIAL PRIMARY KEY,
+                    email VARCHAR(255) NOT NULL,
+                    directory_url VARCHAR(500) NOT NULL,
+                    account_url VARCHAR(500),
+                    jwk_private_key TEXT NOT NULL,
+                    status VARCHAR(30) DEFAULT 'pending',
+                    tos_agreed BOOLEAN DEFAULT FALSE,
+                    eab_kid VARCHAR(255),
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(email, directory_url)
+                )
+            """)
+            logger.info("Created letsencrypt_accounts table")
+
+        # letsencrypt_orders
+        exists = await conn.fetchval("""
+            SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'letsencrypt_orders')
+        """)
+        if not exists:
+            await conn.execute("""
+                CREATE TABLE letsencrypt_orders (
+                    id SERIAL PRIMARY KEY,
+                    account_id INTEGER NOT NULL REFERENCES letsencrypt_accounts(id) ON DELETE CASCADE,
+                    order_url VARCHAR(500),
+                    status VARCHAR(30) DEFAULT 'pending',
+                    domains JSONB NOT NULL DEFAULT '[]',
+                    certificate_url VARCHAR(500),
+                    finalize_url VARCHAR(500),
+                    cert_private_key TEXT,
+                    expires_at TIMESTAMPTZ,
+                    error_detail TEXT,
+                    ssl_certificate_id INTEGER REFERENCES ssl_certificates(id) ON DELETE SET NULL,
+                    cluster_ids JSONB DEFAULT '[]',
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            logger.info("Created letsencrypt_orders table")
+        else:
+            try:
+                await conn.execute(
+                    "ALTER TABLE letsencrypt_orders ADD COLUMN IF NOT EXISTS cert_private_key TEXT"
+                )
+            except Exception:
+                pass
+
+        # acme_challenges
+        exists = await conn.fetchval("""
+            SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'acme_challenges')
+        """)
+        if not exists:
+            await conn.execute("""
+                CREATE TABLE acme_challenges (
+                    id SERIAL PRIMARY KEY,
+                    order_id INTEGER NOT NULL REFERENCES letsencrypt_orders(id) ON DELETE CASCADE,
+                    domain VARCHAR(255) NOT NULL,
+                    token VARCHAR(500) NOT NULL,
+                    key_authorization TEXT NOT NULL,
+                    challenge_url VARCHAR(500),
+                    status VARCHAR(30) DEFAULT 'pending',
+                    validated_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_acme_challenges_token ON acme_challenges(token)
+            """)
+            logger.info("Created acme_challenges table with token index")
+
+        await close_database_connection(conn)
+
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"Error creating ACME tables: {e}")
+
+
+async def ensure_acme_columns_on_existing_tables():
+    """Add ACME-related columns to existing ssl_certificates and haproxy_clusters tables."""
+    conn = None
+    try:
+        conn = await get_database_connection()
+
+        for col, sql in [
+            ('source', "ALTER TABLE ssl_certificates ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'manual'"),
+            ('letsencrypt_order_id', "ALTER TABLE ssl_certificates ADD COLUMN IF NOT EXISTS letsencrypt_order_id INTEGER REFERENCES letsencrypt_orders(id) ON DELETE SET NULL"),
+            ('auto_renew', "ALTER TABLE ssl_certificates ADD COLUMN IF NOT EXISTS auto_renew BOOLEAN DEFAULT FALSE"),
+            ('acme_enabled', "ALTER TABLE haproxy_clusters ADD COLUMN IF NOT EXISTS acme_enabled BOOLEAN DEFAULT FALSE"),
+            ('acme_backend_url', "ALTER TABLE haproxy_clusters ADD COLUMN IF NOT EXISTS acme_backend_url VARCHAR(500)"),
+        ]:
+            try:
+                await conn.execute(sql)
+                logger.info(f"Ensured column exists: {col}")
+            except Exception as col_err:
+                logger.warning(f"Column {col} migration note: {col_err}")
+
+        await close_database_connection(conn)
+
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"Error adding ACME columns: {e}")

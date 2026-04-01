@@ -37,7 +37,6 @@ spec:
       containers:
       - name: backend
         image: taylanbakircioglu/haproxy-openmanager-backend:latest  # Public Docker Hub image
-        imagePullPolicy: Always
         ports:
         - containerPort: 8000
           name: http

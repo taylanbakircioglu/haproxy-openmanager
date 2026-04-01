@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Table, Button, Space, Modal, Form, Input, Select, Tag, message, 
+  Table, Button, Space, Modal, Form, Input, Select, Tag, message, Switch,
   Tooltip, Popconfirm, Row, Col, Divider, Typography, Badge, Card, Alert
 } from 'antd';
 import {
@@ -152,10 +152,11 @@ const ClusterManagement = () => {
       connection_type: cluster.connection_type,
       stats_socket_path: cluster.stats_socket_path || '/run/haproxy/admin.sock',
       haproxy_config_path: cluster.haproxy_config_path || '/etc/haproxy/haproxy.cfg',
-      haproxy_bin_path: cluster.haproxy_bin_path,  // ✅ FIXED: Use actual value, no default override
+      haproxy_bin_path: cluster.haproxy_bin_path,
       agent_pool_id: cluster.pool_id || undefined,
       haproxy_user: cluster.haproxy_user || '',
-      haproxy_group: cluster.haproxy_group || ''
+      haproxy_group: cluster.haproxy_group || '',
+      acme_enabled: cluster.acme_enabled || false
     };
     
     console.log('🔍 CLUSTER EDIT DEBUG - Form values being set:', formValues);
@@ -195,7 +196,8 @@ const ClusterManagement = () => {
         haproxy_bin_path: values.haproxy_bin_path,
         pool_id: values.agent_pool_id || null,
         haproxy_user: values.haproxy_user || null,
-        haproxy_group: values.haproxy_group || null
+        haproxy_group: values.haproxy_group || null,
+        acme_enabled: values.acme_enabled || false
       };
       
       // For new clusters, explicitly set is_active to true
@@ -741,6 +743,15 @@ const ClusterManagement = () => {
             tooltip="HAProxy binary executable path - used for config validation and service management"
           >
             <Input placeholder="/usr/sbin/haproxy" />
+          </Form.Item>
+
+          <Form.Item
+            label="ACME Challenge Routing"
+            name="acme_enabled"
+            valuePropName="checked"
+            tooltip="Enable automatic ACME HTTP-01 challenge routing through this cluster's HTTP frontends for automated SSL certificate management"
+          >
+            <Switch checkedChildren="Enabled" unCheckedChildren="Disabled" />
           </Form.Item>
 
         </Form>

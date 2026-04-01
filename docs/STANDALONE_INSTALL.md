@@ -218,6 +218,13 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    # ACME HTTP-01 challenge proxy (for Let's Encrypt automation)
+    location /.well-known/acme-challenge/ {
+        proxy_pass http://backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
     location / {
         proxy_pass http://frontend;
         proxy_set_header Host $host;

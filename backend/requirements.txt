@@ -15,3 +15,4 @@ bcrypt>=4.0.1
 slowapi>=0.1.9
 psutil>=5.9.8
 pytz>=2023.3
+josepy>=1.14.0

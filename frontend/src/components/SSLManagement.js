@@ -12,12 +12,14 @@ import {
   SafetyCertificateOutlined, SearchOutlined,
   PlayCircleOutlined, EditOutlined,
   CloudServerOutlined, CheckCircleOutlined, SyncOutlined,
-  ExclamationCircleOutlined, CloseCircleOutlined, ClockCircleOutlined
+  ExclamationCircleOutlined, CloseCircleOutlined, ClockCircleOutlined,
+  ThunderboltOutlined
 } from '@ant-design/icons';
 import axios from 'axios';
 import { useCluster } from '../contexts/ClusterContext';
 import { useProgress } from '../contexts/ProgressContext';
 import { formatEntityForSync } from '../utils/agentSync';
+import ACMEAutomation from './ACMEAutomation';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -244,6 +246,7 @@ const SSLManagement = () => {
       usage_type: 'frontend'  // Default to frontend SSL
     });
     setSelectedCertificate(null);
+    setIsLetsEncryptCert(false);
     setModalVisible(true);
   };
 
@@ -258,12 +261,16 @@ const SSLManagement = () => {
     }
   };
 
+  const [isLetsEncryptCert, setIsLetsEncryptCert] = useState(false);
+
   const handleEdit = async (certificate) => {
     try {
       const response = await axios.get(`/api/ssl/certificates/${certificate.id}`);
       const cert = response.data;
+
+      const isLE = cert.source === 'letsencrypt';
+      setIsLetsEncryptCert(isLE);
       
-      // Pre-fill form with certificate data
       form.setFieldsValue({
         name: cert.name,
         certificate_content: cert.certificate_content,
@@ -296,7 +303,7 @@ const SSLManagement = () => {
             <div>
               <div><strong>SSL certificate deleted successfully</strong></div>
               <div style={{ marginTop: 4, fontSize: '12px' }}>
-                {successCount}/{totalNodes} nodes updated successfully
+                Pending config version created for {successCount} cluster(s). Go to Apply Changes to deploy.
               </div>
             </div>,
             6
@@ -306,8 +313,7 @@ const SSLManagement = () => {
             <div>
               <div><strong>SSL certificate deleted with warnings</strong></div>
               <div style={{ marginTop: 4, fontSize: '12px' }}>
-                {successCount}/{totalNodes} nodes updated successfully
-                <br />Some nodes may need manual cleanup
+                {successCount}/{totalNodes} cluster(s) have pending versions. Some may need manual cleanup.
               </div>
             </div>,
             8
@@ -328,16 +334,18 @@ const SSLManagement = () => {
     const isEditing = selectedCertificate && selectedCertificate.id;
     
     try {
-      // Prepare payload with new SSL model
+      const isLetsEncrypt = isEditing && selectedCertificate?.source === 'letsencrypt';
       const payload = {
         name: values.name,
-        certificate_content: values.certificate_content,
-        private_key_content: values.private_key_content,
-        chain_content: values.chain_content,
         is_global: values.ssl_type === 'global',
         cluster_ids: values.ssl_type === 'global' ? null : values.cluster_ids,
         usage_type: values.usage_type || 'frontend'
       };
+      if (!isLetsEncrypt) {
+        payload.certificate_content = values.certificate_content;
+        payload.private_key_content = values.private_key_content;
+        payload.chain_content = values.chain_content;
+      }
       const response = isEditing 
         ? await axios.put(`/api/ssl/certificates/${selectedCertificate.id}`, payload)
         : await axios.post('/api/ssl/certificates', payload);
@@ -353,7 +361,7 @@ const SSLManagement = () => {
             <div>
               <div><strong>SSL certificate {isEditing ? 'updated' : 'added'} successfully</strong></div>
               <div style={{ marginTop: 4, fontSize: '12px' }}>
-                {successCount}/{totalNodes} nodes updated successfully
+                Pending config version created for {successCount} cluster(s). Go to Apply Changes to deploy.
               </div>
             </div>,
             6
@@ -363,8 +371,7 @@ const SSLManagement = () => {
             <div>
               <div><strong>SSL certificate {isEditing ? 'updated' : 'added'} with warnings</strong></div>
               <div style={{ marginTop: 4, fontSize: '12px' }}>
-                {successCount}/{totalNodes} nodes updated successfully
-                <br />Some nodes may need manual certificate deployment
+                {successCount}/{totalNodes} cluster(s) have pending versions. Some may need attention.
               </div>
             </div>,
             8
@@ -536,6 +543,17 @@ const SSLManagement = () => {
       },
     },
     {
+      title: 'Source',
+      dataIndex: 'source',
+      key: 'source',
+      render: (source) => (
+        <Tag color={source === 'letsencrypt' ? 'green' : 'default'}
+             icon={source === 'letsencrypt' ? <SafetyCertificateOutlined /> : null}>
+          {source === 'letsencrypt' ? 'Auto (ACME)' : 'Manual'}
+        </Tag>
+      ),
+    },
+    {
       title: 'Sync Status',
       key: 'sync_status',
       render: (_, record) => (
@@ -675,20 +693,10 @@ const SSLManagement = () => {
     return days >= 0 && days <= 30;
   }) || [];
 
-  return (
-    <div>
+  const certificatesContent = (
+    <>
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }} align="middle">
-        <Col flex="auto">
-          <Title level={2} style={{ margin: 0 }}>
-            <LockOutlined style={{ marginRight: 8, color: '#52c41a' }} />
-            SSL Certificate Management
-            {selectedCluster && (
-              <Text type="secondary" style={{ fontSize: '14px', fontWeight: 'normal', marginLeft: '8px' }}>
-                - {selectedCluster.name}
-              </Text>
-            )}
-          </Title>
-        </Col>
+        <Col flex="auto" />
         <Col>
           <Space size={[12, 8]} align="center">
             <Space size={4}>
@@ -796,7 +804,7 @@ const SSLManagement = () => {
       )}
 
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={6}>
+        <Col xs={12} sm={12} md={6} lg={4}>
           <Card size="small" style={{ textAlign: 'center' }}>
             <div style={{ fontSize: 20, fontWeight: 'bold', color: '#52c41a' }}>
               {certificates.length}
@@ -804,7 +812,7 @@ const SSLManagement = () => {
             <div>Total Certificates</div>
           </Card>
         </Col>
-        <Col span={6}>
+        <Col xs={12} sm={12} md={6} lg={4}>
           <Card size="small" style={{ textAlign: 'center' }}>
             <div style={{ fontSize: 20, fontWeight: 'bold', color: '#1890ff' }}>
               {certificates.filter(c => c.usage_count > 0).length}
@@ -812,7 +820,7 @@ const SSLManagement = () => {
             <div>In Use</div>
           </Card>
         </Col>
-        <Col span={6}>
+        <Col xs={12} sm={12} md={6} lg={4}>
           <Tooltip
             title={expiringSoon.length > 0 ? (
               <div>
@@ -837,12 +845,20 @@ const SSLManagement = () => {
             </Card>
           </Tooltip>
         </Col>
-        <Col span={6}>
+        <Col xs={12} sm={12} md={6} lg={4}>
           <Card size="small" style={{ textAlign: 'center' }}>
             <div style={{ fontSize: 20, fontWeight: 'bold', color: '#ff4d4f' }}>
               {certificates.filter(c => c.expiry_date && new Date(c.expiry_date) < new Date()).length}
             </div>
             <div>Expired</div>
+          </Card>
+        </Col>
+        <Col xs={12} sm={12} md={6} lg={4}>
+          <Card size="small" style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 20, fontWeight: 'bold', color: '#13c2c2' }}>
+              {certificates.filter(c => c.source === 'letsencrypt').length}
+            </div>
+            <div>Auto-Managed</div>
           </Card>
         </Col>
       </Row>
@@ -861,6 +877,34 @@ const SSLManagement = () => {
           }}
         />
       </Card>
+    </>
+  );
+
+  return (
+    <div>
+      <Title level={2} style={{ margin: 0, marginBottom: 16 }}>
+        <LockOutlined style={{ marginRight: 8, color: '#52c41a' }} />
+        SSL Certificate Management
+        {selectedCluster && (
+          <Text type="secondary" style={{ fontSize: '14px', fontWeight: 'normal', marginLeft: '8px' }}>
+            - {selectedCluster.name}
+          </Text>
+        )}
+      </Title>
+      <Tabs
+        items={[
+          {
+            key: 'certificates',
+            label: 'Certificates',
+            children: certificatesContent,
+          },
+          {
+            key: 'acme',
+            label: <span><ThunderboltOutlined /> ACME Automation</span>,
+            children: <ACMEAutomation />,
+          },
+        ]}
+      />
 
       {/* Add Certificate Modal */}
       <Modal
@@ -979,6 +1023,16 @@ const SSLManagement = () => {
             style={{ marginBottom: 16 }}
           />
 
+          {isLetsEncryptCert && (
+            <Alert
+              type="info"
+              showIcon
+              icon={<SafetyCertificateOutlined />}
+              message="This certificate is managed by ACME automation. Content updates happen automatically during renewals."
+              style={{ marginBottom: 16 }}
+            />
+          )}
+
           <Form.Item
             name="certificate_content"
             label="Certificate Content (PEM Format)"
@@ -987,9 +1041,8 @@ const SSLManagement = () => {
           >
             <TextArea
               rows={8}
-              placeholder="-----BEGIN CERTIFICATE-----
-MIIDXTCCAkWgAwIBAgIJAKoK/OvD...
------END CERTIFICATE-----"
+              disabled={isLetsEncryptCert}
+              placeholder={isLetsEncryptCert ? "Managed by ACME automation" : "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJAKoK/OvD...\n-----END CERTIFICATE-----"}
             />
           </Form.Item>
 
@@ -1047,9 +1100,8 @@ MIIDXTCCAkWgAwIBAgIJAKoK/OvD...
                 >
                   <TextArea
                     rows={8}
-                    placeholder="-----BEGIN PRIVATE KEY-----
-MIIEvgIBADANBgkqhkiG9w0BAQEF...
------END PRIVATE KEY-----"
+                    disabled={isLetsEncryptCert}
+                    placeholder={isLetsEncryptCert ? "Managed by ACME automation" : "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEF...\n-----END PRIVATE KEY-----"}
                   />
                 </Form.Item>
               );
@@ -1063,9 +1115,8 @@ MIIEvgIBADANBgkqhkiG9w0BAQEF...
           >
             <TextArea
               rows={4}
-              placeholder="-----BEGIN CERTIFICATE-----
-...intermediate certificate...
------END CERTIFICATE-----"
+              disabled={isLetsEncryptCert}
+              placeholder={isLetsEncryptCert ? "Managed by ACME automation" : "-----BEGIN CERTIFICATE-----\n...intermediate certificate...\n-----END CERTIFICATE-----"}
             />
           </Form.Item>
 

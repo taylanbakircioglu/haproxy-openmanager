@@ -19,6 +19,8 @@ class HAProxyClusterUpdate(BaseModel):
     haproxy_bin_path: Optional[str] = None
     pool_id: Optional[int] = None
     is_active: Optional[bool] = None
+    acme_enabled: Optional[bool] = None
+    acme_backend_url: Optional[str] = None
 
 class HAProxyClusterResponse(BaseModel):
     id: int

@@ -1,0 +1,19 @@
+# Local build override for development testing
+# Usage: docker compose -f docker-compose.yml -f docker-compose.localtest.yml up --build -d
+# This overrides the pre-built images with local builds for backend and frontend.
+
+services:
+  backend:
+    image: haproxy-openmanager-backend:localtest
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    volumes:
+      - haproxy_configs:/etc/haproxy
+      - ./version.json:/app/version.json:ro
+
+  frontend:
+    image: haproxy-openmanager-frontend:localtest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile

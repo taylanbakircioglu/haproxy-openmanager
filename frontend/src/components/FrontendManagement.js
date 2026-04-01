@@ -440,7 +440,7 @@ const FrontendManagement = () => {
       if (response.data.sync_results && response.data.sync_results.length > 0) {
         const agentResults = response.data.sync_results.filter(r => r.success);
         if (agentResults.length > 0) {
-          message.info(`Configuration applied to ${agentResults.length} agent(s). HAProxy reloaded.`);
+          message.info(`Configuration published. ${agentResults.length} agent(s) notified, sync in progress.`);
         }
       }
       

@@ -271,7 +271,7 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
         # Check if cluster exists and get current values
         existing_cluster = await conn.fetchrow("""
             SELECT name, description, connection_type, is_active, stats_socket_path, 
-                   haproxy_config_path, haproxy_bin_path, pool_id 
+                   haproxy_config_path, haproxy_bin_path, pool_id, acme_enabled 
             FROM haproxy_clusters WHERE id = $1
         """, cluster_id)
         if not existing_cluster:
@@ -322,11 +322,36 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
             update_fields.append(f"pool_id = ${param_counter}")
             update_values.append(cluster.pool_id)
             param_counter += 1
+
+        if cluster.acme_enabled is not None:
+            update_fields.append(f"acme_enabled = ${param_counter}")
+            update_values.append(cluster.acme_enabled)
+            param_counter += 1
+        if cluster.acme_backend_url is not None:
+            update_fields.append(f"acme_backend_url = ${param_counter}")
+            update_values.append(cluster.acme_backend_url)
+            param_counter += 1
         
         # Only execute update if there are fields to update
         if update_fields:
             update_query = f"UPDATE haproxy_clusters SET {', '.join(update_fields)} WHERE id = $1"
             await conn.execute(update_query, *update_values)
+
+        # If acme_enabled actually changed, create a PENDING config version
+        if cluster.acme_enabled is not None and cluster.acme_enabled != existing_cluster.get('acme_enabled', False):
+            try:
+                from services.haproxy_config import generate_haproxy_config_for_cluster
+                config_content = await generate_haproxy_config_for_cluster(cluster_id)
+                import time as _time
+                version_name = f"cluster-{cluster_id}-acme-{'enable' if cluster.acme_enabled else 'disable'}-{int(_time.time())}"
+                conn2 = await get_database_connection()
+                await conn2.execute("""
+                    INSERT INTO config_versions (cluster_id, version_name, config_content, status, created_by)
+                    VALUES ($1, $2, $3, 'PENDING', $4)
+                """, cluster_id, version_name, config_content, current_user.get('id', 1))
+                await close_database_connection(conn2)
+            except Exception as acme_err:
+                logger.error(f"Failed to create ACME config version for cluster {cluster_id}: {acme_err}")
         
         await close_database_connection(conn)
         
@@ -395,7 +420,7 @@ async def get_cluster(cluster_id: int):
         cluster = await conn.fetchrow("""
             SELECT c.id, c.name, c.description, c.connection_type, c.is_active, 
                    c.created_at, c.stats_socket_path, c.haproxy_config_path, c.haproxy_bin_path,
-                   c.pool_id, c.is_default,
+                   c.pool_id, c.is_default, c.acme_enabled, c.acme_backend_url,
                    p.name as pool_name
             FROM haproxy_clusters c
             LEFT JOIN haproxy_cluster_pools p ON c.pool_id = p.id
@@ -419,7 +444,9 @@ async def get_cluster(cluster_id: int):
             "haproxy_config_path": cluster["haproxy_config_path"],
             "haproxy_bin_path": cluster["haproxy_bin_path"],
             "pool_id": cluster["pool_id"],
-            "pool_name": cluster["pool_name"]
+            "pool_name": cluster["pool_name"],
+            "acme_enabled": cluster.get("acme_enabled", False),
+            "acme_backend_url": cluster.get("acme_backend_url")
         }
     except HTTPException:
         raise
@@ -493,7 +520,7 @@ async def get_clusters():
         clusters = await conn.fetch("""
             SELECT c.id, c.name, c.description, c.connection_type, c.is_active, 
                    c.created_at, c.stats_socket_path, c.haproxy_config_path, c.haproxy_bin_path,
-                   c.pool_id, c.is_default,
+                   c.pool_id, c.is_default, c.acme_enabled, c.acme_backend_url,
                    p.name as pool_name,
                    COALESCE(agent_counts.total_agents, 0) as total_agents,
                    COALESCE(agent_counts.healthy_agents, 0) as healthy_agents,
@@ -553,6 +580,8 @@ async def get_clusters():
                 "haproxy_bin_path": cluster["haproxy_bin_path"],
                 "pool_id": cluster["pool_id"],
                 "pool_name": cluster["pool_name"],
+                "acme_enabled": cluster.get("acme_enabled", False),
+                "acme_backend_url": cluster.get("acme_backend_url"),
                 # Agent status information
                 "total_agents": total,
                 "healthy_agents": healthy,
@@ -4731,6 +4760,12 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                         WHERE id = ANY($1)
                     """, ssl_ids)
                     logger.info(f"REJECT: Updated {len(ssl_ids)} SSL certificates status to APPLIED (rolled back)")
+
+                    # Disable auto-renewal for rejected LE certs to prevent renewal loops
+                    await conn.execute("""
+                        UPDATE ssl_certificates SET auto_renew = FALSE
+                        WHERE id = ANY($1) AND source = 'letsencrypt'
+                    """, ssl_ids)
                     
                     # SSL AUTO-REJECT: Reject ALL remaining PENDING SSL config_versions on ALL other clusters
                     # SSL is a global entity - reject on one cluster means reject everywhere

@@ -633,7 +633,7 @@ const ApplyManagement = () => {
       if (response.data.sync_results && response.data.sync_results.length > 0) {
         const agentResults = response.data.sync_results.filter(r => r.success);
         if (agentResults.length > 0) {
-          message.info(`Configuration applied to ${agentResults.length} agent(s). HAProxy reloaded.`);
+          message.info(`Configuration published. ${agentResults.length} agent(s) notified, sync in progress.`);
         }
       }
       
@@ -1256,7 +1256,7 @@ const ApplyManagement = () => {
                         color="orange"
                         dot={<ClockCircleOutlined style={{ color: '#faad14' }} />}
                       >
-                        <div style={{ fontSize: 12 }}>
+                        <div style={{ fontSize: 12, wordBreak: 'break-all' }}>
                           <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{version.version_name}</div>
                           <div style={{ color: '#666', marginBottom: 8 }}>
                             {new Date(version.created_at).toLocaleString()}
@@ -1308,7 +1308,7 @@ const ApplyManagement = () => {
                             color={index === 0 ? 'green' : 'gray'}
                             dot={index === 0 ? <CheckCircleOutlined style={{ color: '#52c41a' }} /> : undefined}
                           >
-                            <div style={{ fontSize: 12 }}>
+                            <div style={{ fontSize: 12, wordBreak: 'break-all' }}>
                               <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{version.version_name}</div>
                               <div style={{ color: '#666', marginBottom: 8 }}>
                                 {new Date(version.created_at).toLocaleString()}
@@ -1355,7 +1355,7 @@ const ApplyManagement = () => {
                             color="red"
                             dot={<CloseCircleOutlined style={{ color: '#ff4d4f' }} />}
                           >
-                            <div style={{ fontSize: 12 }}>
+                            <div style={{ fontSize: 12, wordBreak: 'break-all' }}>
                               <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{version.version_name}</div>
                               <div style={{ color: '#666', marginBottom: 8 }}>
                                 Rejected: {new Date(version.updated_at || version.created_at).toLocaleString()}

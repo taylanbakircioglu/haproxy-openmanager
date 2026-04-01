@@ -2,14 +2,23 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import logging
+import json
+import os
 import redis
 import asyncio
 from datetime import datetime, timedelta
 
+_version_info = {"version": "1.1.0", "releaseName": "ACME Auto SSL", "releaseDate": "2026-04-01"}
+for _vpath in ["/app/version.json", os.path.join(os.path.dirname(__file__), "..", "version.json")]:
+    try:
+        with open(_vpath) as _vf:
+            _version_info = json.load(_vf)
+        break
+    except (FileNotFoundError, json.JSONDecodeError):
+        continue
+
+# Version: 2026-04-01 - ACME Auto SSL v1.1.0
 # Version: 2025-10-20 - Agent script fixes deployed
-# - Removed 'local' keyword from DAEMON mode (bash syntax fix)
-# - Listen blocks preservation in DAEMON mode
-# - Applied config version tracking improvements
 
 # Import configurations and database
 
@@ -25,6 +34,8 @@ from routers.security import router as security_router
 from routers.configuration import router as configuration_router
 from routers.maintenance import router as maintenance_router
 from routers.dashboard_stats import router as dashboard_stats_router
+from routers.settings import router as settings_router
+from routers.letsencrypt import router as letsencrypt_router
 
 # Production logging configuration
 from utils.logging_config import setup_production_logging
@@ -40,7 +51,7 @@ logger = setup_production_logging(LOG_LEVEL)
 # Initialize FastAPI app with detailed API documentation
 app = FastAPI(
     title="HAProxy Open Manager API", 
-    version="1.0.5",
+    version=_version_info["version"],
     description="""
 # HAProxy Open Manager - Enterprise Multi-Cluster Management API
 
@@ -236,6 +247,167 @@ async def monitor_agent_status():
         # Wait 30 seconds before next check
         await asyncio.sleep(30)
 
+# Background task for ACME certificate auto-renewal
+async def check_letsencrypt_renewals():
+    """Background task to auto-renew expiring ACME certificates."""
+    await asyncio.sleep(120)
+    while True:
+        conn = None
+        try:
+            conn = await get_database_connection()
+            table_exists = await conn.fetchval("""
+                SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'letsencrypt_orders')
+            """)
+            if not table_exists:
+                await close_database_connection(conn)
+                conn = None
+                await asyncio.sleep(3600)
+                continue
+
+            auto_renew_setting = await conn.fetchval(
+                "SELECT value FROM system_settings WHERE key = 'acme.auto_renew_enabled'"
+            )
+            auto_renew_enabled = False
+            if auto_renew_setting:
+                try:
+                    val = json.loads(auto_renew_setting) if isinstance(auto_renew_setting, str) else auto_renew_setting
+                    auto_renew_enabled = val in (True, 'true', 'True')
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            if not auto_renew_enabled:
+                await close_database_connection(conn)
+                conn = None
+                await asyncio.sleep(3600)
+                continue
+
+            renew_days_raw = await conn.fetchval(
+                "SELECT value FROM system_settings WHERE key = 'acme.renew_before_days'"
+            )
+            renew_days = 30
+            if renew_days_raw:
+                try:
+                    renew_days = int(json.loads(renew_days_raw) if isinstance(renew_days_raw, str) else renew_days_raw)
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    pass
+
+            expiring_certs = await conn.fetch("""
+                SELECT id, name, primary_domain, letsencrypt_order_id
+                FROM ssl_certificates
+                WHERE source = 'letsencrypt' AND auto_renew = TRUE AND is_active = TRUE
+                AND expiry_date IS NOT NULL
+                AND expiry_date <= (CURRENT_DATE + ($1 || ' days')::INTERVAL)
+            """, str(renew_days))
+
+            await close_database_connection(conn)
+            conn = None
+
+            from routers.letsencrypt import _complete_certificate
+            from services.acme_service import acme_service as acme_svc
+
+            # --- Phase 1: Create new orders for expiring certificates ---
+            for cert in expiring_certs:
+                try:
+                    order_id = cert['letsencrypt_order_id']
+                    if not order_id:
+                        continue
+
+                    conn2 = await get_database_connection()
+                    order = None
+                    domains = None
+                    cluster_ids = None
+                    skip = False
+                    try:
+                        order = await conn2.fetchrow(
+                            "SELECT account_id, domains, cluster_ids FROM letsencrypt_orders WHERE id = $1",
+                            order_id
+                        )
+                        if order:
+                            domains = json.loads(order['domains']) if isinstance(order['domains'], str) else order['domains']
+                            cluster_ids = json.loads(order['cluster_ids']) if isinstance(order['cluster_ids'], str) else order['cluster_ids']
+                            existing = await conn2.fetchrow("""
+                                SELECT id FROM letsencrypt_orders
+                                WHERE domains::text = $1::text
+                                AND status NOT IN ('valid', 'invalid', 'cancelled')
+                                AND created_at > NOW() - INTERVAL '48 hours'
+                                LIMIT 1
+                            """, json.dumps(domains))
+                            if existing:
+                                logger.info(f"ACME RENEWAL: Skipping cert {cert['id']} - order {existing['id']} already in progress")
+                                skip = True
+                    finally:
+                        await close_database_connection(conn2)
+
+                    if not order or skip:
+                        continue
+
+                    new_order = await acme_svc.create_order(order['account_id'], domains, cluster_ids)
+                    await acme_svc.respond_to_challenges(new_order['order_id'])
+                    logger.info(f"ACME RENEWAL: Initiated renewal order {new_order['order_id']} for cert {cert['id']} ({cert['name']})")
+                except Exception as cert_err:
+                    logger.error(f"ACME RENEWAL ERROR: Failed to initiate renewal for cert {cert['id']}: {cert_err}")
+
+            # --- Phase 2: Poll and complete in-progress orders ---
+            conn_poll = await get_database_connection()
+            try:
+                in_progress = await conn_poll.fetch("""
+                    SELECT id, status FROM letsencrypt_orders
+                    WHERE (
+                        status IN ('pending', 'processing', 'ready')
+                        OR (status = 'valid' AND ssl_certificate_id IS NULL)
+                    )
+                    AND created_at > NOW() - INTERVAL '7 days'
+                    ORDER BY created_at
+                """)
+            finally:
+                await close_database_connection(conn_poll)
+
+            for order_row in in_progress:
+                oid = order_row['id']
+                try:
+                    status_info = await acme_svc.check_order_status(oid)
+                    current_status = status_info.get('status', order_row['status'])
+
+                    if current_status == 'ready':
+                        await acme_svc.finalize_order(oid)
+                        status_info = await acme_svc.check_order_status(oid)
+                        current_status = status_info.get('status')
+
+                    if current_status == 'valid' and status_info.get('certificate_url'):
+                        result = await _complete_certificate(oid)
+                        logger.info(f"ACME RENEWAL: Completed order {oid} - {result.get('message', '')}")
+                    elif current_status == 'invalid':
+                        logger.warning(f"ACME RENEWAL: Order {oid} is invalid, skipping")
+                    elif current_status in ('pending', 'processing'):
+                        logger.info(f"ACME RENEWAL: Order {oid} still {current_status}, will retry next cycle")
+                except Exception as poll_err:
+                    logger.error(f"ACME RENEWAL: Failed to poll/complete order {oid}: {poll_err}")
+
+            # --- Phase 3: Warn about stuck orders ---
+            conn3 = await get_database_connection()
+            try:
+                stuck_orders = await conn3.fetch("""
+                    SELECT id, status, domains, created_at FROM letsencrypt_orders
+                    WHERE status IN ('pending', 'processing')
+                    AND created_at < NOW() - INTERVAL '24 hours'
+                    AND created_at > NOW() - INTERVAL '7 days'
+                """)
+            finally:
+                await close_database_connection(conn3)
+            if stuck_orders:
+                stuck_ids = [str(o['id']) for o in stuck_orders]
+                logger.warning(f"ACME RENEWAL WARNING: {len(stuck_orders)} order(s) stuck > 24h: IDs=[{', '.join(stuck_ids)}]")
+
+        except Exception as e:
+            logger.error(f"Error in ACME renewal check: {e}")
+            if conn:
+                try:
+                    await close_database_connection(conn)
+                except Exception:
+                    pass
+        await asyncio.sleep(3600)
+
+
 # Background task for agent upgrade timeout cleanup
 async def cleanup_stuck_agent_upgrades():
     """Background task to reset agents stuck in 'upgrading' status
@@ -342,6 +514,8 @@ app.include_router(waf_router)
 app.include_router(ssl_router)
 app.include_router(security_router)
 app.include_router(configuration_router)
+app.include_router(settings_router)
+app.include_router(letsencrypt_router)
 
 @app.on_event("startup")
 async def startup_event():
@@ -426,6 +600,10 @@ async def startup_event():
         asyncio.create_task(cleanup_stuck_agent_upgrades())
         logger.info("Agent upgrade timeout cleanup task started (5 minute timeout)")
         
+        # Start ACME certificate auto-renewal task
+        asyncio.create_task(check_letsencrypt_renewals())
+        logger.info("ACME certificate auto-renewal task started (hourly checks)")
+        
         # Create test activity log entry to verify system is working
         try:
             from utils.activity_log import log_user_activity
@@ -434,7 +612,7 @@ async def startup_event():
                 action='system_startup',
                 resource_type='system',
                 resource_id='main',
-                details={'event': 'HAProxy OpenManager system started', 'version': '1.0.1'},
+                details={'event': 'HAProxy OpenManager system started', 'version': _version_info["version"]},
                 ip_address='127.0.0.1',
                 user_agent='HAProxy-OpenManager-System'
             )
@@ -464,7 +642,34 @@ async def shutdown_event():
 @app.get("/")
 async def root():
     """Root endpoint"""
-    return {"message": "HAProxy Management UI API", "version": "1.0.1"}
+    return {"message": "HAProxy Management UI API", "version": _version_info["version"]}
+
+@app.get("/api/version")
+async def get_version():
+    """Return application version information"""
+    return _version_info
+
+@app.get("/.well-known/acme-challenge/{token}")
+async def serve_acme_challenge(token: str):
+    """Serve ACME HTTP-01 challenge token. Public endpoint, no auth required."""
+    conn = None
+    try:
+        conn = await get_database_connection()
+        row = await conn.fetchrow(
+            "SELECT key_authorization FROM acme_challenges WHERE token = $1 AND status IN ('pending', 'processing') LIMIT 1",
+            token
+        )
+        if row:
+            from fastapi.responses import PlainTextResponse
+            return PlainTextResponse(row['key_authorization'])
+        raise HTTPException(status_code=404, detail="Challenge not found")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=404, detail="Challenge not found")
+    finally:
+        if conn:
+            await close_database_connection(conn)
 
 @app.get("/api/health")
 async def health_check():

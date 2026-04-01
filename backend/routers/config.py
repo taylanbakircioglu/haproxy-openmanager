@@ -1386,7 +1386,7 @@ async def bulk_create_entities(
             # CRITICAL: Reserved names that conflict with common HAProxy listen sections
             # Agent preserves existing listen blocks (e.g., 'listen stats') from local config
             # Creating entities with these names causes "proxy has same name" errors
-            reserved_names = {'stats', 'haproxy-stats', 'haproxy_stats', 'monitoring', 'admin', 'health', 'status'}
+            reserved_names = {'stats', 'haproxy-stats', 'haproxy_stats', 'monitoring', 'admin', 'health', 'status', '_acme_challenge_backend'}
             
             # DYNAMIC COLLISION CHECK: Get agent listen blocks for this cluster
             # NOTE: Wrapped in try-except for backwards compatibility (column may not exist before migration)

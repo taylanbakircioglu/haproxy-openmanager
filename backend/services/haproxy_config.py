@@ -3,6 +3,7 @@ import logging
 import hashlib
 import time
 import json
+import urllib.parse
 from typing import Optional, List, Dict, Any
 from database.connection import get_database_connection, close_database_connection
 
@@ -332,6 +333,12 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 config_lines.append(f"    bind {frontend['bind_address']}:{frontend['bind_port']}")
             
             config_lines.append(f"    mode {frontend['mode']}")
+            
+            # ACME HTTP-01 Challenge routing (auto-managed)
+            if frontend['mode'] == 'http' and cluster_info.get('acme_enabled', False):
+                config_lines.append("    acl is_acme_challenge path_beg /.well-known/acme-challenge/")
+                config_lines.append("    http-request allow if is_acme_challenge")
+                config_lines.append("    use_backend _acme_challenge_backend if is_acme_challenge")
             
             # Frontend Options (option httplog, option forwardfor, etc.)
             # Place options early as per HAProxy best practice
@@ -823,6 +830,40 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             
             config_lines.append("")
         
+        # ACME challenge backend section
+        if cluster_info.get('acme_enabled', False):
+            acme_url = cluster_info.get('acme_backend_url') or ''
+            if not acme_url:
+                try:
+                    acme_settings = await db_conn.fetchrow(
+                        "SELECT value FROM system_settings WHERE key = 'acme.challenge_backend_url'"
+                    )
+                    if acme_settings and acme_settings['value']:
+                        val = acme_settings['value']
+                        if isinstance(val, str):
+                            try:
+                                val = json.loads(val)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        if val:
+                            acme_url = str(val)
+                except Exception:
+                    pass
+            if not acme_url:
+                from config import MANAGEMENT_BASE_URL
+                acme_url = MANAGEMENT_BASE_URL
+
+            parsed = urllib.parse.urlparse(acme_url)
+            host = parsed.hostname or 'localhost'
+            port = parsed.port or (443 if parsed.scheme == 'https' else 8080)
+            ssl_flag = ' ssl verify none' if parsed.scheme == 'https' else ''
+
+            config_lines.append("# ACME Challenge Backend (auto-managed by HAProxy OpenManager)")
+            config_lines.append("backend _acme_challenge_backend")
+            config_lines.append("    mode http")
+            config_lines.append(f"    server _acme_mgmt {host}:{port}{ssl_flag}")
+            config_lines.append("")
+
         # Only close the connection if it was created within this function
         if not conn:
             await close_database_connection(db_conn)
