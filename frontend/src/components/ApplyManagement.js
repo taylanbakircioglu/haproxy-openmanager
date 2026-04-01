@@ -1243,39 +1243,41 @@ const ApplyManagement = () => {
 
             {/* Pending Versions Section */}
             {pendingVersions.length > 0 && (
-              <div style={{ marginBottom: 24 }}>
-                <Title level={5}>
+              <div style={{ marginBottom: 24, background: '#fffbe6', borderRadius: 8, border: '1px solid #ffe58f', padding: '16px 16px 8px' }}>
+                <Title level={5} style={{ marginTop: 0 }}>
                   <ClockCircleOutlined style={{ marginRight: 8, color: '#faad14' }} />
                   Pending Changes ({pendingVersions.length})
                 </Title>
-                <Timeline size="small">
-                  {pendingVersions.map((version, index) => (
-                    <Timeline.Item 
-                      key={version.id}
-                      color="orange"
-                      dot={<ClockCircleOutlined style={{ color: '#faad14' }} />}
-                    >
-                      <div style={{ fontSize: 12 }}>
-                        <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{version.version_name}</div>
-                        <div style={{ color: '#666', marginBottom: 8 }}>
-                          {new Date(version.created_at).toLocaleString()}
+                <div style={{ maxHeight: 240, overflowY: 'auto', paddingRight: 8 }}>
+                  <Timeline size="small">
+                    {pendingVersions.map((version, index) => (
+                      <Timeline.Item 
+                        key={version.id}
+                        color="orange"
+                        dot={<ClockCircleOutlined style={{ color: '#faad14' }} />}
+                      >
+                        <div style={{ fontSize: 12 }}>
+                          <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{version.version_name}</div>
+                          <div style={{ color: '#666', marginBottom: 8 }}>
+                            {new Date(version.created_at).toLocaleString()}
+                          </div>
+                          <div style={{ marginBottom: 4 }}>
+                            <Tag color="orange" size="small">PENDING</Tag>
+                          </div>
+                          <Button
+                            type="link"
+                            size="small"
+                            icon={<EyeOutlined />}
+                            onClick={() => handleViewChange(version)}
+                            style={{ padding: 0, height: 'auto', fontSize: 11 }}
+                          >
+                            View Change
+                          </Button>
                         </div>
-                        <div style={{ marginBottom: 4 }}>
-                          <Tag color="orange" size="small">PENDING</Tag>
-                        </div>
-                        <Button
-                          type="link"
-                          size="small"
-                          icon={<EyeOutlined />}
-                          onClick={() => handleViewChange(version)}
-                          style={{ padding: 0, height: 'auto', fontSize: 11 }}
-                        >
-                          View Change
-                        </Button>
-                      </div>
-                    </Timeline.Item>
-                  ))}
-                </Timeline>
+                      </Timeline.Item>
+                    ))}
+                  </Timeline>
+                </div>
               </div>
             )}
 
@@ -1298,31 +1300,33 @@ const ApplyManagement = () => {
                       style={{ margin: '20px 0' }}
                     />
                   ) : (
-                    <Timeline size="small">
-                      {appliedVersions.map((version, index) => (
-                        <Timeline.Item 
-                          key={version.id}
-                          color={index === 0 ? 'green' : 'gray'}
-                          dot={index === 0 ? <CheckCircleOutlined style={{ color: '#52c41a' }} /> : undefined}
-                        >
-                          <div style={{ fontSize: 12 }}>
-                            <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{version.version_name}</div>
-                            <div style={{ color: '#666', marginBottom: 8 }}>
-                              {new Date(version.created_at).toLocaleString()}
+                    <div style={{ maxHeight: 420, overflowY: 'auto', paddingRight: 8 }}>
+                      <Timeline size="small">
+                        {appliedVersions.map((version, index) => (
+                          <Timeline.Item 
+                            key={version.id}
+                            color={index === 0 ? 'green' : 'gray'}
+                            dot={index === 0 ? <CheckCircleOutlined style={{ color: '#52c41a' }} /> : undefined}
+                          >
+                            <div style={{ fontSize: 12 }}>
+                              <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{version.version_name}</div>
+                              <div style={{ color: '#666', marginBottom: 8 }}>
+                                {new Date(version.created_at).toLocaleString()}
+                              </div>
+                              <Button
+                                type="link"
+                                size="small"
+                                icon={<EyeOutlined />}
+                                onClick={() => handleViewChange(version)}
+                                style={{ padding: 0, height: 'auto', fontSize: 11 }}
+                              >
+                                View Change
+                              </Button>
                             </div>
-                            <Button
-                              type="link"
-                              size="small"
-                              icon={<EyeOutlined />}
-                              onClick={() => handleViewChange(version)}
-                              style={{ padding: 0, height: 'auto', fontSize: 11 }}
-                            >
-                              View Change
-                            </Button>
-                          </div>
-                        </Timeline.Item>
-                      ))}
-                    </Timeline>
+                          </Timeline.Item>
+                        ))}
+                      </Timeline>
+                    </div>
                   )}
                 </TabPane>
                 
@@ -1343,42 +1347,44 @@ const ApplyManagement = () => {
                       style={{ margin: '20px 0' }}
                     />
                   ) : (
-                    <Timeline size="small">
-                      {rejectedVersions.map((version, index) => (
-                        <Timeline.Item 
-                          key={version.id}
-                          color="red"
-                          dot={<CloseCircleOutlined style={{ color: '#ff4d4f' }} />}
-                        >
-                          <div style={{ fontSize: 12 }}>
-                            <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{version.version_name}</div>
-                            <div style={{ color: '#666', marginBottom: 8 }}>
-                              Rejected: {new Date(version.updated_at || version.created_at).toLocaleString()}
+                    <div style={{ maxHeight: 420, overflowY: 'auto', paddingRight: 8 }}>
+                      <Timeline size="small">
+                        {rejectedVersions.map((version, index) => (
+                          <Timeline.Item 
+                            key={version.id}
+                            color="red"
+                            dot={<CloseCircleOutlined style={{ color: '#ff4d4f' }} />}
+                          >
+                            <div style={{ fontSize: 12 }}>
+                              <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{version.version_name}</div>
+                              <div style={{ color: '#666', marginBottom: 8 }}>
+                                Rejected: {new Date(version.updated_at || version.created_at).toLocaleString()}
+                              </div>
+                              <Space size="small">
+                                <Button
+                                  type="link"
+                                  size="small"
+                                  icon={<EyeOutlined />}
+                                  onClick={() => handleViewChange(version)}
+                                  style={{ padding: 0, height: 'auto', fontSize: 11 }}
+                                >
+                                  View Changes
+                                </Button>
+                                <Button
+                                  type="link"
+                                  size="small"
+                                  icon={<UndoOutlined />}
+                                  onClick={() => handleUndoRejected(version)}
+                                  style={{ padding: 0, height: 'auto', fontSize: 11, color: '#1890ff' }}
+                                >
+                                  Undo
+                                </Button>
+                              </Space>
                             </div>
-                            <Space size="small">
-                              <Button
-                                type="link"
-                                size="small"
-                                icon={<EyeOutlined />}
-                                onClick={() => handleViewChange(version)}
-                                style={{ padding: 0, height: 'auto', fontSize: 11 }}
-                              >
-                                View Changes
-                              </Button>
-                              <Button
-                                type="link"
-                                size="small"
-                                icon={<UndoOutlined />}
-                                onClick={() => handleUndoRejected(version)}
-                                style={{ padding: 0, height: 'auto', fontSize: 11, color: '#1890ff' }}
-                              >
-                                Undo
-                              </Button>
-                            </Space>
-                          </div>
-                        </Timeline.Item>
-                      ))}
-                    </Timeline>
+                          </Timeline.Item>
+                        ))}
+                      </Timeline>
+                    </div>
                   )}
                 </TabPane>
               </Tabs>

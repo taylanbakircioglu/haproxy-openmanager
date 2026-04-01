@@ -45,6 +45,10 @@ async def ensure_agents_table():
             await conn.execute("CREATE TYPE config_status AS ENUM ('PENDING', 'APPLIED');")
             logger.info("Successfully created config_status enum type.")
 
+        await conn.execute("ALTER TYPE config_status ADD VALUE IF NOT EXISTS 'REJECTED';")
+        await conn.execute("ALTER TYPE config_status ADD VALUE IF NOT EXISTS 'DELETION';")
+        logger.info("Ensured REJECTED and DELETION values exist in config_status enum.")
+
         # First, create essential tables if they don't exist
         await create_essential_tables(conn)
         
