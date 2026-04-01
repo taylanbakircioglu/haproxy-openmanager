@@ -61,7 +61,8 @@ const ACMEAutomation = () => {
   const nextRenewal = renewalSchedule.find(c => c.auto_renew && calcDaysLeft(c.expiry_date) > 0);
   const nextRenewalDays = nextRenewal ? calcDaysLeft(nextRenewal.expiry_date) : null;
   const pendingOrders = orders.filter(o => o.status === 'pending' || o.status === 'processing');
-  const acmeAccount = accounts.length > 0 ? accounts[accounts.length - 1] : null;
+  const activeAccount = accounts.find(a => a.status === 'valid') || null;
+  const acmeAccount = activeAccount || (accounts.length > 0 ? accounts[accounts.length - 1] : null);
 
   const handleRequestCert = async () => {
     try {
@@ -182,6 +183,32 @@ const ACMEAutomation = () => {
           fetchData();
         } catch (err) {
           message.error(err?.response?.data?.detail || 'Failed to deactivate account');
+        }
+      },
+    });
+  };
+
+  const handleRemoveAccount = (accountId, email) => {
+    Modal.confirm({
+      title: 'Permanently Remove Account',
+      content: (
+        <div>
+          <p>Are you sure you want to permanently remove <strong>{email}</strong> from the database?</p>
+          <p style={{ color: '#ff4d4f' }}>
+            This will delete the account record and all associated orders from the local database.
+            This action cannot be undone.
+          </p>
+        </div>
+      ),
+      okText: 'Remove Permanently',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          await axios.delete(`/api/letsencrypt/accounts/${accountId}/permanent`);
+          message.success('Account permanently removed');
+          fetchData();
+        } catch (err) {
+          message.error(err?.response?.data?.detail || 'Failed to remove account');
         }
       },
     });
@@ -394,9 +421,9 @@ const ACMEAutomation = () => {
           <Card>
             <Statistic
               title="ACME Account"
-              value={acmeAccount ? 'Active' : 'None'}
-              prefix={acmeAccount ? <CheckCircleOutlined /> : <ExclamationCircleOutlined />}
-              valueStyle={{ color: acmeAccount ? '#52c41a' : '#faad14' }}
+              value={activeAccount ? 'Active' : acmeAccount ? 'Inactive' : 'None'}
+              prefix={activeAccount ? <CheckCircleOutlined /> : <ExclamationCircleOutlined />}
+              valueStyle={{ color: activeAccount ? '#52c41a' : '#faad14' }}
             />
             {acmeAccount && (
               <div style={{ fontSize: 12, color: '#888', marginTop: 4 }}>{acmeAccount.email}</div>
@@ -612,13 +639,23 @@ const ACMEAutomation = () => {
                         }}
                       />
                     </Tooltip>
-                    {record.status !== 'deactivated' && (
+                    {record.status !== 'deactivated' ? (
                       <Tooltip title="Deactivate">
                         <Button
                           icon={<DeleteOutlined />}
                           size="small"
                           danger
                           onClick={() => handleDeactivateAccount(record.id, record.email)}
+                        />
+                      </Tooltip>
+                    ) : (
+                      <Tooltip title="Remove from database">
+                        <Button
+                          icon={<DeleteOutlined />}
+                          size="small"
+                          danger
+                          type="text"
+                          onClick={() => handleRemoveAccount(record.id, record.email)}
                         />
                       </Tooltip>
                     )}

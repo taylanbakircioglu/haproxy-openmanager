@@ -108,6 +108,41 @@ async def deactivate_account(account_id: int, authorization: str = Header(None))
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.delete("/accounts/{account_id}/permanent")
+async def remove_account(account_id: int, authorization: str = Header(None)):
+    from auth_middleware import get_current_user_from_token
+    current_user = await get_current_user_from_token(authorization)
+    if not current_user.get('is_admin', False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    conn = await get_database_connection()
+    try:
+        account = await conn.fetchrow(
+            "SELECT id, status, email FROM letsencrypt_accounts WHERE id = $1", account_id
+        )
+        if not account:
+            raise HTTPException(status_code=404, detail="Account not found")
+        if account['status'] != 'deactivated':
+            raise HTTPException(
+                status_code=409,
+                detail="Only deactivated accounts can be permanently removed. Deactivate first."
+            )
+
+        linked_orders = await conn.fetchval(
+            "SELECT COUNT(*) FROM letsencrypt_orders WHERE account_id = $1", account_id
+        )
+        if linked_orders > 0:
+            await conn.execute(
+                "DELETE FROM letsencrypt_orders WHERE account_id = $1", account_id
+            )
+
+        await conn.execute("DELETE FROM letsencrypt_accounts WHERE id = $1", account_id)
+        logger.info(f"ACME account {account['email']} (id={account_id}) permanently removed by user {current_user.get('username')}")
+        return {"message": f"Account {account['email']} permanently removed", "deleted_orders": linked_orders}
+    finally:
+        await close_database_connection(conn)
+
+
 # --- Certificate operations ---
 
 @router.post("/certificates")

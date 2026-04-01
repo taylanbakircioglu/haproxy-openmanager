@@ -1248,7 +1248,7 @@ const ApplyManagement = () => {
                   <ClockCircleOutlined style={{ marginRight: 8, color: '#faad14' }} />
                   Pending Changes ({pendingVersions.length})
                 </Title>
-                <div style={{ maxHeight: 240, overflowY: 'auto', paddingRight: 8 }}>
+                <div style={{ maxHeight: 240, overflowY: 'auto', paddingRight: 8, paddingTop: 4 }}>
                   <Timeline size="small">
                     {pendingVersions.map((version, index) => (
                       <Timeline.Item 
@@ -1300,7 +1300,7 @@ const ApplyManagement = () => {
                       style={{ margin: '20px 0' }}
                     />
                   ) : (
-                    <div style={{ maxHeight: 420, overflowY: 'auto', paddingRight: 8 }}>
+                    <div style={{ maxHeight: 420, overflowY: 'auto', paddingRight: 8, paddingTop: 4 }}>
                       <Timeline size="small">
                         {appliedVersions.map((version, index) => (
                           <Timeline.Item 
@@ -1347,7 +1347,7 @@ const ApplyManagement = () => {
                       style={{ margin: '20px 0' }}
                     />
                   ) : (
-                    <div style={{ maxHeight: 420, overflowY: 'auto', paddingRight: 8 }}>
+                    <div style={{ maxHeight: 420, overflowY: 'auto', paddingRight: 8, paddingTop: 4 }}>
                       <Timeline size="small">
                         {rejectedVersions.map((version, index) => (
                           <Timeline.Item 
