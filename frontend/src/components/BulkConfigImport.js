@@ -14,7 +14,8 @@ import {
   message,
   Descriptions,
   Collapse,
-  Tooltip
+  Tooltip,
+  theme
 } from 'antd';
 import {
   UploadOutlined,
@@ -52,6 +53,7 @@ const calculateLineDiff = (oldValue, newValue) => {
 
 // Helper component: Render line-by-line diff for multi-line fields
 const MultiLineDiffRenderer = ({ value, changeInfo }) => {
+  const { token } = theme.useToken();
   if (!changeInfo) {
     // No changes, just show the value
     return (
@@ -70,7 +72,7 @@ const MultiLineDiffRenderer = ({ value, changeInfo }) => {
         <div style={{ 
           marginBottom: diff.added.length > 0 ? 8 : 0,
           padding: '4px 8px', 
-          backgroundColor: '#fff1f0',
+          backgroundColor: token.colorErrorBg,
           borderLeft: '3px solid #ff4d4f',
           borderRadius: 2
         }}>
@@ -90,7 +92,7 @@ const MultiLineDiffRenderer = ({ value, changeInfo }) => {
       {diff.added.length > 0 && (
         <div style={{ 
           padding: '4px 8px', 
-          backgroundColor: '#f6ffed',
+          backgroundColor: token.colorSuccessBg,
           borderLeft: '3px solid #52c41a',
           borderRadius: 2
         }}>
@@ -114,6 +116,7 @@ const MultiLineDiffRenderer = ({ value, changeInfo }) => {
 
 // Helper component to display field changes (old vs new)
 const FieldChange = ({ label, oldValue, newValue, span = 2, isMultiline = false }) => {
+  const { token } = theme.useToken();
   // Handle case where oldValue is explicitly undefined (no _changes object)
   // vs null (field was empty in DB)
   const hasOldValue = oldValue !== undefined;
@@ -139,7 +142,7 @@ const FieldChange = ({ label, oldValue, newValue, span = 2, isMultiline = false 
           <div style={{ 
             marginBottom: 8, 
             padding: '4px 8px', 
-            backgroundColor: '#fff1f0',
+            backgroundColor: token.colorErrorBg,
             borderLeft: '3px solid #ff4d4f',
             borderRadius: 2
           }}>
@@ -148,7 +151,7 @@ const FieldChange = ({ label, oldValue, newValue, span = 2, isMultiline = false 
             <Text delete code={!isMultiline} style={{ 
               whiteSpace: isMultiline ? 'pre-wrap' : 'normal', 
               fontSize: '11px',
-              color: '#999' 
+              color: token.colorTextTertiary 
             }}>
               {oldValue}
             </Text>
@@ -156,7 +159,7 @@ const FieldChange = ({ label, oldValue, newValue, span = 2, isMultiline = false 
         )}
         <div style={hasChange ? { 
           padding: '4px 8px', 
-          backgroundColor: '#f6ffed',
+          backgroundColor: token.colorSuccessBg,
           borderLeft: '3px solid #52c41a',
           borderRadius: 2
         } : {}}>
@@ -176,6 +179,7 @@ const FieldChange = ({ label, oldValue, newValue, span = 2, isMultiline = false 
 };
 
 const BulkConfigImport = () => {
+  const { token } = theme.useToken();
   const { selectedCluster } = useContext(ClusterContext);
   const [configContent, setConfigContent] = useState('');
   const [loading, setLoading] = useState(false);
@@ -603,76 +607,85 @@ backend web-backend
         <Space direction="vertical" size="large" style={{ width: '100%' }}>
           {/* Header */}
           <div>
-            <Title level={3}>
+            <Title level={3} style={{ marginBottom: 12 }}>
               <FileTextOutlined /> Bulk HAProxy Config Import
             </Title>
-            <Alert
-              message="Import Backend and Frontend Definitions"
-              description={
-                <div>
-                  <p>This bulk import feature allows you to quickly import HAProxy backend and frontend definitions.</p>
-                  <ul>
-                    <li><strong>Note:</strong> Only backend and frontend definitions can be imported via bulk import</li>
-                    <li>SSL certificate and WAF configurations should be configured separately through their respective pages</li>
-                    <li>After parsing, review the entities and confirm to create them</li>
-                    <li>Created entities will be in PENDING status and require Apply Changes to activate</li>
-                  </ul>
-                  <Button 
-                    type="link" 
-                    icon={<QuestionCircleOutlined />}
-                    onClick={() => setExampleModalVisible(true)}
-                  >
-                    View Example Config
-                  </Button>
-                </div>
-              }
-              type="info"
-              showIcon
+
+            <Collapse
+              ghost
               style={{ marginBottom: 16 }}
-            />
-            
-            <Alert
-              message="Smart SSL Auto-Assignment"
-              description={
-                <div>
-                  <p><strong>Tip for faster import:</strong> If your configuration includes SSL certificates, you can automate SSL assignment:</p>
-                  <ol style={{ marginBottom: 8 }}>
-                    <li>First, go to <strong>SSL Management</strong> page</li>
-                    <li>Create SSL certificates by entering PEM content with the <strong>exact same name</strong> as in your config</li>
-                    <li>Click <strong>Apply Changes</strong> and wait for SYNCED status</li>
-                    <li>Then perform bulk import - SSL will be automatically assigned</li>
-                  </ol>
-                  <div style={{ background: '#f0f2f5', padding: '8px 12px', borderRadius: '4px', marginTop: 8 }}>
-                    <Text strong>Example:</Text>
-                    <div style={{ marginTop: 4 }}>
-                      <Text code style={{ fontSize: '11px' }}>bind :443 ssl crt /etc/ssl/haproxy/demo-global.pem</Text>
-                      <br />
-                      <Text code style={{ fontSize: '11px' }}>server s1 ... ca-file /etc/ssl/haproxy/elastic.pem</Text>
+            >
+              <Panel
+                header={<span><InfoCircleOutlined style={{ marginRight: 8 }} />Import Guidelines</span>}
+                key="guidelines"
+              >
+                <Alert
+                  message="Import Backend and Frontend Definitions"
+                  description={
+                    <div>
+                      <p>This bulk import feature allows you to quickly import HAProxy backend and frontend definitions.</p>
+                      <ul>
+                        <li><strong>Note:</strong> Only backend and frontend definitions can be imported via bulk import</li>
+                        <li>SSL certificate and WAF configurations should be configured separately through their respective pages</li>
+                        <li>After parsing, review the entities and confirm to create them</li>
+                        <li>Created entities will be in PENDING status and require Apply Changes to activate</li>
+                      </ul>
+                      <Button 
+                        type="link" 
+                        icon={<QuestionCircleOutlined />}
+                        onClick={() => setExampleModalVisible(true)}
+                      >
+                        View Example Config
+                      </Button>
                     </div>
-                    <div style={{ marginTop: 8 }}>
-                      <Text type="secondary" style={{ fontSize: '12px' }}>
-                        → Upload certificates named: <Tag>demo-global</Tag> <Tag>elastic</Tag>
-                        <br />
-                        → Apply and wait for SYNCED
-                        <br />
-                        → Bulk import will auto-assign these SSL certificates
-                        <br />
-                        → No manual edit needed after import!
-                      </Text>
+                  }
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                />
+                <Alert
+                  message="Smart SSL Auto-Assignment"
+                  description={
+                    <div>
+                      <p><strong>Tip for faster import:</strong> If your configuration includes SSL certificates, you can automate SSL assignment:</p>
+                      <ol style={{ marginBottom: 8 }}>
+                        <li>First, go to <strong>SSL Management</strong> page</li>
+                        <li>Create SSL certificates by entering PEM content with the <strong>exact same name</strong> as in your config</li>
+                        <li>Click <strong>Apply Changes</strong> and wait for SYNCED status</li>
+                        <li>Then perform bulk import - SSL will be automatically assigned</li>
+                      </ol>
+                      <div style={{ background: token.colorBgLayout, padding: '8px 12px', borderRadius: '4px', marginTop: 8 }}>
+                        <Text strong>Example:</Text>
+                        <div style={{ marginTop: 4 }}>
+                          <Text code style={{ fontSize: '11px' }}>bind :443 ssl crt /etc/ssl/haproxy/demo-global.pem</Text>
+                          <br />
+                          <Text code style={{ fontSize: '11px' }}>server s1 ... ca-file /etc/ssl/haproxy/elastic.pem</Text>
+                        </div>
+                        <div style={{ marginTop: 8 }}>
+                          <Text type="secondary" style={{ fontSize: '12px' }}>
+                            Upload certificates named: <Tag>demo-global</Tag> <Tag>elastic</Tag>
+                            <br />
+                            Apply and wait for SYNCED
+                            <br />
+                            Bulk import will auto-assign these SSL certificates
+                            <br />
+                            No manual edit needed after import!
+                          </Text>
+                        </div>
+                      </div>
+                      <div style={{ marginTop: 8 }}>
+                        <Text type="warning" style={{ fontSize: '12px' }}>
+                          <WarningOutlined /> If SSL names don't match, import will work without SSL (you can assign manually later)
+                        </Text>
+                      </div>
                     </div>
-                  </div>
-                  <div style={{ marginTop: 8 }}>
-                    <Text type="warning" style={{ fontSize: '12px' }}>
-                      <WarningOutlined /> If SSL names don't match, import will work without SSL (you can assign manually later)
-                    </Text>
-                  </div>
-                </div>
-              }
-              type="success"
-              showIcon
-              icon={<CheckCircleOutlined />}
-              style={{ marginBottom: 16 }}
-            />
+                  }
+                  type="success"
+                  showIcon
+                  icon={<CheckCircleOutlined />}
+                />
+              </Panel>
+            </Collapse>
 
             {selectedCluster && (
               <Alert
@@ -693,46 +706,28 @@ backend web-backend
           </div>
 
           {/* Config Input */}
-          <Card title="Step 1: Enter HAProxy Configuration" size="small">
-            <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-              <Alert
-                message="Supported Sections"
-                description={
-                  <div>
-                    <Text strong>✅ Supported:</Text> <code>frontend</code> and <code>backend</code> sections only.
-                    <br />
-                    <Text strong>❌ Not Supported:</Text> <code>global</code>, <code>defaults</code>, and <code>listen</code> sections will be ignored.
-                    <br />
-                    <Text type="secondary" style={{ fontSize: '12px' }}>
-                      Global and default settings are managed at the cluster level.
-                      Convert any <code>listen</code> sections to separate <code>frontend</code> and <code>backend</code> sections.
-                    </Text>
-                  </div>
-                }
-                type="info"
-                showIcon
-                icon={<InfoCircleOutlined />}
-                style={{ marginBottom: 12 }}
-              />
-              <TextArea
-                rows={12}
-                placeholder="Paste your HAProxy configuration here (frontend and backend sections)..."
-                value={configContent}
-                onChange={(e) => setConfigContent(e.target.value)}
-                style={{ fontFamily: 'monospace', fontSize: '13px' }}
-              />
-              <Button
-                type="primary"
-                icon={<UploadOutlined />}
-                onClick={handleParseConfig}
-                loading={loading}
-                disabled={!selectedCluster || !configContent.trim()}
-                size="large"
-              >
-                Parse Configuration
-              </Button>
-            </Space>
-          </Card>
+          <div>
+            <Text type="secondary" style={{ display: 'block', marginBottom: 8, fontSize: '13px' }}>
+              Supported: <code>frontend</code> and <code>backend</code> sections. Global, defaults, and listen sections will be ignored.
+            </Text>
+            <TextArea
+              rows={12}
+              placeholder="Paste your HAProxy configuration here (frontend and backend sections)..."
+              value={configContent}
+              onChange={(e) => setConfigContent(e.target.value)}
+              style={{ fontFamily: 'monospace', fontSize: '13px', marginBottom: 12 }}
+            />
+            <Button
+              type="primary"
+              icon={<UploadOutlined />}
+              onClick={handleParseConfig}
+              loading={loading}
+              disabled={!selectedCluster || !configContent.trim()}
+              size="large"
+            >
+              Parse Configuration
+            </Button>
+          </div>
 
           {/* Errors and Warnings */}
           {errors.length > 0 && (
@@ -1355,7 +1350,7 @@ backend web-backend
           This is an example HAProxy configuration that can be imported via bulk import:
         </Paragraph>
         <div style={{ 
-          backgroundColor: '#f5f5f5', 
+          backgroundColor: token.colorFillQuaternary, 
           padding: 16, 
           borderRadius: 4,
           fontFamily: 'monospace',

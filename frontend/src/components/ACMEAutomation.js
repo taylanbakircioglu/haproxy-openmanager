@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Card, Table, Button, Tag, Space, Modal, Form, Input, Select, Steps,
-  message, Row, Col, Statistic, Alert, Tooltip, Switch
+  message, Row, Col, Statistic, Alert, Tooltip, Switch, theme
 } from 'antd';
 import {
   SafetyCertificateOutlined, PlusOutlined, ReloadOutlined,
@@ -30,6 +30,7 @@ const ACMEAutomation = () => {
   const [registerForm] = Form.useForm();
   const [registering, setRegistering] = useState(false);
   const [accountDetailVisible, setAccountDetailVisible] = useState(false);
+  const { token } = theme.useToken();
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -349,12 +350,12 @@ const ACMEAutomation = () => {
       title: 'Review',
       content: (
         <>
-          {!acmeAccount && (
+          {!activeAccount && (
             <Alert
               type="error"
               showIcon
-              message="No ACME Account"
-              description="Please configure an ACME account in Settings > ACME first."
+              message="No Active ACME Account"
+              description="Please register an active ACME account in Settings > ACME or from the ACME Account card."
               style={{ marginBottom: 16 }}
             />
           )}
@@ -373,7 +374,7 @@ const ACMEAutomation = () => {
             message="Prerequisite Check"
             description={
               <ul style={{ margin: 0, paddingLeft: 20 }}>
-                <li>ACME Account: {acmeAccount ? <Tag color="success">Configured ({acmeAccount.email})</Tag> : <Tag color="error">Not configured</Tag>}</li>
+                <li>ACME Account: {activeAccount ? <Tag color="success">Active ({activeAccount.email})</Tag> : <Tag color="error">No active account</Tag>}</li>
                 <li>ACME-enabled Clusters: {acmeEnabledClusters.length > 0 ? <Tag color="success">{acmeEnabledClusters.map(c => c.name).join(', ')}</Tag> : <Tag color="warning">None</Tag>}</li>
                 <li>Domains must resolve to HAProxy node IPs for HTTP-01 validation</li>
               </ul>
@@ -426,7 +427,7 @@ const ACMEAutomation = () => {
               valueStyle={{ color: activeAccount ? '#52c41a' : '#faad14' }}
             />
             {acmeAccount && (
-              <div style={{ fontSize: 12, color: '#888', marginTop: 4 }}>{acmeAccount.email}</div>
+              <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 4 }}>{acmeAccount.email}</div>
             )}
             <div style={{ marginTop: 8, display: 'flex', gap: 4 }}>
               <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setRegisterVisible(true)}>
@@ -520,7 +521,7 @@ const ACMEAutomation = () => {
             </Button>
           )}
           {wizardStep === wizardSteps.length - 1 && (
-            <Button type="primary" onClick={handleRequestCert} loading={submitting} disabled={!acmeAccount}>
+            <Button type="primary" onClick={handleRequestCert} loading={submitting} disabled={!activeAccount}>
               Submit Request
             </Button>
           )}
@@ -706,7 +707,7 @@ const ACMEAutomation = () => {
           >
             <Switch checkedChildren="Accepted" unCheckedChildren="Not Accepted" />
           </Form.Item>
-          <div style={{ fontSize: 12, color: '#888' }}>
+          <div style={{ fontSize: 12, color: token.colorTextSecondary }}>
             By accepting, you agree to the ACME CA's Terms of Service (e.g.{' '}
             <a href="https://letsencrypt.org/repository/" target="_blank" rel="noopener noreferrer">
               Let's Encrypt Subscriber Agreement

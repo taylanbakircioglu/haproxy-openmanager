@@ -19,7 +19,8 @@ import {
   Badge,
   Tree,
   Typography,
-  Divider
+  Divider,
+  theme
 } from 'antd';
 import {
   UserOutlined,
@@ -224,6 +225,7 @@ const PERMISSION_TREE = [
 
 const UserManagement = () => {
   const { isAdmin } = useAuth(); // Get admin status from auth context
+  const { token } = theme.useToken();
   const [activeTab, setActiveTab] = useState('users');
   
   // Users state
@@ -1026,12 +1028,12 @@ const UserManagement = () => {
                        height: 32,
                        paddingLeft: 8,
                        paddingRight: 8,
-                       border: '1px solid #d9d9d9',
+                       border: `1px solid ${token.colorBorder}`,
                        borderRadius: 6,
                        fontSize: 14,
                        outline: 'none',
                        boxShadow: 'none',
-                       backgroundColor: '#fff',
+                       backgroundColor: token.colorBgContainer,
                        transition: 'border-color 0.3s ease'
                      }}
                      onFocus={(e) => {
@@ -1040,7 +1042,7 @@ const UserManagement = () => {
                        e.target.style.boxShadow = 'none';
                      }}
                      onBlur={(e) => {
-                       e.target.style.borderColor = '#d9d9d9';
+                       e.target.style.borderColor = token.colorBorder;
                      }}
                      onMouseOver={(e) => {
                        if (e.target !== document.activeElement) {
@@ -1049,7 +1051,7 @@ const UserManagement = () => {
                      }}
                      onMouseOut={(e) => {
                        if (e.target !== document.activeElement) {
-                         e.target.style.borderColor = '#d9d9d9';
+                         e.target.style.borderColor = token.colorBorder;
                        }
                      }}
                    />
@@ -1105,12 +1107,13 @@ const UserManagement = () => {
                        height: 32,
                        paddingLeft: 8,
                        paddingRight: 8,
-                       border: '1px solid #d9d9d9',
+                       border: `1px solid ${token.colorBorder}`,
                        borderRadius: 6,
                        fontSize: 14,
                        outline: 'none',
                        boxShadow: 'none',
-                       backgroundColor: '#fff',
+                       backgroundColor: token.colorBgContainer,
+                       color: token.colorText,
                        transition: 'border-color 0.3s ease'
                      }}
                      onFocus={(e) => {
@@ -1119,7 +1122,7 @@ const UserManagement = () => {
                        e.target.style.boxShadow = 'none';
                      }}
                      onBlur={(e) => {
-                       e.target.style.borderColor = '#d9d9d9';
+                       e.target.style.borderColor = token.colorBorder;
                      }}
                      onMouseOver={(e) => {
                        if (e.target !== document.activeElement) {
@@ -1128,7 +1131,7 @@ const UserManagement = () => {
                      }}
                      onMouseOut={(e) => {
                        if (e.target !== document.activeElement) {
-                         e.target.style.borderColor = '#d9d9d9';
+                         e.target.style.borderColor = token.colorBorder;
                        }
                      }}
                    />

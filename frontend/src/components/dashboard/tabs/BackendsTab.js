@@ -4,7 +4,7 @@
  */
 
 import React, { useMemo } from 'react';
-import { Row, Col, Card, Statistic, Divider, Empty, Select, Space, Spin, Typography } from 'antd';
+import { Row, Col, Card, Statistic, Divider, Empty, Select, Space, Spin, Typography, theme } from 'antd';
 import { GlobalOutlined, CloudServerOutlined, FilterOutlined } from '@ant-design/icons';
 
 import CompactServerList from '../CompactServerList';
@@ -22,6 +22,7 @@ const BackendsTab = React.memo(({
   onBackendChange,
   cacheLoading
 }) => {
+  const { token } = theme.useToken();
   // Memoize filter options
   const filterOptions = useMemo(() => [
     { label: '📊 All Backends', value: 'all' },
@@ -35,7 +36,7 @@ const BackendsTab = React.memo(({
         size="small"
         style={{
           marginBottom: 24,
-          backgroundColor: '#fafafa',
+          backgroundColor: token.colorFillQuaternary,
           borderRadius: 8
         }}
       >

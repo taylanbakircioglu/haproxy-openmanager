@@ -1,6 +1,6 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useLocation } from 'react-router-dom';
-import { Layout, Menu, theme, Spin, Button, Dropdown, Avatar, Typography, ConfigProvider } from 'antd';
+import { Layout, Menu, theme, Spin, Button, Dropdown, Avatar, Typography, ConfigProvider, Tooltip } from 'antd';
 import {
   DashboardOutlined,
   SettingOutlined,
@@ -18,7 +18,9 @@ import {
   CloudUploadOutlined,
   ApiOutlined,
   SearchOutlined,
-  ClusterOutlined
+  ClusterOutlined,
+  BulbOutlined,
+  BulbFilled
 } from '@ant-design/icons';
 
 import Dashboard from './components/DashboardV2';
@@ -52,7 +54,7 @@ import './App.css';
 const { Header, Sider, Content } = Layout;
 const { Text } = Typography;
 
-// v1.1.0 - ACME Auto SSL
+// v1.2.0 - Dark Mode + UI Improvements
 
   const menuItems = [
     {
@@ -139,7 +141,7 @@ const { Text } = Typography;
 
 function AppContent() {
   const {
-    token: { colorBgContainer },
+    token: { colorBgContainer, colorTextSecondary, colorBgLayout },
   } = theme.useToken();
   
   const navigate = useNavigate();
@@ -147,7 +149,7 @@ function AppContent() {
   const [selectedKey, setSelectedKey] = React.useState(location.pathname);
   const [collapsed, setCollapsed] = React.useState(false);
   const { user, logout, isAuthenticated, loading, getUserRoleNames } = useAuth();
-  const { isDarkMode } = useTheme();
+  const { isDarkMode, toggleTheme } = useTheme();
   const [appVersion, setAppVersion] = React.useState('');
 
   React.useEffect(() => {
@@ -171,7 +173,7 @@ function AppContent() {
       label: (
         <div style={{ padding: '8px 0' }}>
           <div style={{ fontWeight: 500 }}>{user?.username}</div>
-          <div style={{ fontSize: '12px', color: '#666' }}>{getUserRoleNames()}</div>
+          <div style={{ fontSize: '12px', color: colorTextSecondary }}>{getUserRoleNames()}</div>
         </div>
       ),
       disabled: true,
@@ -208,11 +210,6 @@ function AppContent() {
   }
 
   return (
-    <ConfigProvider
-      theme={{
-        algorithm: isDarkMode ? theme.darkAlgorithm : theme.defaultAlgorithm,
-      }}
-    >
       <Layout style={{ minHeight: '100vh' }}>
         <Sider
           trigger={null}
@@ -224,6 +221,7 @@ function AppContent() {
           onBreakpoint={(broken) => {
             setCollapsed(broken);
           }}
+          style={isDarkMode ? { background: '#141414' } : undefined}
         >
           <div style={{ 
             height: 64, 
@@ -267,6 +265,7 @@ function AppContent() {
             mode="inline"
             selectedKeys={[selectedKey]}
             items={menuItems}
+            style={isDarkMode ? { background: '#141414' } : undefined}
           />
           {!collapsed && appVersion && (
             <div style={{
@@ -280,7 +279,7 @@ function AppContent() {
             </div>
           )}
         </Sider>
-        <Layout>
+        <Layout style={{ background: colorBgLayout }}>
           <Header
             style={{
               padding: 0,
@@ -322,7 +321,15 @@ function AppContent() {
                 <ClusterSelector />
               )}
             </div>
-            <div style={{ padding: '0 24px' }}>
+            <div style={{ padding: '0 24px', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Tooltip title={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}>
+                <Button
+                  type="text"
+                  icon={isDarkMode ? <BulbOutlined /> : <BulbFilled />}
+                  onClick={toggleTheme}
+                  style={{ fontSize: '18px' }}
+                />
+              </Tooltip>
               <Dropdown
                 menu={{ items: userMenuItems }}
                 trigger={['click']}
@@ -376,13 +383,17 @@ function AppContent() {
           </Content>
                 </Layout>
       </Layout>
-    </ConfigProvider>
   );
 }
 
-function App() {
+function ThemedApp() {
+  const { isDarkMode } = useTheme();
   return (
-    <ThemeProvider>
+    <ConfigProvider
+      theme={{
+        algorithm: isDarkMode ? theme.darkAlgorithm : theme.defaultAlgorithm,
+      }}
+    >
       <AuthProvider>
         <ClusterProvider>
           <ProgressProvider>
@@ -393,6 +404,14 @@ function App() {
           </ProgressProvider>
         </ClusterProvider>
       </AuthProvider>
+    </ConfigProvider>
+  );
+}
+
+function App() {
+  return (
+    <ThemeProvider>
+      <ThemedApp />
     </ThemeProvider>
   );
 }

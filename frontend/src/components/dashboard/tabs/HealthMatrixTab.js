@@ -4,7 +4,7 @@
  */
 
 import React, { useMemo } from 'react';
-import { Row, Col, Card, Empty, Select, Space, Spin, Typography } from 'antd';
+import { Row, Col, Card, Empty, Select, Space, Spin, Typography, theme } from 'antd';
 import { BarChart, Bar, CartesianGrid, XAxis, YAxis, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
 import { FilterOutlined } from '@ant-design/icons';
 
@@ -30,6 +30,7 @@ const HealthMatrixTab = React.memo(({
   onBackendChange,
   cacheLoading
 }) => {
+  const { token } = theme.useToken();
   // Memoize filter options
   const filterOptions = useMemo(() => [
     { label: '📊 All Backends', value: 'all' },
@@ -43,7 +44,7 @@ const HealthMatrixTab = React.memo(({
         size="small"
         style={{
           marginBottom: 24,
-          backgroundColor: '#fafafa',
+          backgroundColor: token.colorFillQuaternary,
           borderRadius: 8
         }}
       >
@@ -135,16 +136,24 @@ const HealthMatrixTab = React.memo(({
             >
               <ResponsiveContainer width="100%" height={250}>
                 <BarChart data={slowestBackends} layout="vertical" margin={{ left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis type="number" />
+                  <CartesianGrid strokeDasharray="3 3" stroke={token.colorBorderSecondary} />
+                  <XAxis type="number" tick={{ fill: token.colorTextSecondary }} stroke={token.colorBorder} />
                   <YAxis
                     dataKey="name"
                     type="category"
                     width={200}
                     style={{ fontSize: 11 }}
-                    tick={{ fill: '#595959' }}
+                    tick={{ fill: token.colorTextSecondary }}
+                    stroke={token.colorBorder}
                   />
-                  <RechartsTooltip />
+                  <RechartsTooltip
+                    contentStyle={{
+                      backgroundColor: token.colorBgElevated,
+                      border: `1px solid ${token.colorBorder}`,
+                      borderRadius: 4,
+                      color: token.colorText
+                    }}
+                  />
                   <Bar dataKey="response_time" fill={COLORS.warning} />
                 </BarChart>
               </ResponsiveContainer>

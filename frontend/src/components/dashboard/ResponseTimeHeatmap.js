@@ -1,10 +1,11 @@
 import React, { useMemo, memo } from 'react';
-import { Card, Empty, Spin, Typography, Tooltip, Tag, Space, Alert } from 'antd';
+import { Card, Empty, Spin, Typography, Tooltip, Tag, Space, Alert, theme } from 'antd';
 import { ClockCircleOutlined, InfoCircleOutlined } from '@ant-design/icons';
 
 const { Text } = Typography;
 
 const ResponseTimeHeatmap = memo(({ data, loading, title = "Response Time Heatmap (24h)" }) => {
+  const { token } = theme.useToken();
   // Memoize heavy computation - only recalculate when data changes
   // MUST be before any early returns (React Hooks rule)
   const { backends, matrix, hourBuckets, maxValue, minValue, avgValue, totalBackends } = useMemo(() => {
@@ -149,7 +150,7 @@ const ResponseTimeHeatmap = memo(({ data, loading, title = "Response Time Heatma
 
   // Helper functions for colors and labels
   const getColor = (value) => {
-    if (value === null) return '#f5f5f5';
+    if (value === null) return token.colorFillQuaternary;
     if (value < 50) return '#d9f7be'; // Excellent
     if (value < 100) return '#95de64'; // Good
     if (value < 200) return '#ffe58f'; // Fair
@@ -204,27 +205,27 @@ const ResponseTimeHeatmap = memo(({ data, loading, title = "Response Time Heatma
         flexWrap: 'wrap'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <div style={{ width: 20, height: 20, backgroundColor: '#d9f7be', border: '1px solid #ccc' }} />
+          <div style={{ width: 20, height: 20, backgroundColor: '#d9f7be', border: `1px solid ${token.colorBorder}` }} />
           <Text style={{ fontSize: 11 }}>{'<50ms'}</Text>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <div style={{ width: 20, height: 20, backgroundColor: '#95de64', border: '1px solid #ccc' }} />
+          <div style={{ width: 20, height: 20, backgroundColor: '#95de64', border: `1px solid ${token.colorBorder}` }} />
           <Text style={{ fontSize: 11 }}>{'<100ms'}</Text>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <div style={{ width: 20, height: 20, backgroundColor: '#ffe58f', border: '1px solid #ccc' }} />
+          <div style={{ width: 20, height: 20, backgroundColor: '#ffe58f', border: `1px solid ${token.colorBorder}` }} />
           <Text style={{ fontSize: 11 }}>{'<200ms'}</Text>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <div style={{ width: 20, height: 20, backgroundColor: '#ffc069', border: '1px solid #ccc' }} />
+          <div style={{ width: 20, height: 20, backgroundColor: '#ffc069', border: `1px solid ${token.colorBorder}` }} />
           <Text style={{ fontSize: 11 }}>{'<300ms'}</Text>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <div style={{ width: 20, height: 20, backgroundColor: '#ff9c6e', border: '1px solid #ccc' }} />
+          <div style={{ width: 20, height: 20, backgroundColor: '#ff9c6e', border: `1px solid ${token.colorBorder}` }} />
           <Text style={{ fontSize: 11 }}>{'<500ms'}</Text>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <div style={{ width: 20, height: 20, backgroundColor: '#ff4d4f', border: '1px solid #ccc' }} />
+          <div style={{ width: 20, height: 20, backgroundColor: '#ff4d4f', border: `1px solid ${token.colorBorder}` }} />
           <Text style={{ fontSize: 11 }}>{'>500ms'}</Text>
         </div>
       </div>
@@ -234,10 +235,10 @@ const ResponseTimeHeatmap = memo(({ data, loading, title = "Response Time Heatma
         <div style={{ 
           textAlign: 'center', 
           marginBottom: '8px',
-          color: '#8c8c8c',
+          color: token.colorTextSecondary,
           fontSize: '12px'
         }}>
-          ← Scroll horizontally to view all 24 hours →
+          Scroll horizontally to view all 24 hours
         </div>
       )}
 
@@ -246,7 +247,7 @@ const ResponseTimeHeatmap = memo(({ data, loading, title = "Response Time Heatma
         overflowX: 'auto', 
         overflowY: 'auto', 
         maxHeight: '600px',
-        border: '1px solid #d9d9d9',
+        border: `1px solid ${token.colorBorder}`,
         borderRadius: '4px',
         marginBottom: '8px'
       }}>
@@ -260,8 +261,8 @@ const ResponseTimeHeatmap = memo(({ data, loading, title = "Response Time Heatma
             <tr>
               <th style={{ 
                 padding: '8px', 
-                backgroundColor: '#fafafa',
-                border: '1px solid #d9d9d9',
+                backgroundColor: token.colorFillQuaternary,
+                border: `1px solid ${token.colorBorder}`,
                 fontWeight: 'bold',
                 position: 'sticky',
                 left: 0,
@@ -273,8 +274,8 @@ const ResponseTimeHeatmap = memo(({ data, loading, title = "Response Time Heatma
               {hourBuckets.map((bucket, i) => (
                 <th key={i} style={{ 
                   padding: '8px', 
-                  backgroundColor: '#fafafa',
-                  border: '1px solid #d9d9d9',
+                  backgroundColor: token.colorFillQuaternary,
+                  border: `1px solid ${token.colorBorder}`,
                   minWidth: '40px',
                   textAlign: 'center'
                 }}>
@@ -288,8 +289,8 @@ const ResponseTimeHeatmap = memo(({ data, loading, title = "Response Time Heatma
               <tr key={backend}>
                 <td style={{ 
                   padding: '8px', 
-                  backgroundColor: '#fafafa',
-                  border: '1px solid #d9d9d9',
+                  backgroundColor: token.colorFillQuaternary,
+                  border: `1px solid ${token.colorBorder}`,
                   fontWeight: 'bold',
                   position: 'sticky',
                   left: 0,
@@ -326,7 +327,7 @@ const ResponseTimeHeatmap = memo(({ data, loading, title = "Response Time Heatma
                     <td style={{ 
                       padding: '8px', 
                       backgroundColor: getColor(value),
-                      border: '1px solid #d9d9d9',
+                      border: `1px solid ${token.colorBorder}`,
                       cursor: 'pointer',
                       textAlign: 'center',
                       transition: 'all 0.2s'
@@ -364,7 +365,7 @@ const ResponseTimeHeatmap = memo(({ data, loading, title = "Response Time Heatma
       <div style={{ 
         marginTop: 16, 
         padding: '12px', 
-        backgroundColor: '#f5f5f5', 
+        backgroundColor: token.colorFillQuaternary, 
         borderRadius: '4px',
         display: 'flex',
         justifyContent: 'space-around',

@@ -157,4 +157,56 @@
 .ant-form-item-label > label {
   height: auto;
   line-height: 1.5715;
-} 
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   DARK MODE OVERRIDES
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+  --highlight-color: #ffffff;
+}
+
+[data-theme='dark'] {
+  --highlight-color: #2a2a2a;
+}
+
+[data-theme='dark'] .ant-layout-header {
+  border-bottom-color: #303030;
+}
+
+[data-theme='dark'] .site-layout .site-layout-background {
+  background: #141414;
+}
+
+[data-theme='dark'] .ant-layout-sider {
+  background: #141414 !important;
+}
+
+[data-theme='dark'] .ant-menu.ant-menu-dark {
+  background: #141414;
+}
+
+[data-theme='dark'] .ant-menu-dark .ant-menu-item-selected {
+  background-color: #177ddc !important;
+}
+
+[data-theme='dark'] .ant-layout-sider-zero-width-trigger {
+  background: #177ddc;
+}
+
+[data-theme='dark'] .active-version-row {
+  background-color: #162312 !important;
+}
+
+[data-theme='dark'] .active-version-row:hover > td {
+  background-color: #1a2e15 !important;
+}
+
+[data-theme='dark'] .agent-offline {
+  background-color: #2a1215 !important;
+}
+
+[data-theme='dark'] .agent-offline:hover > td {
+  background-color: #321518 !important;
+}

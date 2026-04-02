@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   Card, Button, Space, Row, Col, message, Alert, Spin, 
   Typography, Tag, Table, Modal, Divider, Badge, Empty,
-  Timeline, Descriptions, Tabs, Progress, Tooltip, Collapse, Steps, Input
+  Timeline, Descriptions, Tabs, Progress, Tooltip, Collapse, Steps, Input, theme
 } from 'antd';
 import { getAgentSyncColor, getConfigStatusColor, COLORS } from '../utils/colors';
 import { useProgress } from '../contexts/ProgressContext';
@@ -17,7 +17,6 @@ import {
 } from '@ant-design/icons';
 import axios from 'axios';
 import { useCluster } from '../contexts/ClusterContext';
-import { Select } from 'antd';
 import { useNavigate } from 'react-router-dom';
 import ValidationErrorModal from './ValidationErrorModal';
 
@@ -25,6 +24,7 @@ const { Title, Text, Paragraph } = Typography;
 const { TabPane } = Tabs;
 
 const ApplyManagement = () => {
+  const { token } = theme.useToken();
   const { selectedCluster } = useCluster();
   const navigate = useNavigate();
   
@@ -804,19 +804,19 @@ const ApplyManagement = () => {
     return (
       <div key={`${type}-${item.id}`} style={{ 
         padding: 12, 
-        border: '1px solid #d9d9d9', 
+        border: `1px solid ${token.colorBorder}`, 
         borderRadius: 6, 
         marginBottom: 8,
         display: 'flex',
         alignItems: 'center',
-        backgroundColor: '#fff'
+        backgroundColor: token.colorBgContainer
       }}>
         <div style={{ marginRight: 12, fontSize: 18 }}>
           {icon}
         </div>
         <div style={{ flex: 1 }}>
           <div style={{ fontWeight: 'bold' }}>{item.name}</div>
-          <div style={{ color: '#666', fontSize: 12 }}>
+          <div style={{ color: token.colorTextSecondary, fontSize: 12 }}>
             {type.charAt(0).toUpperCase() + type.slice(1)} • Updated: {new Date(item.updated_at).toLocaleString()}
           </div>
         </div>
@@ -1020,7 +1020,7 @@ const ApplyManagement = () => {
                           '100%': '#87d068',
                         }}
                       />
-                      <div style={{ marginTop: 8, color: '#666', fontSize: '12px' }}>
+                      <div style={{ marginTop: 8, color: token.colorTextSecondary, fontSize: '12px' }}>
                         {syncProgress.step}
                       </div>
                     </div>
@@ -1184,7 +1184,7 @@ const ApplyManagement = () => {
                                 {otherVersions.map(v => (
                                   <div key={v.id} style={{
                                     padding: 10,
-                                    border: '1px dashed #d9d9d9',
+                                    border: `1px dashed ${token.colorBorder}`,
                                     borderRadius: 6,
                                     marginBottom: 8,
                                     display: 'flex',
@@ -1230,7 +1230,7 @@ const ApplyManagement = () => {
                   {appliedVersions.length > 0 ? (
                     <div>
                       <div>{appliedVersions[0].version_name}</div>
-                      <div style={{ fontSize: 12, color: '#666' }}>
+                      <div style={{ fontSize: 12, color: token.colorTextSecondary }}>
                         {new Date(appliedVersions[0].created_at).toLocaleString()}
                       </div>
                     </div>
@@ -1258,7 +1258,7 @@ const ApplyManagement = () => {
                       >
                         <div style={{ fontSize: 12, wordBreak: 'break-all' }}>
                           <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{version.version_name}</div>
-                          <div style={{ color: '#666', marginBottom: 8 }}>
+                          <div style={{ color: token.colorTextSecondary, marginBottom: 8 }}>
                             {new Date(version.created_at).toLocaleString()}
                           </div>
                           <div style={{ marginBottom: 4 }}>
@@ -1310,7 +1310,7 @@ const ApplyManagement = () => {
                           >
                             <div style={{ fontSize: 12, wordBreak: 'break-all' }}>
                               <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{version.version_name}</div>
-                              <div style={{ color: '#666', marginBottom: 8 }}>
+                              <div style={{ color: token.colorTextSecondary, marginBottom: 8 }}>
                                 {new Date(version.created_at).toLocaleString()}
                               </div>
                               <Button
@@ -1357,7 +1357,7 @@ const ApplyManagement = () => {
                           >
                             <div style={{ fontSize: 12, wordBreak: 'break-all' }}>
                               <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{version.version_name}</div>
-                              <div style={{ color: '#666', marginBottom: 8 }}>
+                              <div style={{ color: token.colorTextSecondary, marginBottom: 8 }}>
                                 Rejected: {new Date(version.updated_at || version.created_at).toLocaleString()}
                               </div>
                               <Space size="small">
@@ -1622,8 +1622,8 @@ const ApplyManagement = () => {
             ) : diffData ? (
               <div>
                 <Title level={5}>Configuration Changes:</Title>
-                <div style={{ border: '1px solid #d9d9d9', borderRadius: 6, backgroundColor: '#fafafa' }}>
-                  <div style={{ padding: '12px', borderBottom: '1px solid #d9d9d9', backgroundColor: '#f0f0f0' }}>
+                <div style={{ border: `1px solid ${token.colorBorder}`, borderRadius: 6, backgroundColor: token.colorFillQuaternary }}>
+                  <div style={{ padding: '12px', borderBottom: `1px solid ${token.colorBorderSecondary}`, backgroundColor: token.colorFillTertiary }}>
                     <Text strong>Changes from previous version:</Text>
                   </div>
                   <div style={{ padding: '16px', fontFamily: 'monospace', fontSize: '12px', lineHeight: '1.4', maxHeight: '400px', overflowY: 'auto' }}>
@@ -1641,14 +1641,14 @@ const ApplyManagement = () => {
                             </div>
                           )}
                           {change.type === 'context' && (
-                            <div style={{ color: '#666', padding: '2px 8px' }}>
+                            <div style={{ color: token.colorTextSecondary, padding: '2px 8px' }}>
                               {change.line}
                             </div>
                           )}
                         </div>
                       ))
                     ) : (
-                      <div style={{ textAlign: 'center', padding: '40px 0', color: '#666' }}>
+                      <div style={{ textAlign: 'center', padding: '40px 0', color: token.colorTextSecondary }}>
                         No changes detected or this is the first version
                       </div>
                     )}
@@ -1657,14 +1657,14 @@ const ApplyManagement = () => {
                 {diffData.summary && (
                   <div style={{ marginTop: 16 }}>
                     <Title level={5}>Summary:</Title>
-                    <div style={{ backgroundColor: '#f9f9f9', padding: '12px', borderRadius: '6px', border: '1px solid #d9d9d9' }}>
+                    <div style={{ backgroundColor: token.colorFillQuaternary, padding: '12px', borderRadius: '6px', border: `1px solid ${token.colorBorder}` }}>
                       <Row gutter={16}>
                         <Col span={8}>
                           <div style={{ textAlign: 'center' }}>
                             <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#52c41a' }}>
                               +{diffData.summary.added || 0}
                             </div>
-                            <div style={{ fontSize: '12px', color: '#666' }}>Added Lines</div>
+                            <div style={{ fontSize: '12px', color: token.colorTextSecondary }}>Added Lines</div>
                           </div>
                         </Col>
                         <Col span={8}>
@@ -1672,7 +1672,7 @@ const ApplyManagement = () => {
                             <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#ff4d4f' }}>
                               -{diffData.summary.removed || 0}
                             </div>
-                            <div style={{ fontSize: '12px', color: '#666' }}>Removed Lines</div>
+                            <div style={{ fontSize: '12px', color: token.colorTextSecondary }}>Removed Lines</div>
                           </div>
                         </Col>
                         <Col span={8}>
@@ -1680,7 +1680,7 @@ const ApplyManagement = () => {
                             <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#1890ff' }}>
                               {diffData.summary.total_changes || 0}
                             </div>
-                            <div style={{ fontSize: '12px', color: '#666' }}>Total Changes</div>
+                            <div style={{ fontSize: '12px', color: token.colorTextSecondary }}>Total Changes</div>
                           </div>
                         </Col>
                       </Row>
@@ -1689,7 +1689,7 @@ const ApplyManagement = () => {
                 )}
               </div>
             ) : (
-              <div style={{ textAlign: 'center', padding: '40px 0', color: '#666' }}>
+              <div style={{ textAlign: 'center', padding: '40px 0', color: token.colorTextSecondary }}>
                 <ExclamationCircleOutlined style={{ fontSize: '24px', marginBottom: '8px' }} />
                 <div>Failed to load configuration changes</div>
               </div>

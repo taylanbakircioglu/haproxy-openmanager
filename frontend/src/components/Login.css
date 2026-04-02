@@ -1,5 +1,5 @@
 .login-container {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(160deg, #f0f5ff 0%, #e6f0ff 40%, #d6e4ff 100%);
   min-height: 100vh;
   display: flex;
   align-items: center;
@@ -16,16 +16,16 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><pattern id="grain" width="100" height="100" patternUnits="userSpaceOnUse"><circle cx="25" cy="25" r="1" fill="rgba(255,255,255,0.05)"/><circle cx="75" cy="75" r="1" fill="rgba(255,255,255,0.05)"/></pattern></defs><rect width="100" height="100" fill="url(%23grain)"/></svg>');
+  background: radial-gradient(ellipse at 20% 50%, rgba(24,144,255,0.08) 0%, transparent 50%),
+              radial-gradient(ellipse at 80% 20%, rgba(24,144,255,0.06) 0%, transparent 40%);
   pointer-events: none;
 }
 
 .login-card {
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15), 0 8px 30px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08), 0 2px 12px rgba(0, 0, 0, 0.04);
   border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  backdrop-filter: blur(20px);
-  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  background: #ffffff;
   overflow: hidden;
   max-width: 420px;
   width: 100%;
@@ -36,7 +36,7 @@
 
 .login-card:hover {
   transform: none;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15), 0 8px 30px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08), 0 2px 12px rgba(0, 0, 0, 0.04);
 }
 
 .login-card .ant-card-body {
@@ -69,7 +69,7 @@
 }
 
 .login-subtitle {
-  color: #8c8c8c;
+  color: #595959;
   font-size: 16px;
 }
 
@@ -296,7 +296,7 @@
 @media screen and (-webkit-min-device-pixel-ratio: 2),
        screen and (min-resolution: 192dpi) {
   .login-card {
-    backdrop-filter: blur(30px);
+    image-rendering: -webkit-optimize-contrast;
   }
 }
 
@@ -325,4 +325,54 @@
 .ant-input:focus-visible {
   outline: none;
   border-color: #1890ff;
-} 
+}
+
+/* Dark mode overrides */
+[data-theme='dark'] .login-container {
+  background: linear-gradient(160deg, #0a0a0a 0%, #111111 40%, #141414 100%);
+}
+
+[data-theme='dark'] .login-container::before {
+  background: radial-gradient(ellipse at 20% 50%, rgba(24,144,255,0.04) 0%, transparent 50%),
+              radial-gradient(ellipse at 80% 20%, rgba(24,144,255,0.03) 0%, transparent 40%);
+}
+
+[data-theme='dark'] .login-card {
+  background: #1f1f1f;
+  border-color: #303030;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 2px 12px rgba(0, 0, 0, 0.2);
+}
+
+[data-theme='dark'] .login-title {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+[data-theme='dark'] .login-subtitle {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+[data-theme='dark'] .ant-input-affix-wrapper,
+[data-theme='dark'] .ant-input {
+  background: #141414;
+  border-color: #434343;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+[data-theme='dark'] .ant-input-affix-wrapper:hover,
+[data-theme='dark'] .ant-input:hover {
+  border-color: #177ddc;
+}
+
+[data-theme='dark'] .ant-input-affix-wrapper:focus,
+[data-theme='dark'] .ant-input-affix-wrapper-focused,
+[data-theme='dark'] .ant-input:focus {
+  border-color: #177ddc;
+}
+
+[data-theme='dark'] .ant-input-prefix {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+[data-theme='dark'] .login-footer {
+  border-top-color: #303030;
+}

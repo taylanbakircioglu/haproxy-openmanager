@@ -12,7 +12,7 @@
 import React from 'react';
 import {
   Modal, Card, Space, Tag, Button, Alert, Divider,
-  Typography, Descriptions, Steps, Collapse, message
+  Typography, Descriptions, Steps, Collapse, message, theme
 } from 'antd';
 import {
   ExclamationCircleOutlined, CodeOutlined, CopyOutlined,
@@ -46,6 +46,7 @@ const ValidationErrorModal = ({
   validationErrorReportedAt,
   parsedError 
 }) => {
+  const { token } = theme.useToken();
   const navigate = useNavigate();
 
   // Copy raw error to clipboard
@@ -128,8 +129,8 @@ const ValidationErrorModal = ({
           size="small" 
           style={{ 
             marginBottom: 16, 
-            background: 'linear-gradient(135deg, #fff2f0 0%, #ffebe6 100%)',
-            border: '1px solid #ffccc7'
+            background: token.colorErrorBg,
+            border: `1px solid ${token.colorErrorBorder}`
           }}
         >
           <Descriptions column={2} size="small">
@@ -205,7 +206,7 @@ const ValidationErrorModal = ({
             </Space>
           }
           size="small" 
-          style={{ marginBottom: 16, background: '#fffbe6', border: '1px solid #ffe58f' }}
+          style={{ marginBottom: 16, background: token.colorWarningBg, border: `1px solid ${token.colorWarningBorder}` }}
         >
           <Paragraph type="secondary" style={{ marginBottom: 16 }}>
             The error message could not be automatically analyzed. Follow these steps to identify and fix the issue:

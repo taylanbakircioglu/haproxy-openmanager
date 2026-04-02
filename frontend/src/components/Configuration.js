@@ -14,7 +14,8 @@ import {
   Spin,
   Modal,
   Input,
-  Progress
+  Progress,
+  theme
 } from 'antd';
 import {
   DesktopOutlined,
@@ -60,6 +61,7 @@ const Configuration = () => {
   const pollCountRef = useRef(0);
   
   const { selectedCluster } = useCluster();
+  const { token } = theme.useToken();
 
   // Platform configuration
   const platformConfig = {
@@ -657,12 +659,12 @@ const Configuration = () => {
                   height: 32,
                   paddingLeft: 8,
                   paddingRight: searchText ? 32 : 8,
-                  border: '1px solid #d9d9d9',
+                  border: `1px solid ${token.colorBorder}`,
                   borderRadius: 6,
                   fontSize: 14,
                   outline: 'none',
                   boxShadow: 'none',
-                  backgroundColor: '#fff',
+                  backgroundColor: token.colorBgContainer,
                   transition: 'border-color 0.3s ease'
                 }}
                 onFocus={(e) => {
@@ -671,7 +673,7 @@ const Configuration = () => {
                   e.target.style.boxShadow = 'none';
                 }}
                 onBlur={(e) => {
-                  e.target.style.borderColor = '#d9d9d9';
+                  e.target.style.borderColor = token.colorBorder;
                 }}
               />
               {searchText && (
@@ -712,10 +714,10 @@ const Configuration = () => {
           <div style={{ 
             textAlign: 'center', 
             padding: '60px 20px',
-            background: '#fafafa',
+            background: token.colorFillQuaternary,
             borderRadius: '6px'
           }}>
-            <DesktopOutlined style={{ fontSize: '64px', color: '#d9d9d9', marginBottom: '16px' }} />
+            <DesktopOutlined style={{ fontSize: '64px', color: token.colorTextQuaternary, marginBottom: '16px' }} />
             <Title level={3} type="secondary">No Agents Found</Title>
             <Paragraph type="secondary">
               No agents are registered in this cluster yet.
@@ -785,7 +787,7 @@ const Configuration = () => {
           style={{ marginBottom: '16px' }}
         />
         
-        <div style={{ border: '1px solid #d9d9d9', borderRadius: '6px' }}>
+        <div style={{ border: `1px solid ${token.colorBorder}`, borderRadius: '6px' }}>
           <div style={{ 
             background: '#001529', 
             color: 'white', 

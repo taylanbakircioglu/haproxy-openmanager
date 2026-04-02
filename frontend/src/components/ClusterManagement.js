@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Table, Button, Space, Modal, Form, Input, Select, Tag, message, Switch,
-  Tooltip, Popconfirm, Row, Col, Divider, Typography, Badge, Card, Alert
+  Tooltip, Popconfirm, Row, Col, Divider, Typography, Badge, Card, Alert, theme
 } from 'antd';
 import {
   PlusOutlined, EditOutlined, DeleteOutlined,
@@ -104,6 +104,8 @@ const ClusterManagement = () => {
       fetchAgentsForClusters(clusters);
     }
   }, [clusters]);
+
+  const { token } = theme.useToken();
 
   // Fetch Agent Pools for Agent connection type
   const fetchAgentPools = async () => {
@@ -375,7 +377,7 @@ const ClusterManagement = () => {
         <div>
           {getStatusBadge(record)}
           {(record.total_agents > 0) && (
-            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+            <div style={{ fontSize: '12px', color: token.colorTextSecondary, marginTop: '4px' }}>
               {record.healthy_agents}/{record.total_agents} agents healthy
             </div>
           )}
@@ -550,12 +552,12 @@ const ClusterManagement = () => {
                 height: 32,
                 paddingLeft: 8,
                 paddingRight: 8,
-                border: '1px solid #d9d9d9',
+                border: `1px solid ${token.colorBorder}`,
                 borderRadius: 6,
                 fontSize: 14,
                 outline: 'none',
                 boxShadow: 'none',
-                backgroundColor: '#fff',
+                backgroundColor: token.colorBgContainer,
                 transition: 'border-color 0.3s ease'
               }}
               onFocus={(e) => {
@@ -564,7 +566,7 @@ const ClusterManagement = () => {
                 e.target.style.boxShadow = 'none';
               }}
               onBlur={(e) => {
-                e.target.style.borderColor = '#d9d9d9';
+                e.target.style.borderColor = token.colorBorder;
               }}
               onMouseOver={(e) => {
                 if (e.target !== document.activeElement) {
@@ -573,7 +575,7 @@ const ClusterManagement = () => {
               }}
               onMouseOut={(e) => {
                 if (e.target !== document.activeElement) {
-                  e.target.style.borderColor = '#d9d9d9';
+                  e.target.style.borderColor = token.colorBorder;
                 }
               }}
             />
@@ -798,7 +800,7 @@ const ClusterManagement = () => {
             >
               <pre 
                 style={{ 
-                  background: '#f6f8fa', 
+                  background: token.colorFillQuaternary, 
                   padding: '12px', 
                   borderRadius: '6px', 
                   fontSize: '12px',
@@ -848,7 +850,7 @@ fi`}
             >
               <pre 
                 style={{ 
-                  background: '#f6f8fa', 
+                  background: token.colorFillQuaternary, 
                   padding: '12px', 
                   borderRadius: '6px', 
                   fontSize: '12px',

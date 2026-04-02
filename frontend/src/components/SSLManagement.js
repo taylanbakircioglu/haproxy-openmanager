@@ -2,7 +2,7 @@ import React, { useState, useEffect, useContext } from 'react';
 import {
   Card, Table, Button, Modal, Form, Input, Space, message, 
   Popconfirm, Tag, Tooltip, Row, Col, Typography, Alert, Badge,
-  Progress, Tabs, Select, Switch, Spin
+  Progress, Tabs, Select, Switch, Spin, theme
 } from 'antd';
 import { getAgentSyncColor, getConfigStatusColor, getEntityStatusColor } from '../utils/colors';
 import EntitySyncStatus from './EntitySyncStatus';
@@ -26,6 +26,7 @@ const { TextArea } = Input;
 const { TabPane } = Tabs;
 
 const SSLManagement = () => {
+  const { token } = theme.useToken();
   const { selectedCluster, clusters } = useCluster();
   const [certificates, setCertificates] = useState([]);
   const [filteredCertificates, setFilteredCertificates] = useState([]);
@@ -746,12 +747,12 @@ const SSLManagement = () => {
                   height: 32,
                   paddingLeft: 30,
                   paddingRight: 8,
-                  border: '1px solid #d9d9d9',
+                  border: `1px solid ${token.colorBorder}`,
                   borderRadius: 6,
                   fontSize: 14,
                   outline: 'none',
                   boxShadow: 'none',
-                  backgroundColor: '#fff',
+                  backgroundColor: token.colorBgContainer,
                   transition: 'border-color 0.3s ease'
                 }}
                 onFocus={(e) => {
@@ -760,7 +761,7 @@ const SSLManagement = () => {
                   e.target.style.boxShadow = 'none';
                 }}
                 onBlur={(e) => {
-                  e.target.style.borderColor = '#d9d9d9';
+                  e.target.style.borderColor = token.colorBorder;
                 }}
                 onMouseOver={(e) => {
                   if (e.target !== document.activeElement) {
@@ -769,7 +770,7 @@ const SSLManagement = () => {
                 }}
                 onMouseOut={(e) => {
                   if (e.target !== document.activeElement) {
-                    e.target.style.borderColor = '#d9d9d9';
+                    e.target.style.borderColor = token.colorBorder;
                   }
                 }}
               />

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   Card, Table, Button, Modal, Form, Input, Select, message, 
   Space, Tag, Typography, Divider, Alert, Tooltip, 
-  Popconfirm, Row, Col, Statistic, Badge, Copy
+  Popconfirm, Row, Col, Statistic, Badge, Copy, theme
 } from 'antd';
 import {
   SecurityScanOutlined, KeyOutlined, PlusOutlined, DeleteOutlined,
@@ -24,6 +24,7 @@ const Security = () => {
   const [tokenModalVisible, setTokenModalVisible] = useState(false);
   const [newToken, setNewToken] = useState(null);
   const [form] = Form.useForm();
+  const { token: themeToken } = theme.useToken();
 
   useEffect(() => {
     fetchTokens();
@@ -437,14 +438,14 @@ const Security = () => {
             <div style={{ marginBottom: '16px' }}>
               <Text strong>API Token:</Text>
               <div style={{ 
-                background: '#f5f5f5', 
+                background: themeToken.colorFillQuaternary, 
                 padding: '12px', 
                 borderRadius: '6px', 
                 marginTop: '8px',
                 fontFamily: 'monospace',
                 fontSize: '13px',
                 wordBreak: 'break-all',
-                border: '1px solid #d9d9d9'
+                border: `1px solid ${themeToken.colorBorder}`
               }}>
                 {newToken.api_key}
               </div>

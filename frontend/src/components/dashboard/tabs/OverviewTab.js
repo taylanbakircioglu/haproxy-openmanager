@@ -4,7 +4,7 @@
  */
 
 import React from 'react';
-import { Row, Col, Card, Statistic, Progress, Skeleton } from 'antd';
+import { Row, Col, Card, Statistic, Progress, Skeleton, theme } from 'antd';
 import {
   GlobalOutlined, CloudServerOutlined, CheckCircleOutlined,
   SafetyCertificateOutlined, SecurityScanOutlined, WarningOutlined
@@ -36,6 +36,7 @@ const OverviewTab = React.memo(({
   overviewData,
   statsData
 }) => {
+  const { token } = theme.useToken();
   return (
     <div>
       {/* Overview Metrics Cards - PRIORITY: Shows at TOP */}
@@ -183,7 +184,7 @@ const OverviewTab = React.memo(({
             <Card
               title="Cluster Agents"
               extra={
-                <span style={{ fontSize: 12, color: '#8c8c8c' }}>
+                <span style={{ fontSize: 12, color: token.colorTextSecondary }}>
                   {agentsStatus.filter(a => a.health === 'healthy').length} Healthy / {agentsStatus.length} Total
                 </span>
               }

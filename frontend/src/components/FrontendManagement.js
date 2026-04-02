@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   Card, Table, Button, Modal, Form, Input, InputNumber, Select, Switch,
   Space, message, Popconfirm, Tag, Tooltip, Row, Col, Typography,
-  Divider, Checkbox, Collapse, Alert, InputNumber as AntInputNumber, Spin, Progress
+  Divider, Checkbox, Collapse, Alert, InputNumber as AntInputNumber, Spin, Progress, theme
 } from 'antd';
 import { getAgentSyncColor, getConfigStatusColor, getEntityStatusColor, getSSLExpiryInfo } from '../utils/colors';
 import EntitySyncStatus from './EntitySyncStatus';
@@ -59,6 +59,7 @@ const { Panel } = Collapse;
 const { TextArea } = Input;
 
 const FrontendManagement = () => {
+  const { token } = theme.useToken();
   const { selectedCluster } = useCluster();
   const navigate = useNavigate();
   const location = useLocation();
@@ -1012,7 +1013,7 @@ const FrontendManagement = () => {
                     percent={expiryInfo.progress}
                     size="small"
                     strokeColor={expiryInfo.color}
-                    trailColor="#f0f0f0"
+                    trailColor={token.colorBorderSecondary}
                     showInfo={false}
                     style={{ 
                       fontSize: '10px',
@@ -1024,7 +1025,7 @@ const FrontendManagement = () => {
                 </Tooltip>
               </div>
               
-              <div style={{ fontSize: '9px', color: '#666', lineHeight: '12px' }}>
+              <div style={{ fontSize: '9px', color: token.colorTextSecondary, lineHeight: '12px' }}>
                 <div style={{ 
                   color: expiryInfo.tagColor === 'red' ? '#ff4d4f' : 
                          expiryInfo.tagColor === 'orange' ? '#fa8c16' : '#52c41a',
@@ -1070,7 +1071,7 @@ const FrontendManagement = () => {
               }
               placement="top"
             >
-              <div style={{ fontSize: '10px', color: '#666', cursor: 'help' }}>
+              <div style={{ fontSize: '10px', color: token.colorTextSecondary, cursor: 'help' }}>
                 {sslCerts.map(cert => (cert.domain || cert.name)).join(', ').substring(0, 40)}...
               </div>
             </Tooltip>
@@ -1187,7 +1188,7 @@ const FrontendManagement = () => {
         </Row>
         
         <Card style={{ textAlign: 'center', padding: '60px 20px' }}>
-          <div style={{ fontSize: '48px', color: '#d9d9d9', marginBottom: '16px' }}>
+          <div style={{ fontSize: '48px', color: token.colorTextQuaternary, marginBottom: '16px' }}>
             <GlobalOutlined />
           </div>
           <Title level={3} style={{ color: '#595959', marginBottom: '8px' }}>
@@ -1252,12 +1253,12 @@ const FrontendManagement = () => {
                   height: 32,
                   paddingLeft: 8,
                   paddingRight: 8,
-                  border: '1px solid #d9d9d9',
+                  border: `1px solid ${token.colorBorder}`,
                   borderRadius: 6,
                   fontSize: 14,
                   outline: 'none',
                   boxShadow: 'none',
-                  backgroundColor: '#fff',
+                  backgroundColor: token.colorBgContainer,
                   transition: 'border-color 0.3s ease'
                 }}
                 onFocus={(e) => {
@@ -1266,7 +1267,7 @@ const FrontendManagement = () => {
                   e.target.style.boxShadow = 'none';
                 }}
                 onBlur={(e) => {
-                  e.target.style.borderColor = '#d9d9d9';
+                  e.target.style.borderColor = token.colorBorder;
                 }}
                 onMouseOver={(e) => {
                   if (e.target !== document.activeElement) {
@@ -1275,7 +1276,7 @@ const FrontendManagement = () => {
                 }}
                 onMouseOut={(e) => {
                   if (e.target !== document.activeElement) {
-                    e.target.style.borderColor = '#d9d9d9';
+                    e.target.style.borderColor = token.colorBorder;
                   }
                 }}
               />
@@ -1549,7 +1550,7 @@ const FrontendManagement = () => {
                                           {sslType}
                                         </Tag>
                                       </span>
-                                      <span style={{ fontSize: '12px', color: '#666', marginLeft: 12 }}>
+                                      <span style={{ fontSize: '12px', color: token.colorTextSecondary, marginLeft: 12 }}>
                                         {statusText} {expiryInfo && `(${expiryInfo})`}
                                       </span>
                                     </div>

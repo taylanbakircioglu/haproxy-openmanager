@@ -4,7 +4,7 @@
  */
 
 import React, { useMemo } from 'react';
-import { Row, Col, Card, Empty, Select, Space, Spin, Typography } from 'antd';
+import { Row, Col, Card, Empty, Select, Space, Spin, Typography, theme } from 'antd';
 import { FilterOutlined } from '@ant-design/icons';
 
 import CompactFrontendList from '../CompactFrontendList';
@@ -22,6 +22,7 @@ const FrontendsTab = React.memo(({
   onFrontendChange,
   cacheLoading
 }) => {
+  const { token } = theme.useToken();
   // Memoize filter options
   const filterOptions = useMemo(() => [
     { label: '📊 All Frontends', value: 'all' },
@@ -35,7 +36,7 @@ const FrontendsTab = React.memo(({
         size="small"
         style={{
           marginBottom: 24,
-          backgroundColor: '#fafafa',
+          backgroundColor: token.colorFillQuaternary,
           borderRadius: 8
         }}
       >

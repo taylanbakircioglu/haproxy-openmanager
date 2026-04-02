@@ -31,7 +31,8 @@ import {
   Radio,
   List,
   Collapse,
-  Timeline
+  Timeline,
+  theme
 } from 'antd';
 import {
   PlusOutlined,
@@ -128,6 +129,7 @@ class ErrorBoundary extends React.Component {
 }
 
 const AgentManagement = () => {
+  const { token } = theme.useToken();
   // === State Management ===
   const [agents, setAgents] = useState([]);
   const [filteredAgents, setFilteredAgents] = useState([]);
@@ -1610,7 +1612,7 @@ const AgentManagement = () => {
             display: 'flex', 
             justifyContent: 'space-between', 
             alignItems: 'center',
-            background: '#fafafa',
+            background: token.colorFillQuaternary,
             padding: '12px 16px',
             borderRadius: '6px',
             marginBottom: '16px'
@@ -1777,12 +1779,12 @@ const AgentManagement = () => {
                     height: 32,
                     paddingLeft: 8,
                     paddingRight: searchText ? 32 : 8,
-                    border: '1px solid #d9d9d9',
+                    border: `1px solid ${token.colorBorder}`,
                     borderRadius: 6,
                     fontSize: 14,
                     outline: 'none',
                     boxShadow: 'none',
-                    backgroundColor: '#fff',
+                    backgroundColor: token.colorBgContainer,
                     transition: 'border-color 0.3s ease'
                   }}
                   onFocus={(e) => {
@@ -1791,7 +1793,7 @@ const AgentManagement = () => {
                     e.target.style.boxShadow = 'none';
                   }}
                   onBlur={(e) => {
-                    e.target.style.borderColor = '#d9d9d9';
+                    e.target.style.borderColor = token.colorBorder;
                   }}
                   onMouseOver={(e) => {
                     if (e.target !== document.activeElement) {
@@ -1800,7 +1802,7 @@ const AgentManagement = () => {
                   }}
                   onMouseOut={(e) => {
                     if (e.target !== document.activeElement) {
-                      e.target.style.borderColor = '#d9d9d9';
+                      e.target.style.borderColor = token.colorBorder;
                     }
                   }}
                 />
@@ -1842,10 +1844,10 @@ const AgentManagement = () => {
             <div style={{ 
               textAlign: 'center', 
               padding: '60px 20px',
-              background: '#fafafa',
+              background: token.colorFillQuaternary,
               borderRadius: '6px'
             }}>
-              <TeamOutlined style={{ fontSize: '64px', color: '#d9d9d9', marginBottom: '16px' }} />
+              <TeamOutlined style={{ fontSize: '64px', color: token.colorTextQuaternary, marginBottom: '16px' }} />
               <Title level={3} type="secondary">No Agents Registered</Title>
               <Paragraph type="secondary">
                 No HAProxy agents have been registered yet. Use the "Start Agent Setup" button above to configure and deploy your first agent.
@@ -2018,8 +2020,8 @@ const AgentManagement = () => {
                       hoverable
                       style={{ 
                         textAlign: 'center',
-                        border: selectedPlatform === key ? `2px solid ${config.color}` : '1px solid #d9d9d9',
-                        backgroundColor: selectedPlatform === key ? `${config.color}10` : '#fff'
+                        border: selectedPlatform === key ? `2px solid ${config.color}` : `1px solid ${token.colorBorder}`,
+                        backgroundColor: selectedPlatform === key ? `${config.color}10` : token.colorBgContainer
                       }}
                       onClick={() => {
                         setSelectedPlatform(key);
@@ -2288,14 +2290,14 @@ const AgentManagement = () => {
               <div style={{ 
                 borderRadius: '12px',
                 overflow: 'hidden',
-                border: '1px solid #d9d9d9',
+                border: `1px solid ${token.colorBorder}`,
                 marginBottom: '24px',
                 boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)'
               }}>
                 {/* Header Bar */}
                 <div style={{ 
-                  background: 'linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%)',
-                  borderBottom: '1px solid #d9d9d9',
+                  background: `linear-gradient(135deg, ${token.colorFillQuaternary} 0%, ${token.colorFillTertiary} 100%)`,
+                  borderBottom: `1px solid ${token.colorBorder}`,
                   padding: '12px 16px',
                   display: 'flex',
                   alignItems: 'center',
@@ -2445,12 +2447,12 @@ const AgentManagement = () => {
                             position: 'relative',
                             borderRadius: '8px',
                             overflow: 'hidden',
-                            border: '1px solid #f0f0f0'
+                            border: `1px solid ${token.colorBorderSecondary}`
                           }}>
                             {/* Header Bar */}
                             <div style={{ 
-                              background: '#fafafa',
-                              borderBottom: '1px solid #f0f0f0',
+                              background: token.colorFillQuaternary,
+                              borderBottom: `1px solid ${token.colorBorderSecondary}`,
                               padding: '8px 12px',
                               display: 'flex',
                               alignItems: 'center',
@@ -2665,7 +2667,7 @@ const AgentManagement = () => {
                       </div>
                     ) : (
                       <div style={{ textAlign: 'center', padding: '40px' }}>
-                        <InfoCircleOutlined style={{ fontSize: '32px', color: '#d9d9d9' }} />
+                        <InfoCircleOutlined style={{ fontSize: '32px', color: token.colorTextQuaternary }} />
                         <Paragraph type="secondary" style={{ marginTop: '16px' }}>
                           No capability information available for this agent.
                         </Paragraph>
@@ -2687,7 +2689,7 @@ const AgentManagement = () => {
                 <div style={{ minHeight: '200px' }}>
                   {selectedAgent.system_info ? (
                     <pre style={{ 
-                      background: '#f6f8fa', 
+                      background: token.colorFillQuaternary, 
                       padding: '16px', 
                       borderRadius: '6px',
                       fontSize: '12px',
@@ -2698,7 +2700,7 @@ const AgentManagement = () => {
                     </pre>
                   ) : (
                     <div style={{ textAlign: 'center', padding: '40px' }}>
-                      <DesktopOutlined style={{ fontSize: '32px', color: '#d9d9d9' }} />
+                      <DesktopOutlined style={{ fontSize: '32px', color: token.colorTextQuaternary }} />
                       <Paragraph type="secondary" style={{ marginTop: '16px' }}>
                         No system information available for this agent.
                       </Paragraph>
@@ -2825,7 +2827,7 @@ const AgentManagement = () => {
             />
           </div>
           
-          <div style={{ border: '1px solid #d9d9d9', borderRadius: '6px', overflow: 'hidden' }}>
+          <div style={{ border: `1px solid ${token.colorBorder}`, borderRadius: '6px', overflow: 'hidden' }}>
             <div style={{ 
               background: '#001529', 
               color: 'white', 
@@ -2926,8 +2928,8 @@ const AgentManagement = () => {
             </div>
           ) : agentLogs.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '40px' }}>
-              <InfoCircleOutlined style={{ fontSize: '48px', color: '#d9d9d9' }} />
-              <div style={{ marginTop: '16px', color: '#999' }}>
+              <InfoCircleOutlined style={{ fontSize: '48px', color: token.colorTextQuaternary }} />
+              <div style={{ marginTop: '16px', color: token.colorTextTertiary }}>
                 No activity logs found for this agent
               </div>
             </div>
@@ -3013,7 +3015,7 @@ const AgentManagement = () => {
                 gap: '16px',
                 marginBottom: '24px',
                 paddingBottom: '16px',
-                borderBottom: '1px solid #f0f0f0'
+                borderBottom: `1px solid ${token.colorBorderSecondary}`
               }}>
                 <div style={{ 
                   width: '56px', 
@@ -3076,12 +3078,12 @@ const AgentManagement = () => {
                 <div style={{ 
                   borderRadius: '10px',
                   overflow: 'hidden',
-                  border: '1px solid #d9d9d9',
+                  border: `1px solid ${token.colorBorder}`,
                   marginBottom: '20px'
                 }}>
                   <div style={{ 
-                    background: '#fafafa',
-                    borderBottom: '1px solid #d9d9d9',
+                    background: token.colorFillQuaternary,
+                    borderBottom: `1px solid ${token.colorBorder}`,
                     padding: '10px 14px',
                     display: 'flex',
                     alignItems: 'center',
@@ -3141,7 +3143,7 @@ const AgentManagement = () => {
                 </div>
               ) : (
                 <div style={{ 
-                  background: '#f5f5f5', 
+                  background: token.colorFillQuaternary, 
                   padding: '16px', 
                   borderRadius: '8px',
                   marginBottom: '20px',

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   Card, Table, Button, Modal, Form, Input, Select, Space, message, 
   Popconfirm, Tag, Tooltip, Row, Col, Typography, Divider, InputNumber,
-  Switch, List, Badge, Tabs, Statistic, Alert, Spin
+  Switch, List, Badge, Tabs, Statistic, Alert, Spin, theme
 } from 'antd';
 import { getAgentSyncColor, getConfigStatusColor, getEntityStatusColor } from '../utils/colors';
 import EntitySyncStatus from './EntitySyncStatus';
@@ -232,6 +232,7 @@ const WAFValidationUtils = {
 };
 
 const WAFManagement = () => {
+  const { token } = theme.useToken();
   const { selectedCluster } = useCluster();
   const navigate = useNavigate();
   const [rules, setRules] = useState([]);
@@ -1317,12 +1318,12 @@ const WAFManagement = () => {
                   height: 32,
                   paddingLeft: 8,
                   paddingRight: 8,
-                  border: '1px solid #d9d9d9',
+                  border: `1px solid ${token.colorBorder}`,
                   borderRadius: 6,
                   fontSize: 14,
                   outline: 'none',
                   boxShadow: 'none',
-                  backgroundColor: '#fff',
+                  backgroundColor: token.colorBgContainer,
                   transition: 'border-color 0.3s ease'
                 }}
                 onFocus={(e) => {
@@ -1331,7 +1332,7 @@ const WAFManagement = () => {
                   e.target.style.boxShadow = 'none';
                 }}
                 onBlur={(e) => {
-                  e.target.style.borderColor = '#d9d9d9';
+                  e.target.style.borderColor = token.colorBorder;
                 }}
                 onMouseOver={(e) => {
                   if (e.target !== document.activeElement) {
@@ -1340,7 +1341,7 @@ const WAFManagement = () => {
                 }}
                 onMouseOut={(e) => {
                   if (e.target !== document.activeElement) {
-                    e.target.style.borderColor = '#d9d9d9';
+                    e.target.style.borderColor = token.colorBorder;
                   }
                 }}
               />

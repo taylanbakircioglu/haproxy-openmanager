@@ -45,9 +45,10 @@ export const ThemeProvider = ({ children }) => {
     }
   };
 
-  // Update isDarkMode when theme changes
   useEffect(() => {
     setIsDarkMode(theme === 'dark');
+    document.documentElement.setAttribute('data-theme', theme);
+    document.body.style.colorScheme = theme;
   }, [theme]);
 
   const value = {

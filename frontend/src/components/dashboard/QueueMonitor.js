@@ -1,5 +1,5 @@
 import React from 'react';
-import { Card, Empty, Spin, Table, Tag, Progress, Space, Typography, Tooltip } from 'antd';
+import { Card, Empty, Spin, Table, Tag, Progress, Space, Typography, Tooltip, theme } from 'antd';
 import {
   WarningOutlined,
   CheckCircleOutlined,
@@ -20,6 +20,7 @@ import {
 const { Text } = Typography;
 
 const QueueMonitor = ({ data, loading, title = "Backend Queue Status" }) => {
+  const { token } = theme.useToken();
   if (loading) {
     return (
       <Card title={title}>
@@ -89,9 +90,9 @@ const QueueMonitor = ({ data, loading, title = "Backend Queue Status" }) => {
       const data = payload[0].payload;
       return (
         <div style={{ 
-          backgroundColor: 'rgba(255, 255, 255, 0.96)', 
+          backgroundColor: token.colorBgElevated, 
           padding: '10px', 
-          border: '1px solid #d9d9d9',
+          border: `1px solid ${token.colorBorder}`,
           borderRadius: '4px',
           boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
         }}>
@@ -99,7 +100,7 @@ const QueueMonitor = ({ data, loading, title = "Backend Queue Status" }) => {
           <p style={{ margin: '4px 0', color: '#1890ff' }}>
             Current Queue: <strong>{data.current}</strong>
           </p>
-          <p style={{ margin: '4px 0', color: '#8c8c8c' }}>
+          <p style={{ margin: '4px 0', color: token.colorTextSecondary }}>
             Max Queue: <strong>{data.max > 0 ? data.max : 'Unlimited'}</strong>
           </p>
           <p style={{ margin: '4px 0', color: '#faad14' }}>
@@ -213,7 +214,7 @@ const QueueMonitor = ({ data, loading, title = "Backend Queue Status" }) => {
       {/* Summary Stats */}
       <div style={{ 
         padding: '12px', 
-        backgroundColor: '#f5f5f5', 
+        backgroundColor: token.colorFillQuaternary, 
         borderRadius: '4px', 
         marginBottom: '16px',
         display: 'flex',
@@ -244,19 +245,21 @@ const QueueMonitor = ({ data, loading, title = "Backend Queue Status" }) => {
         <div style={{ marginBottom: 16 }}>
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <CartesianGrid strokeDasharray="3 3" stroke={token.colorBorderSecondary} />
               <XAxis 
                 dataKey="name" 
-                stroke="#8c8c8c"
+                stroke={token.colorBorderSecondary}
                 style={{ fontSize: 11 }}
                 angle={-45}
                 textAnchor="end"
                 height={80}
+                tick={{ fill: token.colorTextSecondary }}
               />
               <YAxis 
-                stroke="#8c8c8c"
+                stroke={token.colorBorderSecondary}
                 style={{ fontSize: 12 }}
-                label={{ value: 'Queue Depth', angle: -90, position: 'insideLeft', style: { fill: '#8c8c8c' } }}
+                tick={{ fill: token.colorTextSecondary }}
+                label={{ value: 'Queue Depth', angle: -90, position: 'insideLeft', style: { fill: token.colorTextSecondary } }}
               />
               <RechartsTooltip content={<CustomTooltip />} />
               <Legend wrapperStyle={{ fontSize: 12 }} />

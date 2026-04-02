@@ -1,11 +1,12 @@
 import React from 'react';
-import { Progress, Card, Typography } from 'antd';
+import { Progress, Card, Typography, theme } from 'antd';
 import { useProgress } from '../contexts/ProgressContext';
 import { COLORS } from '../utils/colors';
 
 const { Text } = Typography;
 
 const GlobalProgress = () => {
+  const { token } = theme.useToken();
   const { progress, getElapsedTime } = useProgress();
 
   if (!progress.visible) {
@@ -37,7 +38,7 @@ const GlobalProgress = () => {
       <Card
         size="small"
         style={{
-          backgroundColor: '#fff',
+          backgroundColor: token.colorBgContainer,
           border: `1px solid ${getProgressColor()}`,
         }}
       >
@@ -60,7 +61,7 @@ const GlobalProgress = () => {
           display: 'flex', 
           justifyContent: 'space-between',
           fontSize: '12px',
-          color: '#666'
+          color: token.colorTextSecondary
         }}>
           <span>
             {getElapsedTime()}s elapsed
@@ -74,7 +75,7 @@ const GlobalProgress = () => {
           <div style={{ 
             marginTop: 4, 
             fontSize: '12px',
-            color: '#666',
+            color: token.colorTextSecondary,
             textAlign: 'center',
             display: 'flex',
             justifyContent: 'space-between'
@@ -82,7 +83,7 @@ const GlobalProgress = () => {
             <span>
               Agents: {progress.agentCounts.synced}/{progress.agentCounts.total}
               {progress.agentCounts.disabled > 0 && (
-                <span style={{ color: '#999', marginLeft: 4 }}>
+                <span style={{ color: token.colorTextTertiary, marginLeft: 4 }}>
                   ({progress.agentCounts.disabled} off)
                 </span>
               )}
@@ -95,7 +96,7 @@ const GlobalProgress = () => {
           <div style={{ 
             marginTop: 8, 
             padding: '4px 8px', 
-            backgroundColor: '#f5f5f5', 
+            backgroundColor: token.colorFillQuaternary, 
             borderRadius: '4px',
             fontSize: '11px'
           }}>

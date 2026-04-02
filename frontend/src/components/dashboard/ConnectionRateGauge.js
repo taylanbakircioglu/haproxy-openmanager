@@ -1,5 +1,5 @@
 import React from 'react';
-import { Card, Spin, Empty, Statistic, Row, Col, Progress, Typography, Tag, Space } from 'antd';
+import { Card, Spin, Empty, Statistic, Row, Col, Progress, Typography, Tag, Space, theme } from 'antd';
 import { 
   ArrowUpOutlined, 
   ArrowDownOutlined,
@@ -18,6 +18,7 @@ import {
 const { Text, Title } = Typography;
 
 const ConnectionRateGauge = ({ data, loading, title = "Connection Rate Monitor" }) => {
+  const { token } = theme.useToken();
   if (loading) {
     return (
       <Card title={title}>
@@ -84,9 +85,9 @@ const ConnectionRateGauge = ({ data, loading, title = "Connection Rate Monitor" 
     if (active && payload && payload.length) {
       return (
         <div style={{ 
-          backgroundColor: 'rgba(255, 255, 255, 0.96)', 
+          backgroundColor: token.colorBgElevated, 
           padding: '10px', 
-          border: '1px solid #d9d9d9',
+          border: `1px solid ${token.colorBorder}`,
           borderRadius: '4px',
           boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
         }}>
@@ -185,7 +186,7 @@ const ConnectionRateGauge = ({ data, loading, title = "Connection Rate Monitor" 
         <Col span={12}>
           <Space direction="vertical" style={{ width: '100%' }} size="middle">
             {/* Current Rate */}
-            <Card size="small" style={{ backgroundColor: '#f5f5f5' }}>
+            <Card size="small" style={{ backgroundColor: token.colorFillQuaternary }}>
               <Statistic
                 title="Current Rate"
                 value={currentRate}
@@ -231,7 +232,7 @@ const ConnectionRateGauge = ({ data, loading, title = "Connection Rate Monitor" 
                 title="Rate Limit"
                 value={rateLimit}
                 suffix="conn/s"
-                valueStyle={{ fontSize: 16, color: '#8c8c8c' }}
+                valueStyle={{ fontSize: 16, color: token.colorTextSecondary }}
               />
               <Text type="secondary" style={{ fontSize: 11 }}>
                 {Math.round((rateLimit - currentRate))} conn/s available

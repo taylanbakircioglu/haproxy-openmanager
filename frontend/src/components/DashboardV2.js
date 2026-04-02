@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   Card, Row, Col, Statistic, Table, Badge, Typography, Alert, Space, Button, 
-  Select, Spin, Empty, Tag, Progress, Divider, Tooltip, Skeleton, Tabs
+  Select, Spin, Empty, Tag, Progress, Divider, Tooltip, Skeleton, Tabs, theme
 } from 'antd';
 import { 
   DashboardOutlined, SafetyCertificateOutlined, SecurityScanOutlined,
@@ -54,6 +54,7 @@ const CardSkeleton = ({ rows = 3 }) => (
 );
 
 const DashboardV2 = () => {
+  const { token } = theme.useToken();
   const { selectedCluster } = useCluster();
   
   // State management
@@ -915,7 +916,7 @@ const DashboardV2 = () => {
     return (
       <div style={{ padding: 50, textAlign: 'center' }}>
         <Card>
-          <CloudServerOutlined style={{ fontSize: 48, color: '#d9d9d9', marginBottom: 16 }} />
+          <CloudServerOutlined style={{ fontSize: 48, color: token.colorTextQuaternary, marginBottom: 16 }} />
           <Title level={3} type="secondary">No Cluster Selected</Title>
           <Text type="secondary">
             Please select a HAProxy cluster from the dropdown above to view dashboard metrics.
@@ -998,7 +999,7 @@ const DashboardV2 = () => {
         }}
         style={{
           marginTop: 24,
-          backgroundColor: '#fff',
+          backgroundColor: token.colorBgContainer,
           padding: '16px',
           borderRadius: 8,
           boxShadow: '0 2px 8px rgba(0,0,0,0.06)',

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   Card, Table, Button, Space, Tag, Modal, Form, Input, InputNumber,
   Select, Row, Col, message, Popconfirm, Tooltip, Badge, Switch, 
-  Tabs, Divider, Typography, List, Avatar, Alert, Spin
+  Tabs, Divider, Typography, List, Avatar, Alert, Spin, theme
 } from 'antd';
 import { getAgentSyncColor, getConfigStatusColor, getEntityStatusColor } from '../utils/colors';
 import EntitySyncStatus from './EntitySyncStatus';
@@ -58,6 +58,7 @@ const { TabPane } = Tabs;
 const { Text, Title } = Typography;
 
 const BackendServers = () => {
+  const { token } = theme.useToken();
   const { selectedCluster } = useCluster();
   const navigate = useNavigate();
   const location = useLocation();
@@ -84,6 +85,7 @@ const BackendServers = () => {
     localStorage.setItem('backend:showRejected', String(checked));
   };
   const [searchText, setSearchText] = useState('');
+  const [serverSearchText, setServerSearchText] = useState('');
   const [loading, setLoading] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [backendModalVisible, setBackendModalVisible] = useState(false);
@@ -1290,7 +1292,6 @@ const BackendServers = () => {
   ];
 
   const renderServerList = () => {
-    // CRITICAL FIX: Handle null/undefined servers array for backends without servers
     const allServers = backends.flatMap(backend => {
       const servers = backend.servers || [];
       return servers.map(server => ({
@@ -1300,56 +1301,94 @@ const BackendServers = () => {
       }));
     });
 
+    const filteredServers = serverSearchText
+      ? allServers.filter(s => {
+          const q = serverSearchText.toLowerCase();
+          return (
+            (s.name || '').toLowerCase().includes(q) ||
+            (s.address || '').toLowerCase().includes(q) ||
+            (s.backend_name || '').toLowerCase().includes(q) ||
+            (s.status || '').toLowerCase().includes(q)
+          );
+        })
+      : allServers;
+
     return (
-      <Table
-        columns={[
-          ...serverColumns,
-          {
-            title: 'Backend',
-            dataIndex: 'backend_name',
-            key: 'backend_name',
-            render: (name) => <Tag color="blue">{name}</Tag>,
-          },
-          {
-            title: 'Actions',
-            key: 'actions',
-            render: (_, record) => (
-              <Space size="small">
-                <Tooltip title="Edit Server">
-                  <Button
-                    size="small"
-                    icon={<EditOutlined />}
-                    onClick={() => handleEditServer(record, { id: record.backend_id, name: record.backend_name })}
-                  />
-                </Tooltip>
-                <Popconfirm
-                  title="Are you sure you want to delete this server?"
-                  onConfirm={() => handleDeleteServer(record.id)}
-                  okText="Yes"
-                  cancelText="No"
-                >
-                  <Tooltip title="Delete Server">
+      <>
+        <div style={{ marginBottom: 16, position: 'relative', maxWidth: 320 }}>
+          <SearchOutlined style={{
+            position: 'absolute',
+            left: 8,
+            top: '50%',
+            transform: 'translateY(-50%)',
+            color: '#bfbfbf',
+            zIndex: 1
+          }} />
+          <input
+            type="text"
+            placeholder="Search servers..."
+            value={serverSearchText}
+            onChange={(e) => setServerSearchText(e.target.value)}
+            className="search-input"
+            style={{
+              width: '100%',
+              height: 32,
+              paddingLeft: 30,
+              paddingRight: 8,
+              border: `1px solid ${token.colorBorder}`,
+              borderRadius: 6,
+              fontSize: 14,
+              outline: 'none',
+              boxShadow: 'none',
+              backgroundColor: token.colorBgContainer,
+              transition: 'border-color 0.3s ease'
+            }}
+          />
+        </div>
+        <Table
+          columns={[
+            ...serverColumns,
+            {
+              title: 'Actions',
+              key: 'actions',
+              render: (_, record) => (
+                <Space size="small">
+                  <Tooltip title="Edit Server">
                     <Button
-                      danger
                       size="small"
-                      icon={<DeleteOutlined />}
+                      icon={<EditOutlined />}
+                      onClick={() => handleEditServer(record, { id: record.backend_id, name: record.backend_name })}
                     />
                   </Tooltip>
-                </Popconfirm>
-              </Space>
-            ),
-          },
-        ]}
-        dataSource={allServers}
-        rowKey="id"
-        loading={loading}
-        pagination={{
-          showSizeChanger: true,
-          showQuickJumper: true,
-          showTotal: (total, range) =>
-            `${range[0]}-${range[1]} of ${total} servers`,
-        }}
-      />
+                  <Popconfirm
+                    title="Are you sure you want to delete this server?"
+                    onConfirm={() => handleDeleteServer(record.id)}
+                    okText="Yes"
+                    cancelText="No"
+                  >
+                    <Tooltip title="Delete Server">
+                      <Button
+                        danger
+                        size="small"
+                        icon={<DeleteOutlined />}
+                      />
+                    </Tooltip>
+                  </Popconfirm>
+                </Space>
+              ),
+            },
+          ]}
+          dataSource={filteredServers}
+          rowKey="id"
+          loading={loading}
+          pagination={{
+            showSizeChanger: true,
+            showQuickJumper: true,
+            showTotal: (total, range) =>
+              `${range[0]}-${range[1]} of ${total} servers`,
+          }}
+        />
+      </>
     );
   };
 
@@ -1367,7 +1406,7 @@ const BackendServers = () => {
         </Row>
         
         <Card style={{ textAlign: 'center', padding: '60px 20px' }}>
-          <div style={{ fontSize: '48px', color: '#d9d9d9', marginBottom: '16px' }}>
+          <div style={{ fontSize: '48px', color: token.colorTextQuaternary, marginBottom: '16px' }}>
             <CloudServerOutlined />
           </div>
           <Title level={3} style={{ color: '#595959', marginBottom: '8px' }}>
@@ -1440,12 +1479,12 @@ const BackendServers = () => {
                   height: 32,
                   paddingLeft: 30,
                   paddingRight: 8,
-                  border: '1px solid #d9d9d9',
+                  border: `1px solid ${token.colorBorder}`,
                   borderRadius: 6,
                   fontSize: 14,
                   outline: 'none',
                   boxShadow: 'none',
-                  backgroundColor: '#fff',
+                  backgroundColor: token.colorBgContainer,
                   transition: 'border-color 0.3s ease'
                 }}
                 onFocus={(e) => {
@@ -1454,7 +1493,7 @@ const BackendServers = () => {
                   e.target.style.boxShadow = 'none';
                 }}
                 onBlur={(e) => {
-                  e.target.style.borderColor = '#d9d9d9';
+                  e.target.style.borderColor = token.colorBorder;
                 }}
                 onMouseOver={(e) => {
                   if (e.target !== document.activeElement) {
@@ -1463,7 +1502,7 @@ const BackendServers = () => {
                 }}
                 onMouseOut={(e) => {
                   if (e.target !== document.activeElement) {
-                    e.target.style.borderColor = '#d9d9d9';
+                    e.target.style.borderColor = token.colorBorder;
                   }
                 }}
               />
@@ -2075,7 +2114,7 @@ const BackendServers = () => {
                                       {sslType}
                                     </Tag>
                                   </span>
-                                  <span style={{ fontSize: '12px', color: '#666', marginLeft: 12 }}>
+                                  <span style={{ fontSize: '12px', color: token.colorTextSecondary, marginLeft: 12 }}>
                                     {statusText} {expiryInfo && `(${expiryInfo})`}
                                   </span>
                                 </div>

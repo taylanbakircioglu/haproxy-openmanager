@@ -1,5 +1,5 @@
 import React from 'react';
-import { Card, Empty, Spin } from 'antd';
+import { Card, Empty, Spin, theme } from 'antd';
 import {
   LineChart,
   Line,
@@ -19,6 +19,7 @@ const COLORS = {
 };
 
 const ResponseTimeTrend = ({ data, loading, title = "Response Time Trend (24h)" }) => {
+  const { token } = theme.useToken();
   if (loading) {
     return (
       <Card title={title}>
@@ -83,9 +84,9 @@ const ResponseTimeTrend = ({ data, loading, title = "Response Time Trend (24h)" 
     if (active && payload && payload.length) {
       return (
         <div style={{ 
-          backgroundColor: 'rgba(255, 255, 255, 0.96)', 
+          backgroundColor: token.colorBgElevated, 
           padding: '10px', 
-          border: '1px solid #d9d9d9',
+          border: `1px solid ${token.colorBorder}`,
           borderRadius: '4px',
           boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
         }}>
@@ -108,25 +109,25 @@ const ResponseTimeTrend = ({ data, loading, title = "Response Time Trend (24h)" 
     <Card 
       title={title}
       extra={showingTop && (
-        <span style={{ fontSize: 12, color: '#8c8c8c' }}>
+        <span style={{ fontSize: 12, color: token.colorTextSecondary }}>
           Showing top {backends.length} slowest of {totalBackends} backends
         </span>
       )}
     >
       <ResponsiveContainer width="100%" height={300}>
         <LineChart data={finalData}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+          <CartesianGrid strokeDasharray="3 3" stroke={token.colorBorderSecondary} />
           <XAxis 
             dataKey="time" 
-            stroke="#8c8c8c"
+            stroke={token.colorBorderSecondary}
             style={{ fontSize: 12 }}
-            tick={{ fill: '#8c8c8c' }}
+            tick={{ fill: token.colorTextSecondary }}
           />
           <YAxis 
-            stroke="#8c8c8c"
+            stroke={token.colorBorderSecondary}
             style={{ fontSize: 12 }}
-            tick={{ fill: '#8c8c8c' }}
-            label={{ value: 'Response Time (ms)', angle: -90, position: 'insideLeft', style: { fill: '#8c8c8c' } }}
+            tick={{ fill: token.colorTextSecondary }}
+            label={{ value: 'Response Time (ms)', angle: -90, position: 'insideLeft', style: { fill: token.colorTextSecondary } }}
           />
           <Tooltip 
             content={<CustomTooltip />} 

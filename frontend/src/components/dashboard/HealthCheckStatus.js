@@ -1,5 +1,5 @@
 import React from 'react';
-import { Card, Empty, Spin, Table, Badge, Tag, Progress, Space, Typography, Tooltip } from 'antd';
+import { Card, Empty, Spin, Table, Badge, Tag, Progress, Space, Typography, Tooltip, theme } from 'antd';
 import {
   CheckCircleOutlined,
   CloseCircleOutlined,
@@ -11,6 +11,7 @@ import {
 const { Text } = Typography;
 
 const HealthCheckStatus = ({ data, loading, title = "Health Check Status" }) => {
+  const { token } = theme.useToken();
   if (loading) {
     return (
       <Card title={title}>
@@ -209,7 +210,7 @@ const HealthCheckStatus = ({ data, loading, title = "Health Check Status" }) => 
       {/* Health Summary */}
       <div style={{ 
         padding: '12px', 
-        backgroundColor: '#f5f5f5', 
+        backgroundColor: token.colorFillQuaternary, 
         borderRadius: '4px', 
         marginBottom: '16px'
       }}>

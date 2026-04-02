@@ -23,9 +23,9 @@ const animationStyles = `
   }
   
   @keyframes highlight {
-    0% { background-color: #ffffff; }
+    0% { background-color: var(--highlight-color); }
     50% { background-color: #e6f7ff; }
-    100% { background-color: #ffffff; }
+    100% { background-color: var(--highlight-color); }
   }
   
   .animated-card {

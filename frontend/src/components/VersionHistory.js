@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Modal, Table, Button, message, Tag, Space, Tooltip, Typography,
-  Alert, Divider, Card, Descriptions
+  Alert, Divider, Card, Descriptions, theme
 } from 'antd';
 import {
   HistoryOutlined, RollbackOutlined, CheckCircleOutlined,
@@ -22,6 +22,7 @@ const VersionHistory = ({
   const [versions, setVersions] = useState([]);
   const [restoreLoading, setRestoreLoading] = useState({});
   const [entityInfo, setEntityInfo] = useState(null); // Store entity info including cluster ID
+  const { token } = theme.useToken();
 
   useEffect(() => {
     if (visible && entityType && entityId) {
@@ -111,7 +112,7 @@ const VersionHistory = ({
             
             <div style={{ marginBottom: 16 }}>
               <Text strong>Summary of Changes:</Text>
-              <div style={{ marginTop: 8, padding: 12, backgroundColor: '#f5f5f5', borderRadius: 4 }}>
+              <div style={{ marginTop: 8, padding: 12, backgroundColor: token.colorFillQuaternary, borderRadius: 4 }}>
                 <div>✅ <strong>{summary.creates}</strong> entities will be created</div>
                 <div>✏️ <strong>{summary.updates}</strong> entities will be updated</div>
                 <div>🗑️ <strong>{summary.deletes}</strong> entities will be deleted</div>
@@ -142,12 +143,12 @@ const VersionHistory = ({
                     <li key={idx}>
                       <strong>{fe.name}</strong>
                       {fe.changes && (
-                        <ul style={{ fontSize: '11px', color: '#666', marginTop: 4 }}>
+                        <ul style={{ fontSize: '11px', color: token.colorTextSecondary, marginTop: 4 }}>
                           {Object.entries(fe.changes).map(([field, change]) => {
                             if (change.from === change.to) return null;
                             return (
                               <li key={field} style={{ marginBottom: 2 }}>
-                                <code style={{ backgroundColor: '#f5f5f5', padding: '2px 4px', borderRadius: 2 }}>
+                                <code style={{ backgroundColor: token.colorFillQuaternary, padding: '2px 4px', borderRadius: 2 }}>
                                   {field}
                                 </code>: {' '}
                                 <span style={{ color: '#ff4d4f' }}>{JSON.stringify(change.from)}</span>
@@ -203,12 +204,12 @@ const VersionHistory = ({
                     <li key={idx}>
                       <strong>{be.name}</strong>
                       {be.changes && (
-                        <ul style={{ fontSize: '11px', color: '#666', marginTop: 4 }}>
+                        <ul style={{ fontSize: '11px', color: token.colorTextSecondary, marginTop: 4 }}>
                           {Object.entries(be.changes).map(([field, change]) => {
                             if (change.from === change.to) return null;
                             return (
                               <li key={field} style={{ marginBottom: 2 }}>
-                                <code style={{ backgroundColor: '#f5f5f5', padding: '2px 4px', borderRadius: 2 }}>
+                                <code style={{ backgroundColor: token.colorFillQuaternary, padding: '2px 4px', borderRadius: 2 }}>
                                   {field}
                                 </code>: {' '}
                                 <span style={{ color: '#ff4d4f' }}>{JSON.stringify(change.from)}</span>
@@ -264,12 +265,12 @@ const VersionHistory = ({
                     <li key={idx}>
                       📦 {srv.backend_name} / <strong>{srv.server_name}</strong>
                       {srv.changes && (
-                        <ul style={{ fontSize: '11px', color: '#666', marginTop: 4 }}>
+                        <ul style={{ fontSize: '11px', color: token.colorTextSecondary, marginTop: 4 }}>
                           {Object.entries(srv.changes).map(([field, change]) => {
                             if (change.from === change.to) return null;
                             return (
                               <li key={field} style={{ marginBottom: 2 }}>
-                                <code style={{ backgroundColor: '#f5f5f5', padding: '2px 4px', borderRadius: 2 }}>
+                                <code style={{ backgroundColor: token.colorFillQuaternary, padding: '2px 4px', borderRadius: 2 }}>
                                   {field}
                                 </code>: {' '}
                                 <span style={{ color: '#ff4d4f' }}>{JSON.stringify(change.from)}</span>
@@ -311,7 +312,7 @@ const VersionHistory = ({
                     <li key={idx} style={{ color: '#1890ff' }}>
                       🛡️ <strong>{waf.name}</strong> ({waf.rule_type})
                       {waf.changes && waf.changes.length > 0 && (
-                        <span style={{ marginLeft: 8, fontSize: '0.9em', color: '#666' }}>
+                        <span style={{ marginLeft: 8, fontSize: '0.9em', color: token.colorTextSecondary }}>
                           ({waf.changes.join(', ')})
                         </span>
                       )}
@@ -445,7 +446,7 @@ const VersionHistory = ({
           <Tag color={getVersionTypeColor(record.type)} style={{ marginBottom: 4 }}>
             {record.type}
           </Tag>
-          <div style={{ fontSize: '12px', color: '#666' }}>
+          <div style={{ fontSize: '12px', color: token.colorTextSecondary }}>
             {record.description}
           </div>
         </div>
@@ -534,7 +535,7 @@ const VersionHistory = ({
           <HistoryOutlined style={{ marginRight: 8, color: '#1890ff' }} />
           {entityType === 'frontend' ? 'Frontend' : entityType === 'backend' ? 'Backend' : entityType === 'waf' ? 'WAF Rule' : 'Configuration'} Version History
           {entityInfo && (
-            <div style={{ fontSize: '12px', color: '#666', fontWeight: 'normal', marginTop: 4 }}>
+            <div style={{ fontSize: '12px', color: token.colorTextSecondary, fontWeight: 'normal', marginTop: 4 }}>
               {entityInfo.entityName} ({entityInfo.clusterName})
             </div>
           )}
@@ -585,7 +586,7 @@ const VersionHistory = ({
       />
 
       {versions.length === 0 && !loading && (
-        <div style={{ textAlign: 'center', padding: '40px 0', color: '#666' }}>
+        <div style={{ textAlign: 'center', padding: '40px 0', color: token.colorTextSecondary }}>
           <HistoryOutlined style={{ fontSize: '48px', marginBottom: '16px' }} />
           <div>No version history found for this cluster</div>
         </div>

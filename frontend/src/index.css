@@ -1,10 +1,15 @@
-body {
+html, body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
     'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+html[data-theme='dark'],
+html[data-theme='dark'] body {
+  background-color: #000000;
 }
 
 code {
@@ -111,4 +116,35 @@ code {
     width: 100% !important;
     max-width: 200px;
   }
+}
+
+/* Dark mode overrides for search inputs */
+[data-theme='dark'] .search-input,
+[data-theme='dark'] .search-input .ant-input,
+[data-theme='dark'] .search-input.ant-input,
+[data-theme='dark'] .search-input .ant-input-affix-wrapper,
+[data-theme='dark'] .search-input.ant-input-affix-wrapper,
+[data-theme='dark'] .search-input .ant-input-search,
+[data-theme='dark'] .search-input .ant-input-search .ant-input {
+  background: #141414 !important;
+  border-color: #434343 !important;
+  color: rgba(255, 255, 255, 0.85) !important;
+}
+
+[data-theme='dark'] .search-input:focus,
+[data-theme='dark'] .search-input .ant-input:focus,
+[data-theme='dark'] .search-input.ant-input:focus,
+[data-theme='dark'] .search-input .ant-input-affix-wrapper:focus,
+[data-theme='dark'] .search-input.ant-input-affix-wrapper:focus,
+[data-theme='dark'] .search-input .ant-input-affix-wrapper-focused,
+[data-theme='dark'] .search-input.ant-input-affix-wrapper-focused {
+  border-color: #177ddc !important;
+}
+
+[data-theme='dark'] .search-input:hover,
+[data-theme='dark'] .search-input .ant-input:hover,
+[data-theme='dark'] .search-input.ant-input:hover,
+[data-theme='dark'] .search-input .ant-input-affix-wrapper:hover,
+[data-theme='dark'] .search-input.ant-input-affix-wrapper:hover {
+  border-color: #177ddc !important;
 }

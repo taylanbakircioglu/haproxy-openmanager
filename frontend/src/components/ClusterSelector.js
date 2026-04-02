@@ -1,11 +1,12 @@
 import React from 'react';
-import { Select, Badge, Tooltip } from 'antd';
+import { Select, Badge, Tooltip, theme } from 'antd';
 import { CloudServerOutlined, CheckCircleOutlined, ExclamationCircleOutlined, CloseCircleOutlined, LoadingOutlined } from '@ant-design/icons';
 import { useCluster } from '../contexts/ClusterContext';
 
 const { Option } = Select;
 
 const ClusterSelector = () => {
+  const { token } = theme.useToken();
   const { clusters, selectedCluster, selectCluster, loading, agentHealthByPool } = useCluster();
 
   const getAgentStatusIcon = (agentStatus, totalAgents) => {
@@ -144,7 +145,7 @@ const ClusterSelector = () => {
                 }}>{cluster.name}</span>
                 <span style={{ 
                   fontSize: '11px', 
-                  color: '#666',
+                  color: token.colorTextSecondary,
                   whiteSpace: 'nowrap',
                   flexShrink: 0
                 }}>
@@ -177,7 +178,7 @@ const ClusterSelector = () => {
                   </div>
                   <div style={{ 
                     fontSize: '12px', 
-                    color: '#666',
+                    color: token.colorTextSecondary,
                     marginTop: '2px'
                   }}>
                     Pool: {cluster.pool_name} ({cluster.connection_type})

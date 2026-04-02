@@ -1,10 +1,11 @@
 import React from 'react';
-import { Card, Typography, Alert } from 'antd';
+import { Card, Typography, Alert, theme } from 'antd';
 import { ApiOutlined, BookOutlined, CodeOutlined } from '@ant-design/icons';
 
 const { Title, Paragraph, Text, Link } = Typography;
 
 const APIDocumentation = () => {
+  const { token } = theme.useToken();
   // Get base URL from current location
   const baseUrl = window.location.origin;
   const apiDocsUrl = `${baseUrl}/api/docs`;
@@ -46,7 +47,7 @@ const APIDocumentation = () => {
         </ul>
         
         <div style={{ 
-          background: '#f5f5f5', 
+          background: token.colorFillQuaternary, 
           padding: '16px', 
           borderRadius: '4px',
           marginTop: '16px'
@@ -82,7 +83,7 @@ const APIDocumentation = () => {
         </ul>
         
         <div style={{ 
-          background: '#f5f5f5', 
+          background: token.colorFillQuaternary, 
           padding: '16px', 
           borderRadius: '4px',
           marginTop: '16px'
@@ -111,7 +112,7 @@ const APIDocumentation = () => {
         </ul>
         
         <div style={{ 
-          background: '#f5f5f5', 
+          background: token.colorFillQuaternary, 
           padding: '16px', 
           borderRadius: '4px',
           marginTop: '16px'

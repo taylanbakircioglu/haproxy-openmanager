@@ -1,7 +1,7 @@
 import React, { useState, useMemo, memo } from 'react';
 import { 
   Card, Table, Badge, Tag, Input, Space, Button, Switch, 
-  Tooltip, Typography, Statistic, Collapse, Select, Row, Col 
+  Tooltip, Typography, Statistic, Collapse, Select, Row, Col, theme 
 } from 'antd';
 import {
   SearchOutlined,
@@ -20,6 +20,7 @@ const { Text } = Typography;
 const { Panel } = Collapse;
 
 const CompactFrontendList = ({ data, loading, onSelect, selectedItems = [] }) => {
+  const { token } = theme.useToken();
   const [searchTerm, setSearchTerm] = useState('');
   const [compactView, setCompactView] = useState(true);
   const [statusFilter, setStatusFilter] = useState('all');
@@ -218,7 +219,7 @@ const CompactFrontendList = ({ data, loading, onSelect, selectedItems = [] }) =>
     const badge = getStatusBadge(item.status);
     
     return (
-      <div style={{ ...style, padding: '8px 16px', borderBottom: '1px solid #f0f0f0' }}>
+      <div style={{ ...style, padding: '8px 16px', borderBottom: `1px solid ${token.colorBorderSecondary}` }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <Badge {...badge} />
           <Text strong style={{ flex: 1 }}>{item.name}</Text>

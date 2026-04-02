@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   Card, Button, Space, Row, Col, message, Table, Modal, Spin, 
   Typography, Tag, Descriptions, Alert, Divider, Timeline, Empty,
-  Popconfirm, Badge
+  Popconfirm, Badge, theme
 } from 'antd';
 import {
   HistoryOutlined, ReloadOutlined, EyeOutlined, RollbackOutlined,
@@ -29,6 +29,7 @@ const BulkVersionHistory = () => {
   const [viewChangeModalVisible, setViewChangeModalVisible] = useState(false);
   const [diffData, setDiffData] = useState(null);
   const [diffLoading, setDiffLoading] = useState(false);
+  const { token } = theme.useToken();
 
   useEffect(() => {
     if (selectedCluster) {
@@ -120,7 +121,7 @@ const BulkVersionHistory = () => {
             
             <div style={{ marginBottom: 16 }}>
               <Text strong>Summary of Changes:</Text>
-              <div style={{ marginTop: 8, padding: 12, backgroundColor: '#f5f5f5', borderRadius: 4 }}>
+              <div style={{ marginTop: 8, padding: 12, backgroundColor: token.colorFillQuaternary, borderRadius: 4 }}>
                 <div>✅ <strong>{summary.creates}</strong> entities will be created</div>
                 <div>✏️ <strong>{summary.updates}</strong> entities will be updated</div>
                 <div>🗑️ <strong>{summary.deletes}</strong> entities will be deleted</div>
@@ -151,12 +152,12 @@ const BulkVersionHistory = () => {
                     <li key={idx}>
                       <strong>{fe.name}</strong>
                       {fe.changes && (
-                        <ul style={{ fontSize: '11px', color: '#666', marginTop: 4 }}>
+                        <ul style={{ fontSize: '11px', color: token.colorTextSecondary, marginTop: 4 }}>
                           {Object.entries(fe.changes).map(([field, change]) => {
                             if (change.from === change.to) return null;
                             return (
                               <li key={field} style={{ marginBottom: 2 }}>
-                                <code style={{ backgroundColor: '#f5f5f5', padding: '2px 4px', borderRadius: 2 }}>
+                                <code style={{ backgroundColor: token.colorFillQuaternary, padding: '2px 4px', borderRadius: 2 }}>
                                   {field}
                                 </code>: {' '}
                                 <span style={{ color: '#ff4d4f' }}>{JSON.stringify(change.from)}</span>
@@ -212,12 +213,12 @@ const BulkVersionHistory = () => {
                     <li key={idx}>
                       <strong>{be.name}</strong>
                       {be.changes && (
-                        <ul style={{ fontSize: '11px', color: '#666', marginTop: 4 }}>
+                        <ul style={{ fontSize: '11px', color: token.colorTextSecondary, marginTop: 4 }}>
                           {Object.entries(be.changes).map(([field, change]) => {
                             if (change.from === change.to) return null;
                             return (
                               <li key={field} style={{ marginBottom: 2 }}>
-                                <code style={{ backgroundColor: '#f5f5f5', padding: '2px 4px', borderRadius: 2 }}>
+                                <code style={{ backgroundColor: token.colorFillQuaternary, padding: '2px 4px', borderRadius: 2 }}>
                                   {field}
                                 </code>: {' '}
                                 <span style={{ color: '#ff4d4f' }}>{JSON.stringify(change.from)}</span>
@@ -273,12 +274,12 @@ const BulkVersionHistory = () => {
                     <li key={idx}>
                       📦 {srv.backend_name} / <strong>{srv.server_name}</strong>
                       {srv.changes && (
-                        <ul style={{ fontSize: '11px', color: '#666', marginTop: 4 }}>
+                        <ul style={{ fontSize: '11px', color: token.colorTextSecondary, marginTop: 4 }}>
                           {Object.entries(srv.changes).map(([field, change]) => {
                             if (change.from === change.to) return null;
                             return (
                               <li key={field} style={{ marginBottom: 2 }}>
-                                <code style={{ backgroundColor: '#f5f5f5', padding: '2px 4px', borderRadius: 2 }}>
+                                <code style={{ backgroundColor: token.colorFillQuaternary, padding: '2px 4px', borderRadius: 2 }}>
                                   {field}
                                 </code>: {' '}
                                 <span style={{ color: '#ff4d4f' }}>{JSON.stringify(change.from)}</span>
@@ -320,7 +321,7 @@ const BulkVersionHistory = () => {
                     <li key={idx} style={{ color: '#1890ff' }}>
                       🛡️ <strong>{waf.name}</strong> ({waf.rule_type})
                       {waf.changes && waf.changes.length > 0 && (
-                        <span style={{ marginLeft: 8, fontSize: '0.9em', color: '#666' }}>
+                        <span style={{ marginLeft: 8, fontSize: '0.9em', color: token.colorTextSecondary }}>
                           ({waf.changes.join(', ')})
                         </span>
                       )}
@@ -437,7 +438,7 @@ const BulkVersionHistory = () => {
       case 'APPLIED': return <CheckCircleOutlined style={{ color: '#52c41a' }} />;
       case 'PENDING': return <ClockCircleOutlined style={{ color: '#fa8c16' }} />;
       case 'RESTORED': return <RollbackOutlined style={{ color: '#1890ff' }} />;
-      default: return <ExclamationCircleOutlined style={{ color: '#d9d9d9' }} />;
+      default: return <ExclamationCircleOutlined style={{ color: token.colorTextTertiary }} />;
     }
   };
 
@@ -476,7 +477,7 @@ const BulkVersionHistory = () => {
             {formatVersionName(text)}
           </div>
           {record.description && (
-            <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+            <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 4 }}>
               {record.description}
             </div>
           )}
@@ -491,7 +492,7 @@ const BulkVersionHistory = () => {
       render: (text) => (
         <div>
           <div>{new Date(text).toLocaleDateString()}</div>
-          <div style={{ fontSize: 12, color: '#666' }}>
+          <div style={{ fontSize: 12, color: token.colorTextSecondary }}>
             {new Date(text).toLocaleTimeString()}
           </div>
         </div>
@@ -504,7 +505,7 @@ const BulkVersionHistory = () => {
       width: 120,
       render: (userId) => (
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <UserOutlined style={{ color: '#666' }} />
+          <UserOutlined style={{ color: token.colorTextSecondary }} />
           <span>User {userId}</span>
         </div>
       ),
@@ -672,7 +673,7 @@ const BulkVersionHistory = () => {
               <Title level={5}>HAProxy Configuration Content:</Title>
             </div>
 
-            <div style={{ border: '1px solid #d9d9d9', borderRadius: 6 }}>
+            <div style={{ border: `1px solid ${token.colorBorder}`, borderRadius: 6 }}>
               <MonacoEditor
                 height="400px"
                 language="apache"
@@ -733,8 +734,8 @@ const BulkVersionHistory = () => {
             ) : diffData ? (
               <div>
                 <Title level={5}>Configuration Changes:</Title>
-                <div style={{ border: '1px solid #d9d9d9', borderRadius: 6, backgroundColor: '#fafafa' }}>
-                  <div style={{ padding: '12px', borderBottom: '1px solid #d9d9d9', backgroundColor: '#f0f0f0' }}>
+                <div style={{ border: `1px solid ${token.colorBorder}`, borderRadius: 6, backgroundColor: token.colorFillQuaternary }}>
+                  <div style={{ padding: '12px', borderBottom: `1px solid ${token.colorBorder}`, backgroundColor: token.colorFillTertiary }}>
                     <Text strong>Changes from previous version:</Text>
                   </div>
                   <div style={{ padding: '16px', fontFamily: 'monospace', fontSize: '12px', lineHeight: '1.4' }}>
@@ -742,24 +743,24 @@ const BulkVersionHistory = () => {
                       diffData.changes.map((change, index) => (
                         <div key={index} style={{ marginBottom: '8px' }}>
                           {change.type === 'added' && (
-                            <div style={{ backgroundColor: '#f6ffed', color: '#52c41a', padding: '2px 8px', borderLeft: '3px solid #52c41a' }}>
+                            <div style={{ backgroundColor: token.colorSuccessBg, color: '#52c41a', padding: '2px 8px', borderLeft: '3px solid #52c41a' }}>
                               + {change.line}
                             </div>
                           )}
                           {change.type === 'removed' && (
-                            <div style={{ backgroundColor: '#fff2f0', color: '#ff4d4f', padding: '2px 8px', borderLeft: '3px solid #ff4d4f' }}>
+                            <div style={{ backgroundColor: token.colorErrorBg, color: '#ff4d4f', padding: '2px 8px', borderLeft: '3px solid #ff4d4f' }}>
                               - {change.line}
                             </div>
                           )}
                           {change.type === 'context' && (
-                            <div style={{ color: '#666', padding: '2px 8px' }}>
+                            <div style={{ color: token.colorTextSecondary, padding: '2px 8px' }}>
                               {change.line}
                             </div>
                           )}
                         </div>
                       ))
                     ) : (
-                      <div style={{ textAlign: 'center', padding: '40px 0', color: '#666' }}>
+                      <div style={{ textAlign: 'center', padding: '40px 0', color: token.colorTextSecondary }}>
                         No changes detected or this is the first version
                       </div>
                     )}
@@ -768,14 +769,14 @@ const BulkVersionHistory = () => {
                 {diffData.summary && (
                   <div style={{ marginTop: 16 }}>
                     <Title level={5}>Summary:</Title>
-                    <div style={{ backgroundColor: '#f9f9f9', padding: '12px', borderRadius: '6px', border: '1px solid #d9d9d9' }}>
+                    <div style={{ backgroundColor: token.colorFillQuaternary, padding: '12px', borderRadius: '6px', border: `1px solid ${token.colorBorder}` }}>
                       <Row gutter={16}>
                         <Col span={8}>
                           <div style={{ textAlign: 'center' }}>
                             <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#52c41a' }}>
                               +{diffData.summary.added || 0}
                             </div>
-                            <div style={{ fontSize: '12px', color: '#666' }}>Added Lines</div>
+                            <div style={{ fontSize: '12px', color: token.colorTextSecondary }}>Added Lines</div>
                           </div>
                         </Col>
                         <Col span={8}>
@@ -783,7 +784,7 @@ const BulkVersionHistory = () => {
                             <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#ff4d4f' }}>
                               -{diffData.summary.removed || 0}
                             </div>
-                            <div style={{ fontSize: '12px', color: '#666' }}>Removed Lines</div>
+                            <div style={{ fontSize: '12px', color: token.colorTextSecondary }}>Removed Lines</div>
                           </div>
                         </Col>
                         <Col span={8}>
@@ -791,7 +792,7 @@ const BulkVersionHistory = () => {
                             <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#1890ff' }}>
                               {diffData.summary.total_changes || 0}
                             </div>
-                            <div style={{ fontSize: '12px', color: '#666' }}>Total Changes</div>
+                            <div style={{ fontSize: '12px', color: token.colorTextSecondary }}>Total Changes</div>
                           </div>
                         </Col>
                       </Row>
@@ -800,7 +801,7 @@ const BulkVersionHistory = () => {
                 )}
               </div>
             ) : (
-              <div style={{ textAlign: 'center', padding: '40px 0', color: '#666' }}>
+              <div style={{ textAlign: 'center', padding: '40px 0', color: token.colorTextSecondary }}>
                 <ExclamationCircleOutlined style={{ fontSize: '24px', marginBottom: '8px' }} />
                 <div>Failed to load configuration changes</div>
               </div>

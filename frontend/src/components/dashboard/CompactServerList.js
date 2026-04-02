@@ -1,7 +1,7 @@
 import React, { useState, useMemo, memo } from 'react';
 import { 
   Card, Badge, Tag, Input, Space, Button, Switch, Table,
-  Tooltip, Typography, Progress, Select, Statistic, Row, Col, Radio
+  Tooltip, Typography, Progress, Select, Statistic, Row, Col, Radio, theme
 } from 'antd';
 import {
   SearchOutlined,
@@ -21,6 +21,7 @@ import { FixedSizeList as List } from 'react-window';
 const { Text } = Typography;
 
 const CompactServerList = ({ data, loading }) => {
+  const { token } = theme.useToken();
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [backendFilter, setBackendFilter] = useState('all');
@@ -229,7 +230,7 @@ const CompactServerList = ({ data, loading }) => {
             display: 'flex', 
             alignItems: 'center', 
             padding: '8px 16px',
-            borderBottom: '1px solid #f0f0f0',
+            borderBottom: `1px solid ${token.colorBorderSecondary}`,
             gap: '12px',
             fontSize: '13px'
           }}
@@ -283,7 +284,7 @@ const CompactServerList = ({ data, loading }) => {
           style={{ 
             ...style, 
             padding: '12px 16px',
-            borderBottom: '1px solid #f0f0f0'
+            borderBottom: `1px solid ${token.colorBorderSecondary}`
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', marginBottom: '8px', gap: '12px' }}>
@@ -296,7 +297,7 @@ const CompactServerList = ({ data, loading }) => {
             display: 'flex', 
             gap: '16px', 
             fontSize: '12px',
-            color: '#8c8c8c',
+            color: token.colorTextSecondary,
             paddingLeft: '32px'
           }}>
             <span>Weight: {server.weight || 0}</span>
@@ -525,8 +526,8 @@ const CompactServerList = ({ data, loading }) => {
             <div style={{ 
               display: 'flex', 
               padding: '8px 16px',
-              backgroundColor: '#fafafa',
-              borderBottom: '2px solid #d9d9d9',
+              backgroundColor: token.colorFillQuaternary,
+              borderBottom: `2px solid ${token.colorBorder}`,
               fontWeight: 'bold',
               fontSize: '12px',
               gap: '12px'
@@ -565,7 +566,7 @@ const CompactServerList = ({ data, loading }) => {
       <div style={{ 
         marginTop: 16, 
         padding: '12px', 
-        backgroundColor: '#fafafa', 
+        backgroundColor: token.colorFillQuaternary, 
         borderRadius: '4px',
         display: 'flex',
         gap: '24px',

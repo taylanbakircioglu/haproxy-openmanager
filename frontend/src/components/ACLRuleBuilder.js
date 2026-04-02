@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Card, Row, Col, Input, Select, Button, Space, Tag, Tooltip,
-  Typography, Divider, Empty, Alert
+  Typography, Divider, Empty, Alert, theme
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, CodeOutlined,
@@ -264,17 +264,17 @@ function serializeRedirectRule(rule) {
 // Sub-components
 // ═══════════════════════════════════════════════════════
 
-const ruleCardStyle = {
-  marginBottom: 8,
-  borderRadius: 8,
-  border: '1px solid #f0f0f0',
-};
-
 const deleteButtonStyle = {
   color: '#ff4d4f',
 };
 
 function ACLDefinitionCard({ rule, index, onChange, onDelete }) {
+  const { token } = theme.useToken();
+  const ruleCardStyle = {
+    marginBottom: 8,
+    borderRadius: 8,
+    border: `1px solid ${token.colorBorderSecondary}`,
+  };
   const isRaw = rule.raw !== undefined;
 
   if (isRaw) {
@@ -417,6 +417,12 @@ function ACLDefinitionCard({ rule, index, onChange, onDelete }) {
 }
 
 function BackendRoutingCard({ rule, index, onChange, onDelete, backends, aclNames }) {
+  const { token } = theme.useToken();
+  const ruleCardStyle = {
+    marginBottom: 8,
+    borderRadius: 8,
+    border: `1px solid ${token.colorBorderSecondary}`,
+  };
   const isRaw = rule.raw !== undefined;
 
   if (isRaw) {
@@ -508,6 +514,12 @@ function BackendRoutingCard({ rule, index, onChange, onDelete, backends, aclName
 }
 
 function RedirectRuleCard({ rule, index, onChange, onDelete }) {
+  const { token } = theme.useToken();
+  const ruleCardStyle = {
+    marginBottom: 8,
+    borderRadius: 8,
+    border: `1px solid ${token.colorBorderSecondary}`,
+  };
   const isRaw = rule.raw !== undefined;
 
   if (isRaw) {

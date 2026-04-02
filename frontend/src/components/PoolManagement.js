@@ -21,7 +21,8 @@ import {
   Statistic,
   Progress,
   List,
-  Avatar
+  Avatar,
+  theme
 } from 'antd';
 import {
   PlusOutlined,
@@ -46,6 +47,7 @@ const { Text, Title, Paragraph } = Typography;
 const { TextArea } = Input;
 
 const PoolManagement = () => {
+  const { token } = theme.useToken();
   const { loading: userIsLoading } = useContext(AuthContext);
   const [pools, setPools] = useState([]);
   const [filteredPools, setFilteredPools] = useState([]);
@@ -482,12 +484,13 @@ const PoolManagement = () => {
                   height: 32,
                   paddingLeft: 8,
                   paddingRight: 8,
-                  border: '1px solid #d9d9d9',
+                  border: `1px solid ${token.colorBorder}`,
                   borderRadius: 6,
                   fontSize: 14,
                   outline: 'none',
                   boxShadow: 'none',
-                  backgroundColor: '#fff',
+                  backgroundColor: token.colorBgContainer,
+                  color: token.colorText,
                   transition: 'border-color 0.3s ease'
                 }}
                 onFocus={(e) => {
@@ -496,7 +499,7 @@ const PoolManagement = () => {
                   e.target.style.boxShadow = 'none';
                 }}
                 onBlur={(e) => {
-                  e.target.style.borderColor = '#d9d9d9';
+                  e.target.style.borderColor = token.colorBorder;
                 }}
                 onMouseOver={(e) => {
                   if (e.target !== document.activeElement) {
@@ -505,7 +508,7 @@ const PoolManagement = () => {
                 }}
                 onMouseOut={(e) => {
                   if (e.target !== document.activeElement) {
-                    e.target.style.borderColor = '#d9d9d9';
+                    e.target.style.borderColor = token.colorBorder;
                   }
                 }}
               />
@@ -734,7 +737,7 @@ const PoolManagement = () => {
             >
               {poolAgents.length === 0 ? (
                 <div style={{ textAlign: 'center', padding: '40px' }}>
-                  <TeamOutlined style={{ fontSize: '48px', color: '#d9d9d9' }} />
+                  <TeamOutlined style={{ fontSize: '48px', color: token.colorTextQuaternary }} />
                   <Paragraph type="secondary" style={{ marginTop: '16px' }}>
                     No agents registered in this pool yet.
                   </Paragraph>
