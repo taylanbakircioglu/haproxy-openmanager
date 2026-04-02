@@ -991,28 +991,33 @@ CLUSTER_ID=$(jq -r '.management.cluster_id' "$CONFIG_FILE")
 AGENT_NAME=$(jq -r '.agent.name' "$CONFIG_FILE")
 HOSTNAME=$(jq -r '.agent.hostname' "$CONFIG_FILE")
 
+# Load HAProxy paths from config.json as baseline (written during installation)
+HAPROXY_CONFIG_PATH=$(jq -r '.haproxy.config_path // empty' "$CONFIG_FILE" 2>/dev/null)
+HAPROXY_BIN_PATH=$(jq -r '.haproxy.bin_path // empty' "$CONFIG_FILE" 2>/dev/null)
+STATS_SOCKET_PATH=$(jq -r '.haproxy.stats_socket_path // empty' "$CONFIG_FILE" 2>/dev/null)
+
 # SSL incremental update timestamp file (agent-specific to avoid race conditions)
 # Each agent maintains its own SSL sync timestamp to prevent conflicts
 SSL_SYNC_TIMESTAMP_FILE="/tmp/haproxy-agent-ssl-sync-${AGENT_NAME}"
 
-# Get dynamic HAProxy paths from cluster configuration
+# Get dynamic HAProxy paths from cluster configuration (overrides config.json when available)
 get_cluster_paths() {
     local cluster_response=$("$CURL_BIN" -k -s -X GET "$MANAGEMENT_URL/api/clusters" \
         -H "X-API-Key: $AGENT_TOKEN")
     
     if [[ $? -eq 0 ]]; then
-        HAPROXY_CONFIG_PATH=$(echo "$cluster_response" | jq -r '.clusters[] | select(.id == '$CLUSTER_ID') | .haproxy_config_path // "/etc/haproxy/haproxy.cfg"')
-        HAPROXY_BIN_PATH=$(echo "$cluster_response" | jq -r '.clusters[] | select(.id == '$CLUSTER_ID') | .haproxy_bin_path // "/usr/sbin/haproxy"')
-        STATS_SOCKET_PATH=$(echo "$cluster_response" | jq -r '.clusters[] | select(.id == '$CLUSTER_ID') | .stats_socket_path // "/var/run/haproxy/admin.sock"')
-    else
-        # Fallback to config file values if cluster fetch fails
-        HAPROXY_CONFIG_PATH=$(jq -r '.haproxy.config_path // "/etc/haproxy/haproxy.cfg"' "$CONFIG_FILE")
-        HAPROXY_BIN_PATH=$(jq -r '.haproxy.bin_path // "/usr/sbin/haproxy"' "$CONFIG_FILE")
-        STATS_SOCKET_PATH=$(jq -r '.haproxy.stats_socket_path // "/var/run/haproxy/admin.sock"' "$CONFIG_FILE")
+        local _cfg _bin _sock
+        _cfg=$(echo "$cluster_response" | jq -r '.clusters[] | select(.id == '$CLUSTER_ID') | .haproxy_config_path // empty' 2>/dev/null)
+        _bin=$(echo "$cluster_response" | jq -r '.clusters[] | select(.id == '$CLUSTER_ID') | .haproxy_bin_path // empty' 2>/dev/null)
+        _sock=$(echo "$cluster_response" | jq -r '.clusters[] | select(.id == '$CLUSTER_ID') | .stats_socket_path // empty' 2>/dev/null)
+        # Only override if API returned non-empty values
+        [[ -n "$_cfg" ]] && HAPROXY_CONFIG_PATH="$_cfg"
+        [[ -n "$_bin" ]] && HAPROXY_BIN_PATH="$_bin"
+        [[ -n "$_sock" ]] && STATS_SOCKET_PATH="$_sock"
     fi
 }
 
-# Initialize cluster paths
+# Initialize cluster paths (enhances config.json values with live cluster configuration)
 get_cluster_paths
 
 # Enable debug mode for troubleshooting (0=off, 1=on)
@@ -1941,7 +1946,16 @@ check_config_updates() {
     CONFIG_CONTENT=$(echo "$CONFIG_RESPONSE" | jq -r '.config_content // ""')
     CONFIG_CHECKSUM=$(echo "$CONFIG_RESPONSE" | jq -r '.checksum // ""')
     
-    log "DEBUG" "Config status: $CONFIG_STATUS, version: $CONFIG_VERSION"
+    # Update paths dynamically from config API response (cluster settings may change without reinstall)
+    local _api_cfg _api_bin _api_sock
+    _api_cfg=$(echo "$CONFIG_RESPONSE" | jq -r '.haproxy_config_path // empty' 2>/dev/null)
+    _api_bin=$(echo "$CONFIG_RESPONSE" | jq -r '.haproxy_bin_path // empty' 2>/dev/null)
+    _api_sock=$(echo "$CONFIG_RESPONSE" | jq -r '.stats_socket_path // empty' 2>/dev/null)
+    [[ -n "$_api_cfg" && "$_api_cfg" != "null" ]] && HAPROXY_CONFIG_PATH="$_api_cfg"
+    [[ -n "$_api_bin" && "$_api_bin" != "null" ]] && HAPROXY_BIN_PATH="$_api_bin"
+    [[ -n "$_api_sock" && "$_api_sock" != "null" ]] && STATS_SOCKET_PATH="$_api_sock"
+    
+    log "DEBUG" "Config status: $CONFIG_STATUS, version: $CONFIG_VERSION, config_path: $HAPROXY_CONFIG_PATH"
     
     # Check if config is available
     if [[ "$CONFIG_STATUS" != "available" ]]; then
