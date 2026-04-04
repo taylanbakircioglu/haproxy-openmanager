@@ -148,3 +148,7 @@ code {
 [data-theme='dark'] .search-input.ant-input-affix-wrapper:hover {
   border-color: #177ddc !important;
 }
+
+.acme-order-terminal td {
+  opacity: 0.55;
+}

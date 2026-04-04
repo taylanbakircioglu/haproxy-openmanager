@@ -653,20 +653,24 @@ async def get_version():
 @app.get("/.well-known/acme-challenge/{token}")
 async def serve_acme_challenge(token: str):
     """Serve ACME HTTP-01 challenge token. Public endpoint, no auth required."""
+    logger.info(f"ACME-CHALLENGE: Incoming request for token={token[:32]}...")
     conn = None
     try:
         conn = await get_database_connection()
         row = await conn.fetchrow(
-            "SELECT key_authorization FROM acme_challenges WHERE token = $1 AND status IN ('pending', 'processing') LIMIT 1",
+            "SELECT key_authorization FROM acme_challenges WHERE token = $1 AND (status IN ('pending', 'processing') OR status IS NULL) LIMIT 1",
             token
         )
         if row:
+            logger.info(f"ACME-CHALLENGE: Token found, serving key_authorization ({len(row['key_authorization'])} chars)")
             from fastapi.responses import PlainTextResponse
             return PlainTextResponse(row['key_authorization'])
+        logger.warning(f"ACME-CHALLENGE: Token NOT found in DB - no matching record with status pending/processing/null")
         raise HTTPException(status_code=404, detail="Challenge not found")
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
+        logger.error(f"ACME-CHALLENGE: Error serving token {token[:32]}...: {e}")
         raise HTTPException(status_code=404, detail="Challenge not found")
     finally:
         if conn:

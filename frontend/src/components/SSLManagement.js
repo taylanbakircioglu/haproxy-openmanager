@@ -16,6 +16,7 @@ import {
   ThunderboltOutlined
 } from '@ant-design/icons';
 import axios from 'axios';
+import { useSearchParams } from 'react-router-dom';
 import { useCluster } from '../contexts/ClusterContext';
 import { useProgress } from '../contexts/ProgressContext';
 import { formatEntityForSync } from '../utils/agentSync';
@@ -26,6 +27,8 @@ const { TextArea } = Input;
 const { TabPane } = Tabs;
 
 const SSLManagement = () => {
+  const [searchParams] = useSearchParams();
+  const defaultTab = searchParams.get('tab') || 'certificates';
   const { token } = theme.useToken();
   const { selectedCluster, clusters } = useCluster();
   const [certificates, setCertificates] = useState([]);
@@ -893,6 +896,7 @@ const SSLManagement = () => {
         )}
       </Title>
       <Tabs
+        defaultActiveKey={defaultTab}
         items={[
           {
             key: 'certificates',

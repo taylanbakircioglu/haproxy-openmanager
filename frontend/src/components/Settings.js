@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Card, Form, Switch, Button, InputNumber, message, Tabs, Input, Select, Collapse, Space, Alert, Tag, Spin, Tooltip } from 'antd';
 import { SafetyCertificateOutlined, ApiOutlined, CheckCircleOutlined, CloseCircleOutlined, InfoCircleOutlined } from '@ant-design/icons';
+import { useSearchParams } from 'react-router-dom';
 import axios from 'axios';
 
 const { Option } = Select;
@@ -33,6 +34,8 @@ const ACME_PROVIDERS = {
 };
 
 const Settings = () => {
+  const [searchParams] = useSearchParams();
+  const defaultTab = searchParams.get('tab') || 'general';
   const [form] = Form.useForm();
   const [acmeForm] = Form.useForm();
   const [acmeLoading, setAcmeLoading] = useState(false);
@@ -332,7 +335,7 @@ const Settings = () => {
 
   return (
     <div>
-      <Tabs items={tabItems} />
+      <Tabs items={tabItems} defaultActiveKey={defaultTab} />
     </div>
   );
 };

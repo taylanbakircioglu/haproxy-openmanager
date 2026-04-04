@@ -256,7 +256,7 @@ class ACMEService:
                     account_url = $3, jwk_private_key = $4, status = $5, tos_agreed = $6, updated_at = NOW()
                 RETURNING id, email, directory_url, account_url, status, tos_agreed, created_at
             """, email, directory_url, account_url, pem,
-                data.get('status', 'valid'), tos_agreed, eab_kid)
+                data.get('status') or 'valid', tos_agreed, eab_kid)
             return dict(row)
         finally:
             await close_database_connection(conn)
@@ -287,7 +287,7 @@ class ACMEService:
 
             if status not in (200, 201):
                 logger.warning(f"ACME account deactivation returned {status}: {data}")
-                raise Exception(f"CA rejected deactivation (HTTP {status}): {data.get('detail', 'Unknown error')}")
+                raise Exception(f"CA rejected deactivation (HTTP {status}): {data.get('detail') or 'Unknown error'}")
 
             await conn.execute(
                 "UPDATE letsencrypt_accounts SET status = 'deactivated', updated_at = NOW() WHERE id = $1",
@@ -303,6 +303,7 @@ class ACMEService:
         domains: List[str],
         cluster_ids: Optional[List[int]] = None,
     ) -> dict:
+        logger.info(f"ACME: Creating order for domains={domains}, account_id={account_id}")
         conn = await get_database_connection()
         try:
             account = await conn.fetchrow(
@@ -326,9 +327,11 @@ class ACMEService:
             )
 
             if status not in (200, 201):
+                logger.error(f"ACME: Order creation failed: HTTP {status}, response={data}")
                 raise Exception(f"Order creation failed: {data}")
 
             order_url = headers.get('Location', '')
+            logger.info(f"ACME: Order created, order_url={order_url}, status={data.get('status')}, authorizations={len(data.get('authorizations', []))}")
             expires_at = None
             if data.get('expires'):
                 try:
@@ -341,8 +344,8 @@ class ACMEService:
                     (account_id, order_url, status, domains, finalize_url, expires_at, cluster_ids)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
                 RETURNING id
-            """, account_id, order_url, data.get('status', 'pending'),
-                json.dumps(domains), data.get('finalize', ''), expires_at,
+            """, account_id, order_url, data.get('status') or 'pending',
+                json.dumps(domains), data.get('finalize') or '', expires_at,
                 json.dumps(cluster_ids or []))
 
             order_id = order_row['id']
@@ -356,8 +359,8 @@ class ACMEService:
                     logger.warning(f"Failed to fetch authorization {auth_url}: HTTP {auth_status}")
                     continue
 
-                domain = auth_data.get('identifier', {}).get('value', '')
-                for challenge in auth_data.get('challenges', []):
+                domain = (auth_data.get('identifier') or {}).get('value', '')
+                for challenge in (auth_data.get('challenges') or []):
                     if challenge.get('type') == 'http-01':
                         token = challenge['token']
                         jwk = self._get_jwk(private_key)
@@ -368,15 +371,16 @@ class ACMEService:
                             INSERT INTO acme_challenges (order_id, domain, token, key_authorization, challenge_url, status)
                             VALUES ($1, $2, $3, $4, $5, $6)
                         """, order_id, domain, token, key_auth,
-                            challenge.get('url', ''), challenge.get('status', 'pending'))
+                            challenge.get('url') or '', challenge.get('status') or 'pending')
+                        logger.info(f"ACME: Challenge stored for domain={domain}, token={token[:20]}..., challenge_url={(challenge.get('url') or '')[:60]}")
 
             return {
                 "order_id": order_id,
                 "order_url": order_url,
-                "status": data.get('status', 'pending'),
+                "status": data.get('status') or 'pending',
                 "domains": domains,
-                "authorizations": data.get('authorizations', []),
-                "finalize": data.get('finalize', ''),
+                "authorizations": data.get('authorizations') or [],
+                "finalize": data.get('finalize') or '',
             }
         finally:
             await close_database_connection(conn)
@@ -385,7 +389,7 @@ class ACMEService:
         conn = await get_database_connection()
         try:
             challenges = await conn.fetch(
-                "SELECT * FROM acme_challenges WHERE order_id = $1 AND status = 'pending'",
+                "SELECT * FROM acme_challenges WHERE order_id = $1 AND (status = 'pending' OR status IS NULL)",
                 order_id
             )
             order = await conn.fetchrow(
@@ -397,9 +401,11 @@ class ACMEService:
 
             private_key = self._load_private_key(order['jwk_private_key'])
             results = []
+            logger.info(f"ACME: Responding to {len(challenges)} challenge(s) for order_id={order_id}")
 
             for ch in challenges:
                 if not ch['challenge_url']:
+                    logger.warning(f"ACME: Skipping challenge id={ch['id']} domain={ch['domain']} - no challenge_url")
                     continue
                 status, data, _ = await self._signed_request(
                     ch['challenge_url'],
@@ -408,7 +414,8 @@ class ACMEService:
                     {},
                     account_url=order['account_url'],
                 )
-                new_status = data.get('status', 'processing') if status == 200 else 'failed'
+                new_status = (data.get('status') or 'processing') if status == 200 else 'failed'
+                logger.info(f"ACME: Challenge response for domain={ch['domain']}, token={ch['token'][:20]}..., CA_HTTP={status}, CA_status_raw={data.get('status')!r}, stored_status={new_status}")
                 await conn.execute(
                     "UPDATE acme_challenges SET status = $1 WHERE id = $2",
                     new_status, ch['id']
@@ -432,6 +439,7 @@ class ACMEService:
                 raise Exception(f"Order {order_id} not found")
 
             domains = json.loads(order['domains']) if isinstance(order['domains'], str) else order['domains']
+            logger.info(f"ACME: Finalizing order_id={order_id}, domains={domains}, finalize_url={(order['finalize_url'] or 'N/A')[:60]}")
             private_key = self._load_private_key(order['jwk_private_key'])
 
             cert_key = rsa.generate_private_key(
@@ -464,15 +472,17 @@ class ACMEService:
             )
 
             if status not in (200, 201):
-                error_msg = data.get('detail', str(data))
+                error_msg = data.get('detail') or str(data)
+                logger.error(f"ACME: Finalize failed for order_id={order_id}: HTTP {status}, error={error_msg}")
                 await conn.execute(
                     "UPDATE letsencrypt_orders SET status = 'invalid', error_detail = $1, updated_at = NOW() WHERE id = $2",
                     error_msg, order_id
                 )
                 raise Exception(f"Finalize failed: {error_msg}")
 
-            order_status = data.get('status', 'processing')
-            certificate_url = data.get('certificate', '')
+            order_status = data.get('status') or 'processing'
+            certificate_url = data.get('certificate') or ''
+            logger.info(f"ACME: Finalize success for order_id={order_id}, status={order_status}, certificate_url={certificate_url[:60] if certificate_url else 'N/A'}")
 
             await conn.execute(
                 "UPDATE letsencrypt_orders SET status = $1, certificate_url = $2, cert_private_key = $3, updated_at = NOW() WHERE id = $4",
@@ -558,8 +568,8 @@ class ACMEService:
             )
 
             if status == 200:
-                new_status = data.get('status', order['status'])
-                certificate_url = data.get('certificate', order['certificate_url'])
+                new_status = data.get('status') or order['status']
+                certificate_url = data.get('certificate') or order['certificate_url']
                 await conn.execute(
                     "UPDATE letsencrypt_orders SET status = $1, certificate_url = $2, updated_at = NOW() WHERE id = $3",
                     new_status, certificate_url, order_id

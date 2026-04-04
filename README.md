@@ -865,6 +865,107 @@ When enabled, HAProxy configuration is automatically injected with:
 
 This injection only affects HTTP-mode frontends and is completely removed when ACME is disabled.
 
+#### ACME Distributed Architecture
+
+Understanding how HTTP-01 challenges work in a distributed HAProxy environment is critical for successful certificate issuance:
+
+```
+┌─────────────────┐    DNS A Record     ┌──────────────────┐
+│  Let's Encrypt   │ ──────────────────► │  HAProxy Node(s) │
+│  (CA Server)     │  HTTP GET :80       │  (VIP / Public)  │
+└─────────────────┘  /.well-known/      └────────┬─────────┘
+                      acme-challenge/             │
+                      {token}                     │ ACL match →
+                                                  │ use_backend
+                                                  │ _acme_challenge_backend
+                                                  ▼
+                                         ┌──────────────────┐
+                                         │  OpenManager      │
+                                         │  (Backend Server) │
+                                         │  Serves token     │
+                                         │  response from DB │
+                                         └──────────────────┘
+```
+
+**Key Points:**
+
+1. **Let's Encrypt connects to your HAProxy**, not directly to OpenManager
+2. **DNS must resolve** the requested domain to your HAProxy node's public IP (or VIP/NAT)
+3. **Port 80 must be open** from the internet to HAProxy for HTTP-01 validation
+4. **HAProxy routes** the `/.well-known/acme-challenge/` path to OpenManager via the injected backend
+5. **OpenManager serves** the challenge token response stored in the database
+6. The `MANAGEMENT_BASE_URL` or `acme.challenge_backend_url` setting tells HAProxy where to find OpenManager
+
+**Network Scenarios:**
+
+| Scenario | HAProxy | OpenManager | DNS Target |
+|----------|---------|-------------|------------|
+| Single server | localhost:80 | localhost:5000 | Server's public IP |
+| Separate servers | 10.0.0.10:80 | 10.0.0.20:5000 | HAProxy's public IP |
+| Behind NAT/VIP | VIP: 1.2.3.4:80 | Internal:5000 | VIP address |
+| Multi-cluster | Multiple HAProxy nodes | Central OpenManager | Each domain → respective HAProxy |
+
+#### ACME Quick Start Guide
+
+Follow these steps to obtain your first Let's Encrypt certificate:
+
+**Step 1: Configure ACME Settings**
+- Navigate to **Settings > ACME / SSL Automation** tab
+- Select your ACME provider (default: Let's Encrypt)
+- For testing, enable **Staging Mode** to avoid rate limits
+- Save changes
+
+**Step 2: Register an ACME Account**
+- On the **SSL Certificates > ACME Automation** page, find the ACME Account card
+- Click **Register Account** and provide a valid email address
+- Accept the Terms of Service
+
+**Step 3: Enable ACME on Clusters**
+- Go to **Cluster Management** > Edit your cluster
+- Enable **ACME Challenge Routing** toggle
+- Set the correct **ACME Backend URL** if OpenManager is on a different server
+- Save the cluster configuration
+
+**Step 4: Apply Configuration**
+- Go to **Apply Management** and apply the pending HAProxy configuration changes
+- This injects the ACME challenge routing rules into HAProxy
+
+**Step 5: Verify Challenge Routing**
+
+Test that the challenge path is reachable through HAProxy:
+```bash
+curl -v http://your-haproxy-ip/.well-known/acme-challenge/test
+```
+Expected: HTTP 404 from OpenManager (not HAProxy's default 503). This confirms routing works.
+
+**Step 6: Ensure DNS Resolution**
+- Your domain(s) must have DNS A/AAAA records pointing to your HAProxy node's public IP
+- Verify: `dig +short yourdomain.com` should return the HAProxy IP
+
+**Step 7: Request Certificate**
+- Go to **SSL Certificates > ACME Automation** tab
+- Click **New Certificate** and follow the wizard
+- The UI will guide you through prerequisite checks before submission
+
+#### Troubleshooting ACME
+
+If certificate issuance fails, check the following:
+
+| Issue | Diagnostic Step |
+|-------|----------------|
+| Challenge 404 | Check `ACME-CHALLENGE` log entries in OpenManager logs |
+| DNS mismatch | Verify `dig +short yourdomain.com` returns HAProxy IP |
+| Port 80 blocked | Test from external: `curl http://yourdomain.com/.well-known/acme-challenge/test` |
+| Config not applied | Check **Apply Management** for pending changes |
+| ACME not enabled | Verify cluster has **ACME Challenge Routing** enabled |
+| Account issues | Check ACME account status in **ACME Automation** page |
+
+**Diagnostic Logging:** OpenManager provides detailed ACME logging with prefixes:
+- `ACME:` — Order creation, challenge responses, finalization
+- `ACME-CHALLENGE:` — Incoming challenge token requests and responses
+
+Review application logs to trace the complete ACME flow when troubleshooting issues.
+
 ### 🛡️ **WAF Management** - *Web Application Firewall*
 - **Rate Limiting**: Request rate limiting by IP, URL, or custom patterns
 - **IP Filtering**: Whitelist/blacklist IP addresses and CIDR ranges
@@ -1451,7 +1552,7 @@ POST /api/letsencrypt/accounts
 DELETE /api/letsencrypt/accounts/{account_id}
 
 # Request certificate
-POST /api/letsencrypt/certificates/request
+POST /api/letsencrypt/certificates
 {
   "domains": ["example.com", "www.example.com"],
   "account_id": 1,
@@ -1473,17 +1574,17 @@ DELETE /api/letsencrypt/orders/{order_id}
 # Renew certificate (create new order)
 POST /api/letsencrypt/orders/{order_id}/renew
 
-# Complete certificate (download from CA)
-POST /api/letsencrypt/certificates/{order_id}/complete
-
 # Revoke certificate
 POST /api/letsencrypt/certificates/{cert_id}/revoke
 
 # Import CA chain certificates
-POST /api/letsencrypt/ca-chain/import
+POST /api/letsencrypt/import-ca-chain
 
 # Get renewal schedule
 GET /api/letsencrypt/renewal-schedule
+
+# Check ACME prerequisites (setup status)
+GET /api/letsencrypt/prerequisites
 
 # ACME Settings
 GET /api/settings/acme

@@ -156,6 +156,8 @@ async def request_certificate(body: CertificateRequest, authorization: str = Hea
     if not body.domains:
         raise HTTPException(status_code=400, detail="At least one domain is required")
 
+    logger.info(f"ACME: Certificate request initiated for domains={body.domains}, account_id={body.account_id}, cluster_ids={body.cluster_ids}")
+
     try:
         account_id = body.account_id
         if not account_id:
@@ -173,6 +175,26 @@ async def request_certificate(body: CertificateRequest, authorization: str = Hea
                 )
             account_id = account['id']
 
+        logger.info(f"ACME: Using account_id={account_id} for certificate request")
+
+        warnings = []
+        try:
+            conn_warn = await get_database_connection()
+            try:
+                acme_clusters = await conn_warn.fetchval(
+                    "SELECT COUNT(*) FROM haproxy_clusters WHERE acme_enabled = TRUE AND is_active = TRUE"
+                )
+                if acme_clusters == 0:
+                    logger.warning("ACME: No clusters with ACME Challenge Routing enabled - certificate validation will likely fail")
+                    warnings.append(
+                        "No clusters have ACME Challenge Routing enabled. "
+                        "Certificate validation will fail. Enable it in Cluster Management and Apply Changes first."
+                    )
+            finally:
+                await close_database_connection(conn_warn)
+        except Exception:
+            pass
+
         order = await acme_service.create_order(
             account_id=account_id,
             domains=body.domains,
@@ -181,12 +203,15 @@ async def request_certificate(body: CertificateRequest, authorization: str = Hea
 
         challenges = await acme_service.respond_to_challenges(order['order_id'])
 
+        logger.info(f"ACME: Order {order['order_id']} created, {len(challenges)} challenge(s) posted, status={order['status']}")
+
         return {
             "order_id": order['order_id'],
             "status": order['status'],
             "domains": body.domains,
             "challenges": challenges,
-            "message": "Order created. ACME challenges have been posted. Waiting for CA validation."
+            "message": "Order created. ACME challenges have been posted. Waiting for CA validation.",
+            "warnings": warnings,
         }
     except HTTPException:
         raise
@@ -265,15 +290,31 @@ async def retry_order(order_id: int, authorization: str = Header(None)):
         raise HTTPException(status_code=403, detail="Insufficient permissions: ssl.create required")
     try:
         status_info = await acme_service.check_order_status(order_id)
-        if status_info.get('status') == 'ready':
+        current_status = status_info.get('status')
+
+        if current_status == 'invalid':
+            raise HTTPException(
+                status_code=409,
+                detail="This order is invalid and cannot be retried. "
+                       "Please cancel it and create a new certificate request."
+            )
+        if current_status == 'cancelled':
+            raise HTTPException(
+                status_code=409,
+                detail="This order has been cancelled. Please create a new certificate request."
+            )
+
+        if current_status == 'ready':
             result = await acme_service.finalize_order(order_id)
             safe_result = {k: v for k, v in result.items() if k not in ('private_key_pem', 'cert_private_key')}
             return {"message": "Order finalized", **safe_result}
-        elif status_info.get('status') == 'valid' and status_info.get('certificate_url'):
+        elif current_status == 'valid' and status_info.get('certificate_url'):
             return await _complete_certificate(order_id)
         else:
             challenges = await acme_service.respond_to_challenges(order_id)
-            return {"message": "Challenges re-submitted", "status": status_info.get('status'), "challenges": challenges}
+            return {"message": "Challenges re-submitted", "status": current_status, "challenges": challenges}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -314,7 +355,7 @@ async def cancel_order(order_id: int, authorization: str = Header(None)):
     conn = await get_database_connection()
     try:
         result = await conn.execute(
-            "UPDATE letsencrypt_orders SET status = 'cancelled', updated_at = NOW() WHERE id = $1 AND status NOT IN ('valid', 'invalid', 'cancelled')",
+            "UPDATE letsencrypt_orders SET status = 'cancelled', updated_at = NOW() WHERE id = $1 AND status NOT IN ('valid', 'cancelled')",
             order_id
         )
         if result == "UPDATE 0":
@@ -670,3 +711,120 @@ async def _auto_apply_renewal(cert_id: int, cluster_ids: list):
             logger.info(f"ACME AUTO-APPLY: Notified {len(sync_results)} agents for cluster {cluster_id}")
         except Exception as notify_err:
             logger.error(f"ACME AUTO-APPLY: Agent notification failed for cluster {cluster_id}: {notify_err}")
+
+
+@router.get("/prerequisites")
+async def check_prerequisites(authorization: str = Header(None)):
+    """Check ACME prerequisites and return step-by-step setup status with navigation hints."""
+    from auth_middleware import get_current_user_from_token, check_user_permission
+    current_user = await get_current_user_from_token(authorization)
+    has_perm = await check_user_permission(current_user['id'], 'ssl', 'read')
+    if not has_perm:
+        raise HTTPException(status_code=403, detail="Insufficient permissions: ssl.read required")
+
+    conn = await get_database_connection()
+    try:
+        steps = []
+
+        # Step 1: ACME Settings configured
+        dir_url = await conn.fetchval(
+            "SELECT value FROM system_settings WHERE key = 'acme.directory_url'"
+        )
+        dir_url_str = ""
+        if dir_url:
+            try:
+                parsed = json.loads(dir_url) if isinstance(dir_url, str) else dir_url
+                dir_url_str = str(parsed) if not isinstance(parsed, str) else parsed
+            except (json.JSONDecodeError, TypeError, ValueError):
+                dir_url_str = str(dir_url)
+
+        provider_row = await conn.fetchval(
+            "SELECT value FROM system_settings WHERE key = 'acme.provider'"
+        )
+        provider = ""
+        if provider_row:
+            try:
+                parsed = json.loads(provider_row) if isinstance(provider_row, str) else provider_row
+                provider = str(parsed) if not isinstance(parsed, str) else parsed
+            except (json.JSONDecodeError, TypeError, ValueError):
+                provider = str(provider_row)
+
+        settings_ok = bool(dir_url_str and dir_url_str.startswith("http"))
+        settings_detail = f"Provider: {provider or 'Not set'}, Directory URL configured" if settings_ok else "ACME provider and directory URL not configured"
+        steps.append({
+            "key": "acme_settings",
+            "title": "Configure ACME Settings",
+            "ok": settings_ok,
+            "detail": settings_detail,
+            "navigate": "/settings?tab=acme",
+        })
+
+        # Step 2: ACME Account registered
+        account = await conn.fetchrow(
+            "SELECT id, email FROM letsencrypt_accounts WHERE status = 'valid' ORDER BY created_at DESC LIMIT 1"
+        )
+        account_ok = account is not None
+        account_detail = f"Active account: {account['email']}" if account else "No active ACME account registered"
+        steps.append({
+            "key": "acme_account",
+            "title": "Register ACME Account",
+            "ok": account_ok,
+            "detail": account_detail,
+            "action": "register_account",
+        })
+
+        # Step 3: Cluster ACME enabled
+        acme_cluster_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM haproxy_clusters WHERE acme_enabled = TRUE AND is_active = TRUE"
+        )
+        acme_cluster_names = await conn.fetch(
+            "SELECT name FROM haproxy_clusters WHERE acme_enabled = TRUE AND is_active = TRUE"
+        )
+        cluster_ok = acme_cluster_count > 0
+        cluster_detail = (
+            f"Enabled on: {', '.join(r['name'] for r in acme_cluster_names)}"
+            if cluster_ok
+            else "No clusters have ACME Challenge Routing enabled"
+        )
+        steps.append({
+            "key": "cluster_acme_enabled",
+            "title": "Enable ACME on Cluster",
+            "ok": cluster_ok,
+            "detail": cluster_detail,
+            "navigate": "/clusters",
+        })
+
+        # Step 4: Configuration applied (depends on step 3)
+        if cluster_ok:
+            pending_count = await conn.fetchval("""
+                SELECT COUNT(*) FROM config_versions
+                WHERE status = 'PENDING'
+                AND cluster_id IN (SELECT id FROM haproxy_clusters WHERE acme_enabled = TRUE AND is_active = TRUE)
+            """)
+            config_ok = pending_count == 0
+            config_detail = "All ACME cluster configurations are applied" if config_ok else f"{pending_count} pending configuration change(s) need to be applied"
+        else:
+            config_ok = None
+            config_detail = "Enable ACME on a cluster first, then apply changes"
+        steps.append({
+            "key": "config_applied",
+            "title": "Apply Configuration Changes",
+            "ok": config_ok,
+            "detail": config_detail,
+            "navigate": "/apply-management",
+        })
+
+        # Step 5: DNS & Network (informational only)
+        steps.append({
+            "key": "network_dns",
+            "title": "Verify DNS and Network",
+            "ok": None,
+            "detail": "Domain DNS must point to HAProxy IP, Port 80 must be open from internet",
+            "navigate": None,
+        })
+
+        ready = all(step["ok"] is True for step in steps if step["ok"] is not None)
+
+        return {"ready": ready, "steps": steps}
+    finally:
+        await close_database_connection(conn)

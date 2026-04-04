@@ -1,23 +1,30 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Card, Table, Button, Tag, Space, Modal, Form, Input, Select, Steps,
-  message, Row, Col, Statistic, Alert, Tooltip, Switch, theme
+  message, Row, Col, Statistic, Alert, Tooltip, Switch, theme, Segmented
 } from 'antd';
 import {
   SafetyCertificateOutlined, PlusOutlined, ReloadOutlined,
   CheckCircleOutlined, ClockCircleOutlined, ExclamationCircleOutlined,
   SyncOutlined, CloseCircleOutlined,
   DeleteOutlined, EyeOutlined,
-  CloudDownloadOutlined, UserOutlined, InfoCircleOutlined
+  CloudDownloadOutlined, UserOutlined, InfoCircleOutlined,
+  RocketOutlined
 } from '@ant-design/icons';
+import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 
 const { Option } = Select;
 
+const getErrorMsg = (err, fallback) =>
+  err?.response?.data?.error?.message || err?.response?.data?.detail || fallback;
+
 const ACMEAutomation = () => {
+  const navigate = useNavigate();
   const [orders, setOrders] = useState([]);
   const [accounts, setAccounts] = useState([]);
   const [renewalSchedule, setRenewalSchedule] = useState([]);
+  const [prerequisites, setPrerequisites] = useState(null);
   const [loading, setLoading] = useState(false);
   const [wizardVisible, setWizardVisible] = useState(false);
   const [wizardStep, setWizardStep] = useState(0);
@@ -30,19 +37,22 @@ const ACMEAutomation = () => {
   const [registerForm] = Form.useForm();
   const [registering, setRegistering] = useState(false);
   const [accountDetailVisible, setAccountDetailVisible] = useState(false);
+  const [orderFilter, setOrderFilter] = useState('active');
   const { token } = theme.useToken();
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [ordersRes, accountsRes, renewalRes, clustersRes] = await Promise.allSettled([
+      const [ordersRes, accountsRes, renewalRes, clustersRes, prereqRes] = await Promise.allSettled([
         axios.get('/api/letsencrypt/orders'),
         axios.get('/api/letsencrypt/accounts'),
         axios.get('/api/letsencrypt/renewal-schedule'),
         axios.get('/api/clusters'),
+        axios.get('/api/letsencrypt/prerequisites'),
       ]);
       if (ordersRes.status === 'fulfilled') setOrders(ordersRes.value.data || []);
       if (accountsRes.status === 'fulfilled') setAccounts(accountsRes.value.data || []);
+      if (prereqRes.status === 'fulfilled') setPrerequisites(prereqRes.value.data);
       if (renewalRes.status === 'fulfilled') setRenewalSchedule(renewalRes.value.data || []);
       if (clustersRes.status === 'fulfilled') setClusters(clustersRes.value.data?.clusters || []);
     } catch (err) {
@@ -64,6 +74,14 @@ const ACMEAutomation = () => {
   const pendingOrders = orders.filter(o => o.status === 'pending' || o.status === 'processing');
   const activeAccount = accounts.find(a => a.status === 'valid') || null;
   const acmeAccount = activeAccount || (accounts.length > 0 ? accounts[accounts.length - 1] : null);
+  const acmeEnabledClusters = clusters.filter(c => c.acme_enabled && c.is_active);
+
+  const filteredOrders = orders.filter(o => {
+    if (orderFilter === 'active') return !['cancelled', 'invalid', 'valid'].includes(o.status);
+    if (orderFilter === 'completed') return o.status === 'valid';
+    if (orderFilter === 'failed') return o.status === 'cancelled' || o.status === 'invalid';
+    return true;
+  });
 
   const handleRequestCert = async () => {
     try {
@@ -80,12 +98,15 @@ const ACMEAutomation = () => {
         account_id: values.account_id || null,
       });
       message.success(res.data?.message || 'Certificate request submitted');
+      if (res.data?.warnings?.length > 0) {
+        res.data.warnings.forEach(w => message.warning(w, 8));
+      }
       setWizardVisible(false);
       setWizardStep(0);
       wizardForm.resetFields();
       fetchData();
     } catch (err) {
-      message.error(err?.response?.data?.detail || 'Failed to request certificate');
+      message.error(getErrorMsg(err, 'Failed to request certificate'));
     } finally {
       setSubmitting(false);
     }
@@ -97,7 +118,7 @@ const ACMEAutomation = () => {
       message.success(res.data?.message || 'Retry submitted');
       fetchData();
     } catch (err) {
-      message.error(err?.response?.data?.detail || 'Retry failed');
+      message.error(getErrorMsg(err, 'Retry failed'));
     }
   };
 
@@ -113,7 +134,7 @@ const ACMEAutomation = () => {
           message.success('Order cancelled');
           fetchData();
         } catch (err) {
-          message.error(err?.response?.data?.detail || 'Cancel failed');
+          message.error(getErrorMsg(err, 'Cancel failed'));
         }
       },
     });
@@ -138,7 +159,7 @@ const ACMEAutomation = () => {
           const res = await axios.post('/api/letsencrypt/import-ca-chain');
           message.success(res.data?.message || 'CA chain imported');
         } catch (err) {
-          message.error(err?.response?.data?.detail || 'Import failed');
+          message.error(getErrorMsg(err, 'Import failed'));
         }
       },
     });
@@ -157,7 +178,7 @@ const ACMEAutomation = () => {
       registerForm.resetFields();
       fetchData();
     } catch (err) {
-      message.error(err?.response?.data?.detail || 'Account registration failed');
+      message.error(getErrorMsg(err, 'Account registration failed'));
     } finally {
       setRegistering(false);
     }
@@ -183,7 +204,7 @@ const ACMEAutomation = () => {
           message.success('Account deactivated successfully');
           fetchData();
         } catch (err) {
-          message.error(err?.response?.data?.detail || 'Failed to deactivate account');
+          message.error(getErrorMsg(err, 'Failed to deactivate account'));
         }
       },
     });
@@ -209,7 +230,7 @@ const ACMEAutomation = () => {
           message.success('Account permanently removed');
           fetchData();
         } catch (err) {
-          message.error(err?.response?.data?.detail || 'Failed to remove account');
+          message.error(getErrorMsg(err, 'Failed to remove account'));
         }
       },
     });
@@ -225,7 +246,7 @@ const ACMEAutomation = () => {
       cancelled: { color: 'default', icon: <CloseCircleOutlined /> },
     };
     const cfg = map[status] || { color: 'default', icon: null };
-    return <Tag color={cfg.color} icon={cfg.icon}>{status?.toUpperCase()}</Tag>;
+    return <Tag color={cfg.color} icon={cfg.icon}>{(status || 'unknown').toUpperCase()}</Tag>;
   };
 
   const orderColumns = [
@@ -255,7 +276,7 @@ const ACMEAutomation = () => {
           <Tooltip title="View Details">
             <Button icon={<EyeOutlined />} size="small" onClick={() => handleViewOrder(record.id)} />
           </Tooltip>
-          {(record.status === 'pending' || record.status === 'ready') && (
+          {(record.status === 'pending' || record.status === 'processing' || record.status === 'ready') && (
             <Tooltip title="Retry / Finalize">
               <Button icon={<ReloadOutlined />} size="small" type="primary" ghost onClick={() => handleRetry(record.id)} />
             </Tooltip>
@@ -291,8 +312,6 @@ const ACMEAutomation = () => {
       render: (v) => v ? <Tag color="green">Enabled</Tag> : <Tag>Disabled</Tag>,
     },
   ];
-
-  const acmeEnabledClusters = clusters.filter(c => c.acme_enabled);
 
   const wizardSteps = [
     {
@@ -355,7 +374,13 @@ const ACMEAutomation = () => {
               type="error"
               showIcon
               message="No Active ACME Account"
-              description="Please register an active ACME account in Settings > ACME or from the ACME Account card."
+              description={
+                <span>
+                  Please register an active ACME account.{' '}
+                  <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate('/settings?tab=acme')}>Go to Settings &gt; ACME</Button>
+                  {' '}or use the ACME Account card below.
+                </span>
+              }
               style={{ marginBottom: 16 }}
             />
           )}
@@ -364,7 +389,28 @@ const ACMEAutomation = () => {
               type="warning"
               showIcon
               message="No Clusters with ACME Enabled"
-              description="Enable ACME challenge routing on at least one cluster in Cluster Management."
+              description={
+                <span>
+                  Enable ACME challenge routing on at least one cluster.{' '}
+                  <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate('/clusters')}>Go to Cluster Management</Button>
+                  {' '}then{' '}
+                  <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate('/apply-management')}>Apply Changes</Button>.
+                </span>
+              }
+              style={{ marginBottom: 16 }}
+            />
+          )}
+          {prerequisites?.steps?.find(s => s.key === 'config_applied' && s.ok === false) && (
+            <Alert
+              type="warning"
+              showIcon
+              message="Configuration Not Applied"
+              description={
+                <span>
+                  ACME routing rules have not been pushed to HAProxy yet. Certificate validation will fail without this.{' '}
+                  <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate('/apply-management')}>Go to Apply Management</Button>
+                </span>
+              }
               style={{ marginBottom: 16 }}
             />
           )}
@@ -387,6 +433,38 @@ const ACMEAutomation = () => {
 
   return (
     <div>
+      {prerequisites && !prerequisites.ready && (
+        <Card
+          size="small"
+          title={<span><RocketOutlined /> ACME Setup Guide</span>}
+          style={{ marginBottom: 16, borderColor: '#faad14' }}
+        >
+          <Steps
+            size="small"
+            direction="vertical"
+            items={(prerequisites.steps || []).map((step) => ({
+              title: (
+                <span>
+                  {step.title}
+                  {step.navigate && (
+                    <Button type="link" size="small" onClick={() => navigate(step.navigate)} style={{ marginLeft: 8, padding: 0 }}>
+                      Configure
+                    </Button>
+                  )}
+                  {step.action === 'register_account' && !step.ok && (
+                    <Button type="link" size="small" onClick={() => setRegisterVisible(true)} style={{ marginLeft: 8, padding: 0 }}>
+                      Register Account
+                    </Button>
+                  )}
+                </span>
+              ),
+              description: step.detail,
+              status: step.ok === true ? 'finish' : step.ok === false ? 'error' : 'wait',
+            }))}
+          />
+        </Card>
+      )}
+
       {pendingOrders.length > 0 && (
         <Alert
           type="warning"
@@ -470,13 +548,29 @@ const ACMEAutomation = () => {
         }
         style={{ marginBottom: 24 }}
       >
+        <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <Segmented
+            value={orderFilter}
+            onChange={setOrderFilter}
+            options={[
+              { label: `Active (${orders.filter(o => !['cancelled','invalid','valid'].includes(o.status)).length})`, value: 'active' },
+              { label: `Completed (${orders.filter(o => o.status === 'valid').length})`, value: 'completed' },
+              { label: `Failed / Cancelled (${orders.filter(o => o.status === 'cancelled' || o.status === 'invalid').length})`, value: 'failed' },
+              { label: `All (${orders.length})`, value: 'all' },
+            ]}
+            size="small"
+          />
+        </div>
         <Table
           columns={orderColumns}
-          dataSource={orders}
+          dataSource={filteredOrders}
           rowKey="id"
           loading={loading}
-          pagination={{ pageSize: 10 }}
+          pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total) => `${total} orders` }}
           size="small"
+          rowClassName={(record) =>
+            record.status === 'cancelled' || record.status === 'invalid' ? 'acme-order-terminal' : ''
+          }
         />
       </Card>
 
@@ -521,7 +615,7 @@ const ACMEAutomation = () => {
             </Button>
           )}
           {wizardStep === wizardSteps.length - 1 && (
-            <Button type="primary" onClick={handleRequestCert} loading={submitting} disabled={!activeAccount}>
+            <Button type="primary" onClick={handleRequestCert} loading={submitting} disabled={!activeAccount || acmeEnabledClusters.length === 0}>
               Submit Request
             </Button>
           )}
