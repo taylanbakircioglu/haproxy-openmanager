@@ -38,8 +38,8 @@ LOG_LEVEL=DEBUG
 #### Staging
 ```bash
 # .env dosyası veya K8s ConfigMap
-PUBLIC_URL=https://haproxy-staging.company.com
-MANAGEMENT_BASE_URL=https://haproxy-staging.company.com
+PUBLIC_URL=https://haproxy-staging.example.com
+MANAGEMENT_BASE_URL=https://haproxy-staging.example.com
 DEBUG=False
 LOG_LEVEL=INFO
 ```
@@ -94,7 +94,7 @@ grep "^\.env" .gitignore
 PUBLIC_URL=http://localhost:8000
 
 # Production
-PUBLIC_URL=https://haproxy-manager.company.com
+PUBLIC_URL=https://haproxy-manager.example.com
 
 # OpenShift
 PUBLIC_URL=https://haproxy-manager.example.com
@@ -217,8 +217,8 @@ docker exec haproxy-openmanager-frontend env | grep REACT_APP_API_URL
 1. **Her ortam için ayrı değerler**
    ```
    Dev:     PUBLIC_URL=http://localhost:8000
-   Staging: PUBLIC_URL=https://staging.company.com
-   Prod:    PUBLIC_URL=https://prod.company.com
+   Staging: PUBLIC_URL=https://staging.example.com
+   Prod:    PUBLIC_URL=https://prod.example.com
    ```
 
 2. **Template'i güncelle**

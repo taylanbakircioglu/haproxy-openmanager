@@ -2,20 +2,23 @@
 
 Modern, web-based management interface for HAProxy load balancers with multi-cluster support, agent-based pull architecture, and automated deployment capabilities.
 
-## 📋 Table of Contents
+![HAProxy OpenManager Showcase](docs/screenshots/haproxy-openmanager-showcase.gif)
 
-1. [🎯 Project Overview](#project-overview)
+## Table of Contents
+
+1. [Project Overview](#project-overview)
    - [Agent Pull Architecture](#agent-pull-architecture)
    - [Features at a Glance](#features-at-a-glance)
-2. [📸 Screenshots](#screenshots)
+2. [Screenshots](#screenshots)
+   - [Multi-Cluster & Agent Setup](#multi-cluster--agent-setup)
    - [Dashboard - Real-time Monitoring](#dashboard---real-time-monitoring)
-   - [Multi-Cluster Management](#multi-cluster-management)
-   - [Frontend Management](#frontend-management)
-   - [Configuration Management](#configuration-management)
-   - [Bulk Configuration Import](#bulk-configuration-import)
+   - [HAProxy Configuration](#haproxy-configuration)
+   - [Configuration Import & Viewer](#configuration-import--viewer)
    - [Apply Management & Version Control](#apply-management--version-control)
-   - [IP Inventory - Cross-Cluster IP Search](#ip-inventory---cross-cluster-ip-search)
-   - [Agent & Security Management](#agent--security-management)
+   - [Security & Certificate Management](#security--certificate-management)
+   - [ACME Automation](#acme-automation---automated-ssl-certificates)
+   - [WAF Management](#waf-management)
+   - [IP Inventory](#ip-inventory---cross-cluster-ip-search)
 3. [Key Capabilities](#key-capabilities)
    - [Configuration & Entity Management](#configuration--entity-management)
    - [Agent & Cluster Management](#agent--cluster-management)
@@ -23,45 +26,46 @@ Modern, web-based management interface for HAProxy load balancers with multi-clu
    - [Monitoring & Security](#monitoring--security)
    - [ACME Auto SSL / Let's Encrypt](#acme-auto-ssl--lets-encrypt)
    - [Integration & API](#integration--api)
-4. [🏗️ Architecture](#architecture)
+4. [Architecture](#architecture)
    - [System Architecture with Agent Pull Model](#system-architecture-with-agent-pull-model)
    - [Component Details](#component-details)
    - [Agent Pull Communication Flow](#agent-pull-communication-flow---detailed-entity-management)
-5. [✨ Features & User Interface](#features--user-interface)
+5. [Features & User Interface](#features--user-interface)
    - [Pool Management](#pool-management---agent-pool-organization)
-   - [Agent Management](#agent-management---haproxy-agent-deployment--monitoring)
    - [Cluster Management](#cluster-management---multi-cluster-haproxy-administration)
-   - [Apply Management](#apply-management---change-tracking--deployment)
+   - [Agent Management](#agent-management---haproxy-agent-deployment--monitoring)
    - [Dashboard](#dashboard---main-overview--real-time-monitoring)
    - [Frontend Management](#frontend-management---virtual-host--routing-configuration)
    - [Backend Servers](#backend-servers---server-pool-management)
-   - [IP Inventory](#ip-inventory---cross-cluster-ip-search--discovery)
+   - [Configuration](#configuration---haproxy-config-file-management)
+   - [Apply Management](#apply-management---change-tracking--deployment)
    - [SSL Certificates](#ssl-certificates---centralized-tlsssl-certificate-management)
    - [ACME Auto SSL](#acme-auto-ssl---automated-certificate-management)
    - [WAF Management](#waf-management---web-application-firewall)
-   - [Configuration](#configuration---haproxy-config-file-management)
+   - [IP Inventory](#ip-inventory---cross-cluster-ip-search--discovery)
    - [User Management](#user-management---access-control--authentication)
    - [Settings](#settings---system-configuration)
-6. [🚀 Getting Started - First-Time Usage](#getting-started---first-time-usage)
-7. [📦 Installation](#installation)
+6. [Getting Started - First-Time Usage](#getting-started---first-time-usage)
+7. [Installation](#installation)
    - [Docker Installation](#docker-installation)
    - [Kubernetes/OpenShift Installation](#kubernetesopenshift-installation)
    - [Standalone Installation](docs/STANDALONE_INSTALL.md)
    - [Local Development](#local-development)
-8. [📋 Configuration](#configuration-1)
-9. [🔌 API Reference](#api-reference)
-10. [🐛 Troubleshooting](#troubleshooting)
-11. [🛠️ Development](#development)
-12. [📝 Contributing](#contributing)
-13. [📄 License](#license)
-14. [👨‍💻 Author](#author)
-15. [🤝 Support](#support)
+8. [Configuration](#configuration)
+9. [API Reference](#api-reference)
+10. [Development](#development)
+11. [Troubleshooting](#troubleshooting)
+12. [Contributing](#contributing)
+13. [Use Cases](#use-cases)
+14. [License](#license)
+15. [Author](#author)
+16. [Support](#support)
 
-## 🎯 Project Overview
+## Project Overview
 
 HAProxy OpenManager is a comprehensive management platform designed to simplify HAProxy administration across multiple environments. It provides a unified interface for managing remote HAProxy instances through an agent-based pull architecture, supporting multi-cluster configurations with centralized control.
 
-### 🏗️ Agent Pull Architecture
+### Agent Pull Architecture
 
 This project implements an **agent pull architecture** where management operations are executed through a lightweight agent service (`haproxy-agent`) installed on each target HAProxy server:
 
@@ -107,7 +111,20 @@ This architecture provides better security (no inbound connections to HAProxy se
 ✅ **User Activity Audit Logs** - Complete audit trail of all system events  
 ✅ **REST API** - Full programmatic access for automation and CI/CD integration
 
-## 📸 Screenshots
+
+## Screenshots
+
+
+### Multi-Cluster & Agent Setup
+
+**Multi-Cluster Management** - Cluster selector dropdown showing multiple clusters with agent pools and online agent counts - switch between different clusters
+![Multi-Cluster Management - Cluster Selector](docs/screenshots/cluster-selector.png)
+
+**Agent Management** - Agent setup wizard with platform selection (Linux/macOS) and architecture (x86_64/ARM64)
+![Agent Management - Setup Wizard](docs/screenshots/agent-setup.png)
+
+**Agent Management** - Generated installation script ready for deployment to target servers
+![Agent Management - Script Generation](docs/screenshots/agent-script.png)
 
 ### Dashboard - Real-time Monitoring
 
@@ -123,15 +140,7 @@ This architecture provides better security (no inbound connections to HAProxy se
 **Dashboard** - Response Time Heatmap (24h) with color-coded latency visualization per backend
 ![Dashboard - Response Time Heatmap](docs/screenshots/response-time-heatmap.png)
 
-**Backend Management** - Backends & Servers tab with 165 servers across 56 backends, health status overview
-![Backend Management - Backends & Servers](docs/screenshots/backends-servers.png)
-
-### Multi-Cluster Management
-
-**Multi-Cluster Management** - Cluster selector dropdown showing multiple clusters with agent pools and online agent counts - switch between different clusters
-![Multi-Cluster Management - Cluster Selector](docs/screenshots/cluster-selector.png)
-
-### Frontend Management
+### HAProxy Configuration
 
 **Frontend Management** - List view with SSL/TLS bindings, sync status, and config status
 ![Frontend Management - List View](docs/screenshots/frontend-management.png)
@@ -139,21 +148,22 @@ This architecture provides better security (no inbound connections to HAProxy se
 **Frontend Management** - Edit modal for configuring bind address, protocol mode, default backend, SSL/TLS, ACLs, and advanced options
 ![Frontend Management - Edit Modal](docs/screenshots/frontend-edit.png)
 
-### Configuration Management
+**Backend Configuration** - Backend server and pool configuration page
+![Backend Configuration](docs/screenshots/backend-configuration.png)
 
-**Configuration Management** - Backend server and pool configuration page
-![Configuration Management - Backend View](docs/screenshots/backend-configuration.png)
+**Backend Management** - Backends & Servers tab with 165 servers across 56 backends, health status overview
+![Backend Management - Backends & Servers](docs/screenshots/backends-servers.png)
 
-**Configuration Management** - Real-time configuration viewer to pull haproxy.cfg from live agents
-![Configuration Management - View Config](docs/screenshots/config-view.png)
-
-### Bulk Configuration Import
+### Configuration Import & Viewer
 
 **Bulk Config Import** - Paste existing haproxy.cfg and parse configuration
 ![Bulk Config Import - Input](docs/screenshots/bulk-import.png)
 
 **Bulk Config Import** - Parsed entities showing 56 frontends, 55 backends, 165 servers with SSL and configuration recommendations
 ![Bulk Config Import - Results](docs/screenshots/bulk-import-parsed.png)
+
+**Configuration Viewer** - Real-time configuration viewer to pull haproxy.cfg from live agents
+![Configuration Viewer](docs/screenshots/config-view.png)
 
 ### Apply Management & Version Control
 
@@ -166,28 +176,33 @@ This architecture provides better security (no inbound connections to HAProxy se
 **Version History** - Complete version history with restore capabilities and deployment status
 ![Version History - Timeline](docs/screenshots/version-history.png)
 
+### Security & Certificate Management
+
+**Security Management** - Agent API token management with active tokens, expiration tracking, and revoke capabilities
+![Security Management - API Tokens](docs/screenshots/security-token-management.png)
+
+### ACME Automation - Automated SSL Certificates
+
+**ACME Automation** - Setup guide with prerequisites checklist, certificate statistics, and order management
+![ACME Automation - Setup Guide](docs/screenshots/acme-setup-guide.png)
+
+**ACME Automation** - Active certificate orders with PENDING status tracking and renewal schedule
+![ACME Automation - Certificate Orders](docs/screenshots/acme-certificate-orders.png)
+
+**ACME Settings** - ACME/SSL Automation configuration with provider selection, staging mode, and auto-renewal settings
+![ACME Settings](docs/screenshots/acme-settings.png)
+
+### WAF Management
+
+**WAF Management** - WAF rule configuration with request filtering, rate limiting, and advanced options
+![WAF Management](docs/screenshots/waf-management.png)
+
 ### IP Inventory - Cross-Cluster IP Search
 
 **IP Inventory** - Unified view of all IPs across clusters with search capability to identify which cluster, agent, or backend server an IP belongs to
 ![IP Inventory](docs/screenshots/ip-inventory.png)
 
-### Agent & Security Management
-
-**Agent Management** - Agent setup wizard with platform selection (Linux/macOS) and architecture (x86_64/ARM64)
-![Agent Management - Setup Wizard](docs/screenshots/agent-setup.png)
-
-**Agent Management** - Generated installation script ready for deployment to target servers
-![Agent Management - Script Generation](docs/screenshots/agent-script.png)
-
-**Security Management** - Agent API token management with active tokens, expiration tracking, and revoke capabilities
-![Security Management - API Tokens](docs/screenshots/security-token-management.png)
-
-**WAF Management** - WAF rule configuration with request filtering, rate limiting, and advanced options
-![WAF Management](docs/screenshots/waf-management.png)
-
-> 📝 **Note**: Screenshots show the actual production interface. Replace GitHub asset URLs with your own after uploading images to your repository's releases or issues.
-
-### Key Capabilities
+## Key Capabilities
 
 #### Configuration & Entity Management
 - **Frontend Management**: Create, edit, update, and delete frontend configurations with SSL bindings, ACL rules, and routing
@@ -236,7 +251,8 @@ This architecture provides better security (no inbound connections to HAProxy se
 - **Agent Pull Architecture**: Secure polling model - no inbound connections required to HAProxy servers
 - **Redis Cache**: High-performance metrics caching for dashboard with configurable retention
 
-## 🏗️ Architecture
+
+## Architecture
 
 ### System Architecture with Agent Pull Model
 
@@ -467,16 +483,25 @@ sequenceDiagram
 - ✅ **Validation**: Every config change is validated before HAProxy reload
 - 📝 **Activity Logging**: All operations logged in JSON format for audit trail
 
-## ✨ Features & User Interface
 
-### 🏊 **Pool Management** - *Agent Pool Organization*
+## Features & User Interface
+
+### Pool Management - Agent Pool Organization
 - **Pool Creation**: Create logical pools to group HAProxy agents
 - **Pool Assignment**: Associate clusters with specific pools
 - **Pool Overview**: View all agents within a pool
 - **Multi-Pool Support**: Manage multiple pools for different environments (prod, staging, etc.)
 - **Pool-based Filtering**: Filter agents and clusters by pool
 
-### 🤖 **Agent Management** - *HAProxy Agent Deployment & Monitoring*
+### Cluster Management - Multi-Cluster HAProxy Administration
+- **Cluster Selector**: Top navigation cluster selector for context switching
+- **Cluster Creation**: Define clusters and associate with agent pools
+- **Cluster Status**: Monitor cluster health and connectivity
+- **Default Cluster**: Set preferred default cluster
+- **Cross-Cluster View**: Compare metrics across multiple clusters
+- **Cluster-Scoped Operations**: All configurations are cluster-specific
+
+### Agent Management - HAProxy Agent Deployment & Monitoring
 
 #### Agent Script Management
 Agent scripts are **not hardcoded** in the project. They are stored in the database and can be updated via the UI:
@@ -540,68 +565,14 @@ graph LR
   "task_id": 123,
   "message": "SSL certificate updated successfully",
   "details": {
-    "cert_name": "wildcard.company.com",
+    "cert_name": "wildcard.example.com",
     "action": "update",
     "haproxy_reload": "success"
   }
 }
 ```
 
-### 🌐 **Cluster Management** - *Multi-Cluster HAProxy Administration*
-- **Cluster Selector**: Top navigation cluster selector for context switching
-- **Cluster Creation**: Define clusters and associate with agent pools
-- **Cluster Status**: Monitor cluster health and connectivity
-- **Default Cluster**: Set preferred default cluster
-- **Cross-Cluster View**: Compare metrics across multiple clusters
-- **Cluster-Scoped Operations**: All configurations are cluster-specific
-
-### 🔄 **Apply Management** - *Change Tracking & Deployment*
-
-#### Change Tracking & Versioning
-Every configuration change creates a new version with complete tracking:
-
-- **Automatic Versioning**: Each apply creates a new version number (e.g., v1.0.123)
-- **Version Snapshots**: Complete configuration state saved for each version
-- **Diff Visualization**: See exactly what changed between versions
-  - Green: Added lines
-  - Red: Removed lines
-  - Yellow: Modified lines
-- **Change Summary**: High-level summary of changes (added frontends, modified backends, etc.)
-- **Version Metadata**: Timestamp, user, cluster, affected entities
-
-#### Deployment & Status
-- **Change Tracking**: Track all pending configuration changes before apply
-- **Apply Status**: Real-time deployment status per agent
-- **Bulk Apply**: Deploy changes to all agents in a cluster simultaneously
-- **Success/Failure Tracking**: Monitor which agents successfully applied changes
-- **Retry Mechanism**: Retry failed deployments per agent
-- **Apply Logs**: Detailed logs for each deployment operation with error messages
-
-#### Version History & Restore
-
-**Version History Viewer:**
-- View all historical configuration versions
-- Compare any two versions side-by-side
-- See who made changes and when
-- Filter by date, user, or cluster
-
-**Configuration Restore:**
-- Restore any previous configuration version
-- One-click rollback to last known good configuration
-- Restore process:
-  1. Select previous version from history
-  2. Review diff (current vs target version)
-  3. Confirm restore
-  4. Agents pull restored configuration
-  5. HAProxy reloaded with previous config
-
-**Use Cases:**
-- Rollback after problematic deployment
-- Audit configuration changes
-- Compare production vs staging configurations
-- Disaster recovery
-
-### 🎯 **Dashboard** - *Main Overview & Real-time Monitoring*
+### Dashboard - Main Overview & Real-time Monitoring
 
 The dashboard displays comprehensive real-time metrics collected by agents from HAProxy stats socket. Agents use `socat` to query the stats socket every 30 seconds and send CSV data to the backend, which parses and stores it in Redis for high-performance access.
 
@@ -649,7 +620,7 @@ The dashboard displays comprehensive real-time metrics collected by agents from 
 - **Update Interval**: 30 seconds (configurable)
 - **Data Retention**: 30 days in Redis (configurable)
 
-### 🌐 **Frontend Management** - *Virtual Host & Routing Configuration*
+### Frontend Management - Virtual Host & Routing Configuration
 - **Frontend CRUD**: Create, edit, delete, and duplicate frontend configurations
 - **Protocol Support**: HTTP, TCP, and health check mode configurations
 - **Binding Configuration**: IP address, port, and SSL binding options
@@ -660,7 +631,7 @@ The dashboard displays comprehensive real-time metrics collected by agents from 
 - **Advanced Options**: Connection limits, timeouts, and performance tuning
 - **Search & Filter**: Real-time search and status-based filtering
 
-### 🖥️ **Backend Servers** - *Server Pool Management*
+### Backend Servers - Server Pool Management
 - **Server Management**: Add, edit, remove, and configure backend servers
 - **Health Checks**: HTTP/TCP health check configuration and monitoring
 - **Load Balancing**: Round-robin, least-conn, source, and URI algorithms
@@ -670,27 +641,68 @@ The dashboard displays comprehensive real-time metrics collected by agents from 
 - **Connection Limits**: Per-server connection and rate limiting
 - **Monitoring Dashboard**: Real-time server status and performance metrics
 
-### 🔍 **IP Inventory** - *Cross-Cluster IP Search & Discovery*
+### Configuration - HAProxy Config File Management
+- **Syntax Editor**: Monaco editor with HAProxy syntax highlighting
+- **Real-time Validation**: Configuration syntax checking and error detection
+- **Configuration Templates**: Pre-built templates for common setups
+- **Version Control**: Configuration versioning and rollback capabilities
+- **Backup & Restore**: Automatic backups and manual restore functionality
+- **Direct Editing**: Raw HAProxy configuration file editing
+- **Deployment**: Apply configuration changes with validation
+- **Help System**: Integrated HAProxy directive documentation
+- **Real-time Config Pull**: Pull current haproxy.cfg from live HAProxy servers
+  - View actual running configuration
+  - Compare with managed configuration
+  - Import existing configurations
+  - Useful for migrating from manual to managed setup
 
-The IP Inventory page provides a unified view of all IP addresses across every cluster, independent of the global cluster selector. It enables quick identification of which cluster, agent, or backend server a given IP belongs to.
+### Apply Management - Change Tracking & Deployment
 
-**Key Features:**
-- **Cross-Cluster Search**: Search any IP address across all clusters simultaneously
-- **IP Type Identification**: Instantly determine if an IP is an agent server IP, a keepalived VIP, or a backend server address
-- **Unified Results Card**: Search results show matched IP type (Server IP, VIP, Backend), agent/server name, cluster association, and status
-- **Agent Tab**: Browse all agents with cluster name, hostname, agent IP, VIP (keepalive), VRRP state (MASTER/BACKUP), status, platform, and last seen time
-- **Backend Servers Tab**: Browse all backend servers with cluster, backend name, server address, status, weight, and check status
-- **Cluster Color Coding**: Each cluster is assigned a consistent color tag for quick visual identification
-- **Auto-Refresh**: Data refreshes automatically every 30 seconds
-- **Filters**: Filter by cluster and status within each tab
+#### Change Tracking & Versioning
+Every configuration change creates a new version with complete tracking:
+
+- **Automatic Versioning**: Each apply creates a new version number (e.g., v1.0.123)
+- **Version Snapshots**: Complete configuration state saved for each version
+- **Diff Visualization**: See exactly what changed between versions
+  - Green: Added lines
+  - Red: Removed lines
+  - Yellow: Modified lines
+- **Change Summary**: High-level summary of changes (added frontends, modified backends, etc.)
+- **Version Metadata**: Timestamp, user, cluster, affected entities
+
+#### Deployment & Status
+- **Change Tracking**: Track all pending configuration changes before apply
+- **Apply Status**: Real-time deployment status per agent
+- **Bulk Apply**: Deploy changes to all agents in a cluster simultaneously
+- **Success/Failure Tracking**: Monitor which agents successfully applied changes
+- **Retry Mechanism**: Retry failed deployments per agent
+- **Apply Logs**: Detailed logs for each deployment operation with error messages
+
+#### Version History & Restore
+
+**Version History Viewer:**
+- View all historical configuration versions
+- Compare any two versions side-by-side
+- See who made changes and when
+- Filter by date, user, or cluster
+
+**Configuration Restore:**
+- Restore any previous configuration version
+- One-click rollback to last known good configuration
+- Restore process:
+  1. Select previous version from history
+  2. Review diff (current vs target version)
+  3. Confirm restore
+  4. Agents pull restored configuration
+  5. HAProxy reloaded with previous config
 
 **Use Cases:**
-- Identify which HAProxy cluster an IP belongs to during incident response
-- Find which agent is running as MASTER or BACKUP in a keepalived pair
-- Locate a backend server IP across multiple clusters
-- Audit all IP addresses managed by the platform
+- Rollback after problematic deployment
+- Audit configuration changes
+- Compare production vs staging configurations
+- Disaster recovery
 
-### 🔒 **SSL Certificates** - *Centralized TLS/SSL Certificate Management*
+### SSL Certificates - Centralized TLS/SSL Certificate Management
 
 HAProxy OpenManager provides powerful centralized SSL/TLS certificate management with both global and cluster-specific scopes:
 
@@ -700,7 +712,7 @@ HAProxy OpenManager provides powerful centralized SSL/TLS certificate management
 - Defined once, distributed to **all clusters** and **all agents**
 - Perfect for wildcard certificates or shared certificates
 - When updated, all agents across all clusters automatically receive the new certificate
-- Use case: `*.company.com` certificate used across all environments
+- Use case: `*.example.com` certificate used across all environments
 
 **2. Cluster-Specific SSL Certificates:**
 - Scoped to a specific cluster only
@@ -743,7 +755,7 @@ User Updates SSL in UI → All Agents Poll Backend (30s)
 - **Security Profiles**: SSL/TLS protocol and cipher suite configuration
 - **Zero Downtime**: Safe HAProxy reload ensures no dropped connections
 
-### 🤖 **ACME Auto SSL** - *Automated Certificate Management*
+### ACME Auto SSL - Automated Certificate Management
 
 HAProxy OpenManager includes a built-in ACME client for automated SSL/TLS certificate management using the ACME protocol (RFC 8555). This enables zero-touch certificate issuance and renewal from Let's Encrypt and other ACME-compatible Certificate Authorities.
 
@@ -966,7 +978,7 @@ If certificate issuance fails, check the following:
 
 Review application logs to trace the complete ACME flow when troubleshooting issues.
 
-### 🛡️ **WAF Management** - *Web Application Firewall*
+### WAF Management - Web Application Firewall
 - **Rate Limiting**: Request rate limiting by IP, URL, or custom patterns
 - **IP Filtering**: Whitelist/blacklist IP addresses and CIDR ranges
 - **Geographic Blocking**: Country-based access restrictions
@@ -976,22 +988,27 @@ Review application logs to trace the complete ACME flow when troubleshooting iss
 - **Rule Templates**: Pre-configured security rule templates
 - **Statistics Dashboard**: WAF activity analytics and blocked request metrics
 
-### ⚙️ **Configuration** - *HAProxy Config File Management*
-- **Syntax Editor**: Monaco editor with HAProxy syntax highlighting
-- **Real-time Validation**: Configuration syntax checking and error detection
-- **Configuration Templates**: Pre-built templates for common setups
-- **Version Control**: Configuration versioning and rollback capabilities
-- **Backup & Restore**: Automatic backups and manual restore functionality
-- **Direct Editing**: Raw HAProxy configuration file editing
-- **Deployment**: Apply configuration changes with validation
-- **Help System**: Integrated HAProxy directive documentation
-- **Real-time Config Pull**: Pull current haproxy.cfg from live HAProxy servers
-  - View actual running configuration
-  - Compare with managed configuration
-  - Import existing configurations
-  - Useful for migrating from manual to managed setup
+### IP Inventory - Cross-Cluster IP Search & Discovery
 
-### 👥 **User Management** - *Access Control & Authentication*
+The IP Inventory page provides a unified view of all IP addresses across every cluster, independent of the global cluster selector. It enables quick identification of which cluster, agent, or backend server a given IP belongs to.
+
+**Key Features:**
+- **Cross-Cluster Search**: Search any IP address across all clusters simultaneously
+- **IP Type Identification**: Instantly determine if an IP is an agent server IP, a keepalived VIP, or a backend server address
+- **Unified Results Card**: Search results show matched IP type (Server IP, VIP, Backend), agent/server name, cluster association, and status
+- **Agent Tab**: Browse all agents with cluster name, hostname, agent IP, VIP (keepalive), VRRP state (MASTER/BACKUP), status, platform, and last seen time
+- **Backend Servers Tab**: Browse all backend servers with cluster, backend name, server address, status, weight, and check status
+- **Cluster Color Coding**: Each cluster is assigned a consistent color tag for quick visual identification
+- **Auto-Refresh**: Data refreshes automatically every 30 seconds
+- **Filters**: Filter by cluster and status within each tab
+
+**Use Cases:**
+- Identify which HAProxy cluster an IP belongs to during incident response
+- Find which agent is running as MASTER or BACKUP in a keepalived pair
+- Locate a backend server IP across multiple clusters
+- Audit all IP addresses managed by the platform
+
+### User Management - Access Control & Authentication
 - **User Accounts**: Create, edit, and manage user accounts
 - **Role-based Access**: Admin, user, and custom role definitions
 - **Permission System**: Granular permissions for different system functions
@@ -1001,7 +1018,7 @@ Review application logs to trace the complete ACME flow when troubleshooting iss
 - **API Keys**: User API key generation and management
 - **Role Assignment**: Dynamic role assignment and permission updates
 
-### 🔧 **Settings** - *System Configuration*
+### Settings - System Configuration
 - **Theme Settings**: Light/dark mode toggle and UI customization
 - **ACME / SSL Automation**: Configure ACME provider, directory URL, staging mode, auto-renewal, EAB credentials, and test CA connectivity
 - **Notification Settings**: Alert preferences and notification channels
@@ -1011,7 +1028,8 @@ Review application logs to trace the complete ACME flow when troubleshooting iss
 - **Language Settings**: Multi-language support configuration
 - **Performance Tuning**: System performance and optimization settings
 
-## 🚀 Getting Started - First-Time Usage
+
+## Getting Started - First-Time Usage
 
 ### Quick Start for New Users
 
@@ -1247,47 +1265,16 @@ Your HAProxy server is now fully managed by HAProxy OpenManager. You can now:
 
 ---
 
-## 📦 Installation
+
+## Installation
 
 Choose your preferred installation method:
 
-<table>
-<tr>
-<td width="33%" align="center">
-
-### 🐳 Docker Installation
-**Recommended for:**
-- Quick setup and testing
-- Single-server deployment
-- Docker Compose environments
-
-[Jump to Docker Installation ↓](#docker-installation)
-
-</td>
-<td width="33%" align="center">
-
-### ☸️ Kubernetes/OpenShift Installation
-**Recommended for:**
-- Production environments
-- High availability setup
-- Enterprise deployments
-
-[Jump to Kubernetes Installation ↓](#kubernetesopenshift-installation)
-
-</td>
-<td width="33%" align="center">
-
-### 🖥️ Standalone Installation
-**Recommended for:**
-- Bare-metal servers, VMs, LXC
-- No Docker or Kubernetes required
-- Full control over services
-
-[Standalone Install Guide →](docs/STANDALONE_INSTALL.md)
-
-</td>
-</tr>
-</table>
+| Method | Best For | Guide |
+|--------|----------|-------|
+| **Docker** | Quick setup, single-server, Docker Compose | [Docker Installation](#docker-installation) |
+| **Kubernetes/OpenShift** | Production, HA, enterprise | [Kubernetes Installation](#kubernetesopenshift-installation) |
+| **Standalone** | Bare-metal, VMs, LXC, no containers | [Standalone Guide](docs/STANDALONE_INSTALL.md) |
 
 ---
 
@@ -1333,7 +1320,111 @@ Choose your preferred installation method:
 
 > ⚠️ **Security Note**: Change default passwords immediately in production environments.
 
-## 📋 Configuration
+#### Services Overview
+
+The application consists of 8 Docker containers:
+
+```bash
+# Core Application Services
+haproxy-openmanager-frontend    # React.js web interface
+haproxy-openmanager-backend     # FastAPI backend
+haproxy-openmanager-db          # PostgreSQL database  
+haproxy-openmanager-redis       # Redis cache
+haproxy-openmanager-nginx       # Nginx reverse proxy
+
+# HAProxy Test Instances
+haproxy-instance       # Local test instance
+haproxy-remote1        # Remote test instance 1
+haproxy-remote2        # Remote test instance 2
+```
+
+### Management Commands
+
+```bash
+# Start all services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f [service_name]
+
+# Stop all services
+docker-compose down
+
+# Rebuild and restart
+docker-compose down && docker-compose up --build -d
+
+# Database reset (⚠️ Destroys all data)
+docker-compose down
+docker volume rm haproxy-openmanager_postgres_data
+docker-compose up -d
+```
+
+### Volume Management
+
+```bash
+# List volumes
+docker volume ls | grep haproxy
+
+# Backup database
+docker exec haproxy-openmanager-db pg_dump -U haproxy_user haproxy_openmanager > backup.sql
+
+# Restore database
+docker exec -i haproxy-openmanager-db psql -U haproxy_user haproxy_openmanager < backup.sql
+```
+
+### Kubernetes/OpenShift Installation
+
+#### Kubernetes Deployment
+
+For Kubernetes environments, use the provided manifests:
+
+```bash
+# Deploy to Kubernetes
+kubectl apply -f k8s/manifests/
+
+# Check deployment status
+kubectl get pods -n haproxy-openmanager
+
+# Access via port-forward
+kubectl port-forward svc/nginx-service 8080:80 -n haproxy-openmanager
+```
+
+See [k8s/manifests/README.md](k8s/manifests/README.md) for detailed Kubernetes setup instructions.
+
+### Local Development
+
+#### Local Development Setup
+
+1. **Backend Development**
+   ```bash
+   cd backend
+   python -m venv venv
+   source venv/bin/activate  # Linux/Mac
+   # or
+   venv\Scripts\activate     # Windows
+   
+   pip install -r requirements.txt
+   uvicorn main:app --reload --host 0.0.0.0 --port 8000
+   ```
+
+2. **Frontend Development**
+   ```bash
+   cd frontend
+   npm install
+   npm start
+   ```
+
+3. **Database Setup**
+   ```bash
+   # Start only database and redis
+   docker-compose up -d postgres redis
+   
+   # Run migrations
+   python backend/migration.py
+   ```
+
+
+## Configuration
 
 ### Environment Variables
 
@@ -1342,20 +1433,20 @@ All configuration is managed through environment variables for maximum flexibili
 **📄 Configuration Template**: `.env.template`
 
 ```bash
-# 1. Kopyalayın (template → gerçek config)
+# 1. Copy the template
 cp .env.template .env
 
-# 2. Düzenleyin (YOUR-DOMAIN yerine gerçek domain)
+# 2. Edit (replace placeholders with your actual values)
 nano .env
 
-# 3. Başlatın
+# 3. Start
 docker-compose up -d
 ```
 
-**⚠️ ÖNEMLİ**: 
-- `.env.template` sadece bir şablondur (git'e commit edilir)
-- `.env` gerçek yapılandırmadır (git'e commit EDİLMEZ - .gitignore'da)
-- Değiştirdiğinizde `.env` dosyasını düzenleyin, `.env.template` değil!
+**Important**: 
+- `.env.template` is only a template (committed to git)
+- `.env` is the actual configuration (NOT committed - in .gitignore)
+- When making changes, edit `.env`, not `.env.template`!
 
 #### Backend Configuration
 ```bash
@@ -1374,7 +1465,7 @@ MANAGEMENT_BASE_URL="${PUBLIC_URL}"  # Optional, defaults to PUBLIC_URL
 
 # Examples:
 #   Development:  PUBLIC_URL="http://localhost:8000"
-#   Production:   PUBLIC_URL="https://haproxy-openmanager.company.com"
+#   Production:   PUBLIC_URL="https://haproxy-openmanager.example.com"
 #   Production:   PUBLIC_URL="https://haproxy-openmanager.yourdomain.com"
 
 # Logging
@@ -1430,7 +1521,8 @@ Add new HAProxy clusters through the web interface or directly via API:
 }
 ```
 
-## 🔌 API Reference
+
+## API Reference
 
 ### Authentication
 ```bash
@@ -1605,110 +1697,7 @@ Content-Type: text/plain
 POST /api/haproxy/config/validate
 ```
 
-#### Services Overview
-
-The application consists of 8 Docker containers:
-
-```bash
-# Core Application Services
-haproxy-openmanager-frontend    # React.js web interface
-haproxy-openmanager-backend     # FastAPI backend
-haproxy-openmanager-db          # PostgreSQL database  
-haproxy-openmanager-redis       # Redis cache
-haproxy-openmanager-nginx       # Nginx reverse proxy
-
-# HAProxy Test Instances
-haproxy-instance       # Local test instance
-haproxy-remote1        # Remote test instance 1
-haproxy-remote2        # Remote test instance 2
-```
-
-### Management Commands
-
-```bash
-# Start all services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f [service_name]
-
-# Stop all services
-docker-compose down
-
-# Rebuild and restart
-docker-compose down && docker-compose up --build -d
-
-# Database reset (⚠️ Destroys all data)
-docker-compose down
-docker volume rm haproxy-openmanager_postgres_data
-docker-compose up -d
-```
-
-### Volume Management
-
-```bash
-# List volumes
-docker volume ls | grep haproxy
-
-# Backup database
-docker exec haproxy-openmanager-db pg_dump -U haproxy_user haproxy_openmanager > backup.sql
-
-# Restore database
-docker exec -i haproxy-openmanager-db psql -U haproxy_user haproxy_openmanager < backup.sql
-```
-
-### Kubernetes/OpenShift Installation
-
-#### Kubernetes Deployment
-
-For Kubernetes environments, use the provided manifests:
-
-```bash
-# Deploy to Kubernetes
-kubectl apply -f k8s/manifests/
-
-# Check deployment status
-kubectl get pods -n haproxy-openmanager
-
-# Access via port-forward
-kubectl port-forward svc/nginx-service 8080:80 -n haproxy-openmanager
-```
-
-See [k8s/manifests/README.md](k8s/manifests/README.md) for detailed Kubernetes setup instructions.
-
-### Local Development
-
-#### Local Development Setup
-
-1. **Backend Development**
-   ```bash
-   cd backend
-   python -m venv venv
-   source venv/bin/activate  # Linux/Mac
-   # or
-   venv\Scripts\activate     # Windows
-   
-   pip install -r requirements.txt
-   uvicorn main:app --reload --host 0.0.0.0 --port 8000
-   ```
-
-2. **Frontend Development**
-   ```bash
-   cd frontend
-   npm install
-   npm start
-   ```
-
-3. **Database Setup**
-   ```bash
-   # Start only database and redis
-   docker-compose up -d postgres redis
-   
-   # Run migrations
-   python backend/migration.py
-   ```
-
-## 🛠️ Development
+## Development
 
 ### Project Structure
 
@@ -1880,7 +1869,8 @@ haproxy-openmanager/
 3. **Database Changes**: Update `backend/init.sql` and create migration
 4. **HAProxy Features**: Extend `backend/haproxy_client.py`
 
-## 🐛 Troubleshooting
+
+## Troubleshooting
 
 ### Common Issues
 
@@ -2133,13 +2123,22 @@ journalctl -u haproxy
 journalctl -u keepalived
 ```
 
-## 📝 Contributing
+
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Commit changes (`git commit -m 'Add amazing feature'`)
 4. Push to branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
+
+### How to Contribute
+
+1. **Report Bugs**: Open an issue with detailed reproduction steps
+2. **Suggest Features**: Share your ideas for new features or improvements
+3. **Submit PRs**: Fix bugs, add features, or improve documentation
+4. **Improve Docs**: Help make the documentation clearer and more comprehensive
+5. **Share**: Star the project and share it with others
 
 ### Development Guidelines
 
@@ -2148,8 +2147,11 @@ journalctl -u keepalived
 - Add tests for new features
 - Update documentation for API changes
 - Ensure Docker builds work correctly
+- Follow existing code style and conventions
+- Write clear commit messages
+- Keep PRs focused on a single change
 
-## 🎯 Use Cases
+## Use Cases
 
 1. **Enterprise HAProxy Management**: Manage multiple HAProxy clusters across different environments
 2. **DevOps Automation**: Automated configuration deployment with version control
@@ -2157,11 +2159,13 @@ journalctl -u keepalived
 4. **Monitoring & Analytics**: Real-time metrics and performance tracking
 5. **Security Management**: Centralized SSL certificate and WAF rule management
 
-## 📄 License
+
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 👨‍💻 Author
+
+## Author
 
 **Taylan Bakırcıoğlu**  
 Burgan Bank - DevOps / Product Group Manager  
@@ -2169,35 +2173,15 @@ LinkedIn: [linkedin.com/in/taylanbakircioglu](https://www.linkedin.com/in/taylan
 
 Developed with ❤️ for the HAProxy community
 
-## 🌟 Star History
 
-If you find this project useful, please consider giving it a star on GitHub!
-
-## 🤝 Support
+## Support
 
 - **Documentation**: This README and inline code documentation
 - **Issues**: [GitHub Issues](https://github.com/taylanbakircioglu/haproxy-openmanager/issues)
 - **Pull Requests**: Contributions are welcome!
 
-## ⭐ Contributing
 
-We welcome contributions! Here's how you can help:
-
-1. **Report Bugs**: Open an issue with detailed reproduction steps
-2. **Suggest Features**: Share your ideas for new features or improvements
-3. **Submit PRs**: Fix bugs, add features, or improve documentation
-4. **Improve Docs**: Help make the documentation clearer and more comprehensive
-5. **Share**: Star the project and share it with others
-
-### Contribution Guidelines
-
-- Follow existing code style and conventions
-- Write clear commit messages
-- Add tests for new features
-- Update documentation as needed
-- Keep PRs focused on a single change
-
-## 🔗 Related Projects
+## Related Projects
 
 - [HAProxy](https://www.haproxy.org/) - The load balancer being managed
 - [FastAPI](https://fastapi.tiangolo.com/) - Backend framework
