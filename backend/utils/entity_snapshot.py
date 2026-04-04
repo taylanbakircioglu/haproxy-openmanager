@@ -479,6 +479,21 @@ async def _rollback_update(
             logger.info(f"ROLLBACK UPDATE: SSL certificate {entity_id} restored to previous state (including content and expiry)")
             return True
             
+        elif entity_type == "cluster":
+            await conn.execute("""
+                UPDATE haproxy_clusters SET
+                    acme_enabled = $1,
+                    acme_backend_url = $2,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $3
+            """,
+                old_values.get('acme_enabled'),
+                old_values.get('acme_backend_url'),
+                entity_id
+            )
+            logger.info(f"ROLLBACK UPDATE: Cluster {entity_id} acme_enabled restored to {old_values.get('acme_enabled')}")
+            return True
+
         elif entity_type == "server":
             # Server'ı eski değerlerine geri yükle
             # SCHEMA: backend_servers (ALL FIELDS from migrations.py line 2010-2036)

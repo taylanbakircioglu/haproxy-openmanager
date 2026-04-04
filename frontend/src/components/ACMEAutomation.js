@@ -12,6 +12,7 @@ import {
   RocketOutlined
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
+import { useCluster } from '../contexts/ClusterContext';
 import axios from 'axios';
 
 const { Option } = Select;
@@ -21,6 +22,7 @@ const getErrorMsg = (err, fallback) =>
 
 const ACMEAutomation = () => {
   const navigate = useNavigate();
+  const { clusters: allClusters, selectCluster } = useCluster();
   const [orders, setOrders] = useState([]);
   const [accounts, setAccounts] = useState([]);
   const [renewalSchedule, setRenewalSchedule] = useState([]);
@@ -400,20 +402,31 @@ const ACMEAutomation = () => {
               style={{ marginBottom: 16 }}
             />
           )}
-          {prerequisites?.steps?.find(s => s.key === 'config_applied' && s.ok === false) && (
-            <Alert
-              type="warning"
-              showIcon
-              message="Configuration Not Applied"
-              description={
-                <span>
-                  ACME routing rules have not been pushed to HAProxy yet. Certificate validation will fail without this.{' '}
-                  <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate('/apply-management')}>Go to Apply Management</Button>
-                </span>
-              }
-              style={{ marginBottom: 16 }}
-            />
-          )}
+          {prerequisites?.steps?.find(s => s.key === 'config_applied' && s.ok === false) && (() => {
+            const configStep = prerequisites.steps.find(s => s.key === 'config_applied');
+            const pendingNames = (configStep?.pending_clusters || []).map(c => c.name).join(', ');
+            return (
+              <Alert
+                type="warning"
+                showIcon
+                message="Configuration Not Applied"
+                description={
+                  <span>
+                    ACME routing rules have not been pushed to HAProxy yet. Certificate validation will fail without this.
+                    {pendingNames && <> Pending on cluster: <strong>{pendingNames}</strong>.</>}{' '}
+                    <Button type="link" size="small" style={{ padding: 0 }} onClick={() => {
+                      if (configStep?.pending_clusters?.length) {
+                        const target = allClusters.find(c => c.id === configStep.pending_clusters[0].id);
+                        if (target) selectCluster(target);
+                      }
+                      navigate('/apply-management');
+                    }}>Go to Apply Management</Button>
+                  </span>
+                }
+                style={{ marginBottom: 16 }}
+              />
+            );
+          })()}
           <Alert
             type="info"
             showIcon
@@ -447,8 +460,14 @@ const ACMEAutomation = () => {
                 <span>
                   {step.title}
                   {step.navigate && (
-                    <Button type="link" size="small" onClick={() => navigate(step.navigate)} style={{ marginLeft: 8, padding: 0 }}>
-                      Configure
+                    <Button type="link" size="small" onClick={() => {
+                      if (step.pending_clusters?.length) {
+                        const target = allClusters.find(c => c.id === step.pending_clusters[0].id);
+                        if (target) selectCluster(target);
+                      }
+                      navigate(step.navigate);
+                    }} style={{ marginLeft: 8, padding: 0 }}>
+                      {step.ok === 'pending' || step.navigate === '/apply-management' ? 'Apply Changes' : 'Configure'}
                     </Button>
                   )}
                   {step.action === 'register_account' && !step.ok && (
@@ -459,7 +478,7 @@ const ACMEAutomation = () => {
                 </span>
               ),
               description: step.detail,
-              status: step.ok === true ? 'finish' : step.ok === false ? 'error' : 'wait',
+              status: step.ok === true ? 'finish' : step.ok === false ? 'error' : step.ok === 'pending' ? 'process' : 'wait',
             }))}
           />
         </Card>

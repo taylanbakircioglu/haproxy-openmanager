@@ -773,45 +773,90 @@ async def check_prerequisites(authorization: str = Header(None)):
             "action": "register_account",
         })
 
+        # Pre-fetch ACME-related pending versions (used by both Step 3 and Step 4)
+        pending_rows = await conn.fetch("""
+            SELECT c.id AS cluster_id, c.name AS cluster_name, COUNT(*) AS cnt
+            FROM config_versions cv
+            JOIN haproxy_clusters c ON c.id = cv.cluster_id
+            WHERE cv.status = 'PENDING'
+              AND c.is_active = TRUE
+              AND (c.acme_enabled = TRUE OR cv.version_name LIKE 'cluster-%-acme-%')
+            GROUP BY c.id, c.name
+        """)
+        pending_count = sum(r['cnt'] for r in pending_rows)
+        pending_clusters = [{"id": r['cluster_id'], "name": r['cluster_name'], "count": r['cnt']} for r in pending_rows]
+        pending_enable_cluster_ids = set()
+        pe_rows = await conn.fetch("""
+            SELECT DISTINCT cv.cluster_id
+            FROM config_versions cv
+            JOIN haproxy_clusters c ON c.id = cv.cluster_id
+            WHERE cv.status = 'PENDING'
+              AND c.is_active = TRUE
+              AND cv.version_name LIKE 'cluster-%-acme-enable-%'
+        """)
+        for r in pe_rows:
+            pending_enable_cluster_ids.add(r['cluster_id'])
+
         # Step 3: Cluster ACME enabled
-        acme_cluster_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM haproxy_clusters WHERE acme_enabled = TRUE AND is_active = TRUE"
+        acme_clusters_rows = await conn.fetch(
+            "SELECT id, name FROM haproxy_clusters WHERE acme_enabled = TRUE AND is_active = TRUE"
         )
-        acme_cluster_names = await conn.fetch(
-            "SELECT name FROM haproxy_clusters WHERE acme_enabled = TRUE AND is_active = TRUE"
-        )
-        cluster_ok = acme_cluster_count > 0
-        cluster_detail = (
-            f"Enabled on: {', '.join(r['name'] for r in acme_cluster_names)}"
-            if cluster_ok
-            else "No clusters have ACME Challenge Routing enabled"
-        )
+        has_enabled = len(acme_clusters_rows) > 0
+        any_pending_enable = has_enabled and any(r['id'] in pending_enable_cluster_ids for r in acme_clusters_rows)
+        if has_enabled:
+            name_parts = []
+            for r in acme_clusters_rows:
+                if r['id'] in pending_enable_cluster_ids:
+                    name_parts.append(f"{r['name']} (pending apply)")
+                else:
+                    name_parts.append(r['name'])
+            if any_pending_enable:
+                cluster_ok = "pending"
+                cluster_detail = f"Enabled on: {', '.join(name_parts)} — go to Apply Management to activate"
+                cluster_navigate = "/apply-management"
+                step3_pending_clusters = [{"id": r['cluster_id'], "name": r['cluster_name'], "count": r['cnt']} for r in pending_rows if r['cluster_id'] in pending_enable_cluster_ids]
+            else:
+                cluster_ok = True
+                cluster_detail = f"Enabled on: {', '.join(name_parts)}"
+                cluster_navigate = "/clusters"
+                step3_pending_clusters = []
+        else:
+            cluster_ok = False
+            cluster_detail = "No clusters have ACME Challenge Routing enabled"
+            cluster_navigate = "/clusters"
+            step3_pending_clusters = []
         steps.append({
             "key": "cluster_acme_enabled",
             "title": "Enable ACME on Cluster",
             "ok": cluster_ok,
             "detail": cluster_detail,
-            "navigate": "/clusters",
+            "navigate": cluster_navigate,
+            "pending_clusters": step3_pending_clusters,
         })
 
-        # Step 4: Configuration applied (depends on step 3)
-        if cluster_ok:
-            pending_count = await conn.fetchval("""
-                SELECT COUNT(*) FROM config_versions
-                WHERE status = 'PENDING'
-                AND cluster_id IN (SELECT id FROM haproxy_clusters WHERE acme_enabled = TRUE AND is_active = TRUE)
-            """)
+        # Step 4: Configuration applied
+        if has_enabled:
             config_ok = pending_count == 0
-            config_detail = "All ACME cluster configurations are applied" if config_ok else f"{pending_count} pending configuration change(s) need to be applied"
+            if config_ok:
+                config_detail = "All ACME cluster configurations are applied"
+            else:
+                names = ', '.join(r['cluster_name'] for r in pending_rows)
+                config_detail = f"{pending_count} pending configuration change(s) on cluster: {names}"
+        elif pending_count > 0:
+            config_ok = False
+            names = ', '.join(r['cluster_name'] for r in pending_rows)
+            config_detail = f"{pending_count} pending configuration change(s) on cluster: {names}"
         else:
             config_ok = None
             config_detail = "Enable ACME on a cluster first, then apply changes"
+            pending_clusters = []
         steps.append({
             "key": "config_applied",
             "title": "Apply Configuration Changes",
             "ok": config_ok,
             "detail": config_detail,
             "navigate": "/apply-management",
+            "pending_clusters": pending_clusters,
         })
 
         # Step 5: DNS & Network (informational only)

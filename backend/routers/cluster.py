@@ -337,19 +337,40 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
             update_query = f"UPDATE haproxy_clusters SET {', '.join(update_fields)} WHERE id = $1"
             await conn.execute(update_query, *update_values)
 
-        # If acme_enabled actually changed, create a PENDING config version
+        # If acme_enabled actually changed, create a PENDING config version with entity snapshot
         if cluster.acme_enabled is not None and cluster.acme_enabled != existing_cluster.get('acme_enabled', False):
             try:
                 from services.haproxy_config import generate_haproxy_config_for_cluster
                 config_content = await generate_haproxy_config_for_cluster(cluster_id)
                 import time as _time
+                import json as _json
                 version_name = f"cluster-{cluster_id}-acme-{'enable' if cluster.acme_enabled else 'disable'}-{int(_time.time())}"
+
+                from utils.entity_snapshot import save_entity_snapshot
+                snapshot_metadata = await save_entity_snapshot(
+                    conn=conn,
+                    entity_type="cluster",
+                    entity_id=cluster_id,
+                    old_values={
+                        "acme_enabled": existing_cluster.get('acme_enabled', False),
+                        "acme_backend_url": existing_cluster.get('acme_backend_url'),
+                    },
+                    new_values={
+                        "acme_enabled": cluster.acme_enabled,
+                        "acme_backend_url": getattr(cluster, 'acme_backend_url', None) or existing_cluster.get('acme_backend_url'),
+                    },
+                    operation="UPDATE"
+                )
+                metadata_json = _json.dumps(snapshot_metadata) if snapshot_metadata else None
+
                 conn2 = await get_database_connection()
-                await conn2.execute("""
-                    INSERT INTO config_versions (cluster_id, version_name, config_content, status, created_by)
-                    VALUES ($1, $2, $3, 'PENDING', $4)
-                """, cluster_id, version_name, config_content, current_user.get('id', 1))
-                await close_database_connection(conn2)
+                try:
+                    await conn2.execute("""
+                        INSERT INTO config_versions (cluster_id, version_name, config_content, status, created_by, metadata)
+                        VALUES ($1, $2, $3, 'PENDING', $4, $5)
+                    """, cluster_id, version_name, config_content, current_user.get('id', 1), metadata_json)
+                finally:
+                    await close_database_connection(conn2)
             except Exception as acme_err:
                 logger.error(f"Failed to create ACME config version for cluster {cluster_id}: {acme_err}")
         
@@ -4572,6 +4593,7 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
         rollback_success_count = 0
         rollback_fail_count = 0
         rollback_skip_count = 0
+        rolled_back_entities = set()
         
         for version in pending_versions:
             try:
@@ -4586,24 +4608,25 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                 logger.info(f"REJECT DEBUG: entity_snapshot exists={entity_snapshot is not None}")
                 
                 if entity_snapshot:
-                    # SSL entity rollback: Always rollback since Auto-Reject handles cross-cluster consistency
-                    # Auto-Reject (below) marks ALL remaining PENDING SSL versions as REJECTED on all clusters,
-                    # so there's no cross-cluster downgrade risk from rolling back the SSL content
-                    if entity_snapshot.get('entity_type') == 'ssl_certificate':
+                    entity_key = (entity_snapshot.get('entity_type'), entity_snapshot.get('entity_id'))
+
+                    if entity_key in rolled_back_entities:
+                        logger.info(f"REJECT ROLLBACK: Skipping duplicate rollback for {entity_key[0]} {entity_key[1]} (already restored from oldest snapshot)")
+                        rollback_skip_count += 1
+                    elif entity_snapshot.get('entity_type') == 'ssl_certificate':
                         ssl_entity_id = entity_snapshot.get('entity_id')
-                        
                         logger.info(
                             f"REJECT: Rolling back SSL certificate {ssl_entity_id} content to pre-update state"
                         )
                         success = await rollback_entity_from_snapshot(conn, entity_snapshot)
                         if success:
                             rollback_success_count += 1
+                            rolled_back_entities.add(entity_key)
                             logger.info(f"REJECT ROLLBACK: Rolled back SSL certificate {ssl_entity_id}")
                         else:
                             rollback_fail_count += 1
                             logger.warning(f"REJECT ROLLBACK: Failed to rollback SSL certificate {ssl_entity_id}")
                     else:
-                        # Single entity rollback (non-SSL)
                         logger.info(f"REJECT DEBUG: Calling rollback for {entity_snapshot.get('entity_type')} {entity_snapshot.get('entity_id')}")
                         logger.info(f"REJECT DEBUG: old_values exists={('old_values' in entity_snapshot)}")
                         logger.info(f"REJECT DEBUG: operation={entity_snapshot.get('operation')}")
@@ -4614,6 +4637,7 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                         
                         if success:
                             rollback_success_count += 1
+                            rolled_back_entities.add(entity_key)
                             logger.info(f"REJECT ROLLBACK: Rolled back {entity_snapshot['entity_type']} {entity_snapshot['entity_id']}")
                         else:
                             rollback_fail_count += 1
