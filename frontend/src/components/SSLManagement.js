@@ -934,7 +934,7 @@ const SSLManagement = () => {
                 label="Certificate Name"
                 rules={[
                   { required: true, message: 'Please enter certificate name' },
-                  { pattern: /^[a-zA-Z0-9_-]+$/, message: 'Only alphanumeric, underscore and dash allowed' }
+                  { pattern: /^[a-zA-Z0-9_.-]+$/, message: 'Only alphanumeric, dot, underscore and dash allowed' }
                 ]}
                 extra={selectedCertificate && selectedCertificate.id ? "Certificate name cannot be changed (used as file path on servers)" : "Used as file path: /etc/ssl/haproxy/{name}.pem"}
                 tooltip={selectedCertificate && selectedCertificate.id ? "Certificate name is immutable after creation to maintain file system references" : null}

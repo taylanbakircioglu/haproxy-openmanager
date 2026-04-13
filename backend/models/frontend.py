@@ -108,8 +108,8 @@ class FrontendConfig(BaseModel):
             raise ValueError('Frontend name cannot be empty')
         
         # HAProxy names cannot contain spaces or special characters
-        if not re.match(r'^[a-zA-Z0-9_-]+$', v.strip()):
-            raise ValueError('Frontend name can only contain letters, numbers, underscore (_) and dash (-). Spaces and special characters are not allowed.')
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', v.strip()):
+            raise ValueError('Frontend name can only contain letters, numbers, dot (.), underscore (_) and dash (-). Spaces and special characters are not allowed.')
         
         if len(v.strip()) > 50:
             raise ValueError('Frontend name cannot exceed 50 characters')
@@ -147,8 +147,8 @@ class FrontendConfig(BaseModel):
     
     @validator('default_backend')
     def validate_default_backend(cls, v):
-        if v and not re.match(r'^[a-zA-Z0-9_-]+$', v.strip()):
-            raise ValueError('Default backend name can only contain letters, numbers, underscore (_) and dash (-)')
+        if v and not re.match(r'^[a-zA-Z0-9_.-]+$', v.strip()):
+            raise ValueError('Default backend name can only contain letters, numbers, dot (.), underscore (_) and dash (-)')
         return v.strip() if v else None
     
     @validator('ssl_certificate_id')
@@ -288,7 +288,7 @@ class FrontendConfig(BaseModel):
                 continue
                 
             # Basic ACL syntax validation
-            if not re.match(r'^[a-zA-Z0-9_-]+\s+', rule):
+            if not re.match(r'^[a-zA-Z0-9_.-]+\s+', rule):
                 raise ValueError(f'Invalid ACL rule syntax: "{rule}". Must start with ACL name followed by condition.')
             
             # Check for dangerous patterns

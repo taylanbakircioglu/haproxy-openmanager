@@ -156,11 +156,11 @@ class HAProxyConfigValidator:
             section_name = parts[1]
             
             # Check name format
-            if not re.match(r'^[a-zA-Z0-9_-]+$', section_name):
+            if not re.match(r'^[a-zA-Z0-9_.-]+$', section_name):
                 self._add_result(
                     ValidationLevel.WARNING,
                     f"Section name '{section_name}' contains invalid characters",
-                    suggestion="Use only letters, numbers, underscore and hyphen"
+                    suggestion="Use only letters, numbers, dot, underscore and hyphen"
                 )
         
         # Set current section for validation
@@ -265,12 +265,12 @@ class HAProxyConfigValidator:
         server_addr = args[1]
         
         # Check server name format
-        if not re.match(r'^[a-zA-Z0-9_-]+$', server_name):
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', server_name):
             self._add_result(
                 ValidationLevel.WARNING,
                 f"Server name '{server_name}' contains invalid characters",
                 directive="server",
-                suggestion="Use only letters, numbers, underscore and hyphen"
+                suggestion="Use only letters, numbers, dot, underscore and hyphen"
             )
         
         # Check address format

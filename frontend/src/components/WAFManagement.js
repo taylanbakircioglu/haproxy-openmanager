@@ -1442,7 +1442,7 @@ const WAFManagement = () => {
                 label="Rule Name"
                 rules={[
                   { required: true, message: 'Please enter rule name' },
-                  { pattern: /^[a-zA-Z0-9_-]+$/, message: 'Only alphanumeric, underscore and dash allowed' }
+                  { pattern: /^[a-zA-Z0-9_.-]+$/, message: 'Only alphanumeric, dot, underscore and dash allowed' }
                 ]}
               >
                 <Input placeholder="e.g., api_rate_limit" />

@@ -22,8 +22,8 @@ class WAFRule(BaseModel):
             raise ValueError('WAF rule name cannot be empty')
         
         # HAProxy ACL names cannot contain spaces or special characters
-        if not re.match(r'^[a-zA-Z0-9_-]+$', v.strip()):
-            raise ValueError('WAF rule name can only contain letters, numbers, underscore (_) and dash (-). Spaces and special characters are not allowed.')
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', v.strip()):
+            raise ValueError('WAF rule name can only contain letters, numbers, dot (.), underscore (_) and dash (-). Spaces and special characters are not allowed.')
         
         if len(v.strip()) > 50:
             raise ValueError('WAF rule name cannot exceed 50 characters')

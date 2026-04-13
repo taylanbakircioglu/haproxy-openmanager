@@ -1381,7 +1381,7 @@ const FrontendManagement = () => {
                     extra="Unique identifier for this frontend"
                     rules={[
                       { required: true, message: 'Please enter frontend name' },
-                      { pattern: /^[a-zA-Z0-9_-]+$/, message: 'Only alphanumeric, underscore and dash allowed' }
+                      { pattern: /^[a-zA-Z0-9_.-]+$/, message: 'Only alphanumeric, dot, underscore and dash allowed' }
                     ]}
                   >
                     <Input placeholder="e.g., main_frontend" />

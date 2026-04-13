@@ -313,7 +313,7 @@ function ACLDefinitionCard({ rule, index, onChange, onDelete }) {
         <Col flex="140px">
           <Input
             value={rule.name}
-            onChange={(e) => onChange(index, { ...rule, name: e.target.value.replace(/[^a-zA-Z0-9_-]/g, '') })}
+            onChange={(e) => onChange(index, { ...rule, name: e.target.value.replace(/[^a-zA-Z0-9_.-]/g, '') })}
             placeholder="acl_name"
             size="small"
             addonBefore={<FilterOutlined style={{ fontSize: 11 }} />}

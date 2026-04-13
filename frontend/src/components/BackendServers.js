@@ -1646,7 +1646,7 @@ const BackendServers = () => {
                 label="Backend Name"
                 rules={[
                   { required: true, message: 'Please enter backend name' },
-                  { pattern: /^[a-zA-Z0-9_-]+$/, message: 'Only alphanumeric, underscore and dash allowed' }
+                  { pattern: /^[a-zA-Z0-9_.-]+$/, message: 'Only alphanumeric, dot, underscore and dash allowed' }
                 ]}
               >
                 <Input placeholder="e.g., web_servers" />
@@ -1939,7 +1939,7 @@ const BackendServers = () => {
                 label="Server Name"
                 rules={[
                   { required: true, message: 'Please enter server name' },
-                  { pattern: /^[a-zA-Z0-9_-]+$/, message: 'Only alphanumeric, underscore and dash allowed' }
+                  { pattern: /^[a-zA-Z0-9_.-]+$/, message: 'Only alphanumeric, dot, underscore and dash allowed' }
                 ]}
               >
                 <Input placeholder="e.g., web1" />
