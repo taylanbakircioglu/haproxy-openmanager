@@ -68,31 +68,40 @@ const FrontendManagement = () => {
   const [sslCertificates, setSslCertificates] = useState([]);
 
   // Port conflict validation helper
-  const validatePortConflict = (port, sslPort, currentFrontendId = null) => {
+  // HAProxy allows same port on different bind addresses (e.g., bind 10.0.0.1:443 vs bind 10.0.0.2:443)
+  // Conflict only when: same address+port, or wildcard (*) address overlaps with specific address
+  const addressesConflict = (addr1, addr2) => {
+    const a1 = (addr1 || '*').trim();
+    const a2 = (addr2 || '*').trim();
+    const wildCards = ['*', '0.0.0.0', '', '::'];
+    const isWild1 = wildCards.includes(a1);
+    const isWild2 = wildCards.includes(a2);
+    if (isWild1 || isWild2) return true;
+    return a1 === a2;
+  };
+
+  const validatePortConflict = (bindAddress, port, sslPort, currentFrontendId = null) => {
     const conflicts = [];
     
     frontends.forEach(frontend => {
-      // Skip current frontend when editing
       if (currentFrontendId && frontend.id === currentFrontendId) return;
       
-      // Check HTTP port conflicts
-      if (frontend.bind_port === port) {
-        conflicts.push(`Port ${port} is already used by frontend "${frontend.name}" (HTTP)`);
+      const existingAddr = frontend.bind_address || '*';
+
+      if (frontend.bind_port === port && addressesConflict(bindAddress, existingAddr)) {
+        conflicts.push(`Port ${port} is already used by frontend "${frontend.name}" (${existingAddr}:${port})`);
       }
       
-      // Check HTTPS port conflicts (if frontend has SSL enabled)
-      if (frontend.ssl_enabled && frontend.ssl_port === port) {
-        conflicts.push(`Port ${port} is already used by frontend "${frontend.name}" (HTTPS)`);
+      if (frontend.ssl_enabled && frontend.ssl_port === port && addressesConflict(bindAddress, existingAddr)) {
+        conflicts.push(`Port ${port} is already used by frontend "${frontend.name}" (HTTPS ${existingAddr}:${frontend.ssl_port})`);
       }
       
-      // Check if our SSL port conflicts with existing HTTP ports
-      if (sslPort && frontend.bind_port === sslPort) {
-        conflicts.push(`HTTPS port ${sslPort} is already used by frontend "${frontend.name}" (HTTP)`);
+      if (sslPort && frontend.bind_port === sslPort && addressesConflict(bindAddress, existingAddr)) {
+        conflicts.push(`HTTPS port ${sslPort} conflicts with frontend "${frontend.name}" (${existingAddr}:${frontend.bind_port})`);
       }
       
-      // Check if our SSL port conflicts with existing HTTPS ports
-      if (sslPort && frontend.ssl_enabled && frontend.ssl_port === sslPort) {
-        conflicts.push(`HTTPS port ${sslPort} is already used by frontend "${frontend.name}" (HTTPS)`);
+      if (sslPort && frontend.ssl_enabled && frontend.ssl_port === sslPort && addressesConflict(bindAddress, existingAddr)) {
+        conflicts.push(`HTTPS port ${sslPort} conflicts with frontend "${frontend.name}" (HTTPS ${existingAddr}:${frontend.ssl_port})`);
       }
     });
     
@@ -1410,6 +1419,7 @@ const FrontendManagement = () => {
                     name="bind_port"
                     label="HTTP Port"
                     extra="Port for HTTP connections"
+                    dependencies={['bind_address']}
                     rules={[
                       { required: true, message: 'Please enter HTTP port' },
                       { type: 'number', min: 1, max: 65535, message: 'Port must be between 1-65535' },
@@ -1417,8 +1427,8 @@ const FrontendManagement = () => {
                         validator(_, value) {
                           if (!value) return Promise.resolve();
                           
-                          // Only check HTTP port conflicts, not SSL port conflicts for HTTP field
-                          const conflicts = validatePortConflict(value, null, editingFrontend?.id);
+                          const bindAddress = getFieldValue('bind_address') || '*';
+                          const conflicts = validatePortConflict(bindAddress, value, null, editingFrontend?.id);
                           
                           if (conflicts.length > 0) {
                             return Promise.reject(new Error(`Port conflict detected:\n• ${conflicts.join('\n• ')}`));

@@ -8,7 +8,14 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://haproxy_user:haproxy_pass
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 
 # CORS settings
-CORS_ORIGINS = ["http://localhost:3000"]
+# Configurable via CORS_ORIGINS env var (comma-separated), e.g. "http://localhost:3000,http://server:8080"
+# Default allows common development and Docker Compose origins
+_cors_env = os.getenv("CORS_ORIGINS", "")
+CORS_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env else [
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "http://localhost:8000",
+]
 
 # Security settings
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-here")

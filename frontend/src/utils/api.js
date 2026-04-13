@@ -15,12 +15,13 @@ const getApiUrl = () => {
   }
   
   // Priority 2: Detect from window location (for production deployments)
+  // Use window.location.host (includes port) instead of hostname (excludes port)
+  // so non-standard ports like :8080 are preserved, preventing CORS issues
   if (typeof window !== 'undefined' && window.location) {
-    const { protocol, hostname } = window.location;
+    const { protocol, host } = window.location;
     
-    // In production, assume API is served from same origin
     if (process.env.NODE_ENV === 'production') {
-      return `${protocol}//${hostname}`;
+      return `${protocol}//${host}`;
     }
   }
   
