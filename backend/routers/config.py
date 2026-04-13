@@ -1644,9 +1644,9 @@ async def bulk_create_entities(
                         backend_data.get("request_headers"),
                         backend_data.get("response_headers"),
                         backend_data.get("options"),
-                        backend_data.get("timeout_connect", 10000),
-                        backend_data.get("timeout_server", 60000),
-                        backend_data.get("timeout_queue", 60000),
+                        backend_data.get("timeout_connect"),
+                        backend_data.get("timeout_server"),
+                        backend_data.get("timeout_queue"),
                         request.cluster_id
                     )
                     

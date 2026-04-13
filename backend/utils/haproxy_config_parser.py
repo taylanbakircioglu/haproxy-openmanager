@@ -56,9 +56,9 @@ class ParsedBackend:
     request_headers: Optional[str] = None  # HTTP request headers (backend level)
     response_headers: Optional[str] = None  # HTTP response headers (backend level)
     options: Optional[str] = None  # HAProxy backend options (option http-keep-alive, option forwardfor, etc.)
-    timeout_connect: Optional[int] = 10000
-    timeout_server: Optional[int] = 60000
-    timeout_queue: Optional[int] = 60000
+    timeout_connect: Optional[int] = None
+    timeout_server: Optional[int] = None
+    timeout_queue: Optional[int] = None
     servers: List[ParsedServer] = None
 
     def __post_init__(self):
