@@ -54,7 +54,7 @@ import './App.css';
 const { Header, Sider, Content } = Layout;
 const { Text } = Typography;
 
-// v1.2.0 - Dark Mode + UI Improvements
+// v1.3.0 - Bulk Import Change Detection + Multi-Select Delete
 
   const menuItems = [
     {

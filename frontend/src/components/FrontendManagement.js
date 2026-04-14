@@ -139,6 +139,8 @@ const FrontendManagement = () => {
   const [selectedEntityForVersion, setSelectedEntityForVersion] = useState(null);
   const [aclBuilderData, setAclBuilderData] = useState({ aclRules: [], useBackendRules: [], redirectRules: [] });
   const [aclBuilderKey, setAclBuilderKey] = useState(0);
+  const [selectedFrontendKeys, setSelectedFrontendKeys] = useState([]);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [form] = Form.useForm();
 
   // SSL visibility control - fields start visible for proper form registration
@@ -162,12 +164,12 @@ const FrontendManagement = () => {
 
   useEffect(() => {
     // CRITICAL FIX: Clear state when cluster changes to prevent showing other cluster's data
-    // Race condition: Old cluster data remains visible while new cluster data is fetching
     if (selectedCluster) {
       setFrontends([]);
       setFilteredFrontends([]);
       setBackends([]);
       setSslCertificates([]);
+      setSelectedFrontendKeys([]);
     }
     
     fetchFrontends();
@@ -767,6 +769,92 @@ const FrontendManagement = () => {
     });
   };
 
+  const handleBulkDeleteFrontends = () => {
+    if (!selectedCluster || selectedFrontendKeys.length === 0) return;
+
+    const selectedFrontends = frontends.filter(f => selectedFrontendKeys.includes(f.id));
+    const undeletable = selectedFrontends.filter(f =>
+      f.default_backend && backends.some(b => b.name === f.default_backend)
+    );
+    const deletable = selectedFrontends.filter(f =>
+      !f.default_backend || !backends.some(b => b.name === f.default_backend)
+    );
+
+    if (deletable.length === 0) {
+      Modal.error({
+        title: 'Cannot Delete',
+        content: `All ${undeletable.length} selected frontend(s) reference active backends and cannot be deleted. Remove their backend associations first.`,
+        okText: 'Understood'
+      });
+      setSelectedFrontendKeys([]);
+      return;
+    }
+
+    const names = deletable.map(f => f.name);
+    const displayNames = names.length <= 10
+      ? names.join(', ')
+      : `${names.slice(0, 10).join(', ')} ... and ${names.length - 10} more`;
+
+    const skippedMsg = undeletable.length > 0
+      ? `${undeletable.length} frontend(s) with active backend references will be skipped.`
+      : '';
+
+    Modal.confirm({
+      title: `Delete Frontends (${selectedFrontends.length} selected)`,
+      content: (
+        <div>
+          <p>{deletable.length} frontend(s) will be deleted:</p>
+          <p><Text code>{displayNames}</Text></p>
+          {skippedMsg && <p style={{ color: '#faad14' }}>{skippedMsg}</p>}
+          <p><strong>This action cannot be undone.</strong></p>
+        </div>
+      ),
+      okText: 'Delete All',
+      okType: 'danger',
+      cancelText: 'Cancel',
+      onOk: async () => {
+        setBulkDeleting(true);
+        let successCount = 0;
+        let errorCount = 0;
+        const errors = [];
+
+        for (const frontend of deletable) {
+          try {
+            await axios.delete(`/api/frontends/${frontend.id}`, {
+              data: { cluster_id: selectedCluster.id }
+            });
+            successCount++;
+          } catch (error) {
+            errorCount++;
+            const errorMsg = error.response?.data?.detail || error.message;
+            errors.push(`${frontend.name}: ${errorMsg}`);
+          }
+        }
+
+        setBulkDeleting(false);
+        setSelectedFrontendKeys([]);
+
+        if (errorCount === 0) {
+          message.success(`${successCount} frontend(s) deleted successfully`);
+        } else {
+          message.warning(
+            <div>
+              <div><strong>{successCount} deleted, {errorCount} failed</strong></div>
+              <div style={{ marginTop: 4, fontSize: '12px' }}>
+                {errors.slice(0, 5).map((e, i) => <div key={i}>{e}</div>)}
+                {errors.length > 5 && <div>... and {errors.length - 5} more errors</div>}
+              </div>
+            </div>,
+            10
+          );
+        }
+
+        fetchFrontends();
+        checkPendingChanges();
+      }
+    });
+  };
+
   const handleSubmit = async (values) => {
     if (!selectedCluster) {
       message.warning('Please select a HAProxy cluster first');
@@ -1230,7 +1318,7 @@ const FrontendManagement = () => {
           </h2>
         </Col>
         <Col span={12} style={{ textAlign: 'right' }}>
-          <Space>
+          <Space wrap>
             <Space>
               <span style={{ fontSize: 12 }}>Pending</span>
               <Switch
@@ -1307,6 +1395,16 @@ const FrontendManagement = () => {
             >
               Add Frontend
             </Button>
+            {selectedFrontendKeys.length > 0 && (
+              <Button
+                danger
+                icon={<DeleteOutlined />}
+                onClick={handleBulkDeleteFrontends}
+                loading={bulkDeleting}
+              >
+                Delete Selected ({selectedFrontendKeys.length})
+              </Button>
+            )}
             {pendingChanges && (
               <Button
                 type="primary"
@@ -1331,6 +1429,10 @@ const FrontendManagement = () => {
           dataSource={filteredFrontends}
           rowKey="id"
           loading={loading}
+          rowSelection={{
+            selectedRowKeys: selectedFrontendKeys,
+            onChange: setSelectedFrontendKeys,
+          }}
           pagination={{
             total: filteredFrontends.length,
             showSizeChanger: true,

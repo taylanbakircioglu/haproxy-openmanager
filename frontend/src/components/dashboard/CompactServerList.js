@@ -130,7 +130,7 @@ const CompactServerList = ({ data, loading }) => {
       title: 'Server',
       dataIndex: 'name',
       key: 'name',
-      width: '20%',
+      width: '15%',
       sorter: (a, b) => a.name.localeCompare(b.name),
       render: (name, record) => (
         <Space>
@@ -143,9 +143,17 @@ const CompactServerList = ({ data, loading }) => {
       title: 'Backend',
       dataIndex: 'backend',
       key: 'backend',
-      width: '15%',
+      width: '12%',
       sorter: (a, b) => a.backend.localeCompare(b.backend),
       render: (backend) => <Tag color="blue">{backend}</Tag>
+    },
+    {
+      title: 'Address',
+      dataIndex: 'address',
+      key: 'address',
+      width: '12%',
+      sorter: (a, b) => (a.address || '').localeCompare(b.address || ''),
+      render: (address) => address ? <Text code style={{ fontSize: '12px' }}>{address}</Text> : '-'
     },
     {
       title: 'Status',
@@ -183,7 +191,7 @@ const CompactServerList = ({ data, loading }) => {
       title: 'Response Time',
       dataIndex: 'response_time',
       key: 'response_time',
-      width: '12%',
+      width: '10%',
       align: 'right',
       sorter: (a, b) => (a.response_time || 0) - (b.response_time || 0),
       render: (time) => <Text>{time ? `${time}ms` : '-'}</Text>
@@ -201,7 +209,7 @@ const CompactServerList = ({ data, loading }) => {
       title: 'Health Check',
       dataIndex: 'check_status',
       key: 'check_status',
-      width: '15%',
+      width: '13%',
       ellipsis: {
         showTitle: false
       },
@@ -243,6 +251,9 @@ const CompactServerList = ({ data, loading }) => {
           </div>
           <div style={{ flex: '0 0 150px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             <Tag color="blue" style={{ fontSize: '11px' }}>{server.backend}</Tag>
+          </div>
+          <div style={{ flex: '0 0 150px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <Text code style={{ fontSize: '11px' }}>{server.address || '-'}</Text>
           </div>
           <div style={{ flex: '0 0 80px' }}>
             <Tag color={statusColor} icon={statusIcon} style={{ fontSize: '11px' }}>
@@ -291,6 +302,7 @@ const CompactServerList = ({ data, loading }) => {
             <Badge status={server.status === 'UP' ? 'success' : server.status === 'DOWN' ? 'error' : 'default'} />
             <Text strong style={{ fontSize: '14px' }}>{server.name}</Text>
             <Tag color="blue">{server.backend}</Tag>
+            {server.address && <Text code style={{ fontSize: '12px' }}>{server.address}</Text>}
             <Tag color={statusColor} icon={statusIcon}>{server.status}</Tag>
           </div>
           <div style={{ 
@@ -535,6 +547,7 @@ const CompactServerList = ({ data, loading }) => {
               <div style={{ width: '24px' }}></div>
               <div style={{ flex: '0 0 200px' }}>Server Name</div>
               <div style={{ flex: '0 0 150px' }}>Backend</div>
+              <div style={{ flex: '0 0 150px' }}>Address</div>
               <div style={{ flex: '0 0 80px' }}>Status</div>
               <div style={{ flex: '0 0 60px', textAlign: 'right' }}>Weight</div>
               <div style={{ flex: '0 0 80px', textAlign: 'right' }}>Response</div>

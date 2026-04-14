@@ -908,6 +908,10 @@ async def parse_bulk_config(
                     "ssl_verify": ssl_verify,  # Smart: 'required' if SSL matched, else parser value
                     "ssl_certificate_id": ssl_certificate_id,  # Smart: Auto-assigned if matched
                     "ssl_certificate_name": ssl_certificate_name,  # For UI display
+                    "ssl_sni": server.ssl_sni,
+                    "ssl_min_ver": server.ssl_min_ver,
+                    "ssl_max_ver": server.ssl_max_ver,
+                    "ssl_ciphers": server.ssl_ciphers,
                     "cookie_value": server.cookie_value,
                     "inter": server.inter,
                     "fall": server.fall,
@@ -936,6 +940,59 @@ async def parse_bulk_config(
                 "servers": servers_data
             })
         
+        # Strip auto-generated content from parsed data.
+        # The config generator injects content from multiple sources (ACME, rate_limit
+        # field, WAF rules table) that the parser cannot distinguish from user-defined
+        # configuration. Strip all auto-managed patterns so the preview and comparison
+        # only reflect user-defined configuration.
+        def _is_auto_header(line):
+            s = line.strip()
+            if "is_acme_challenge" in s:
+                return True
+            if "track-sc0 src" in s:
+                return True
+            if "sc_http_req_rate(0)" in s:
+                return True
+            if s.startswith("http-request") and " waf_" in s:
+                return True
+            return False
+
+        def _strip_auto_headers(headers_str):
+            if not headers_str:
+                return None
+            lines = [l for l in headers_str.split("\n") if not _is_auto_header(l)]
+            return "\n".join(lines) if lines else None
+
+        backends_data = [b for b in backends_data if b["name"] != "_acme_challenge_backend"]
+
+        for frontend in frontends_data:
+            frontend["acl_rules"] = [
+                r for r in (frontend.get("acl_rules") or [])
+                if "is_acme_challenge" not in r and not r.strip().startswith("acl waf_")
+            ]
+            frontend["use_backend_rules"] = [
+                r for r in (frontend.get("use_backend_rules") or [])
+                if "_acme_challenge_backend" not in r
+            ]
+            frontend["request_headers"] = _strip_auto_headers(frontend.get("request_headers"))
+            if frontend.get("tcp_request_rules"):
+                lines = [
+                    l for l in frontend["tcp_request_rules"].split("\n")
+                    if "is_acme_challenge" not in l
+                ]
+                frontend["tcp_request_rules"] = "\n".join(lines) if lines else None
+            if frontend.get("default_backend") == "_acme_challenge_backend":
+                remaining = frontend.get("use_backend_rules") or []
+                if remaining:
+                    m = re.match(r'^use_backend\s+(\S+)', remaining[0])
+                    frontend["default_backend"] = m.group(1) if m else None
+                else:
+                    frontend["default_backend"] = None
+
+        parse_result.warnings = [
+            w for w in parse_result.warnings if "_acme_challenge_backend" not in w
+        ]
+
         # CRITICAL: Filter out SSL warnings for auto-assigned certificates
         # If SSL was auto-assigned, user doesn't need warnings about manual assignment
         auto_assigned_ssl_names = set()
@@ -1011,11 +1068,13 @@ async def parse_bulk_config(
         new_backends = 0
         update_backends = 0
         new_servers = 0
+        update_servers = 0
         
         for frontend in frontends_data:
             existing = await conn.fetchrow("""
                 SELECT * FROM frontends 
                 WHERE name = $1 AND cluster_id = $2
+                ORDER BY is_active DESC
             """, frontend["name"], request.cluster_id)
             
             if existing:
@@ -1047,9 +1106,11 @@ async def parse_bulk_config(
                 if frontend.get("maxconn") and frontend["maxconn"] != existing["maxconn"]:
                     has_changes = True
                     changes["maxconn"] = {"old": existing["maxconn"], "new": frontend["maxconn"]}
-                if frontend.get("request_headers") and frontend["request_headers"] != existing["request_headers"]:
+                parsed_rh = frontend.get("request_headers")
+                db_rh = _strip_auto_headers(existing["request_headers"])
+                if parsed_rh and parsed_rh != db_rh:
                     has_changes = True
-                    changes["request_headers"] = {"old": existing["request_headers"], "new": frontend["request_headers"]}
+                    changes["request_headers"] = {"old": db_rh, "new": parsed_rh}
                 if frontend.get("response_headers") and frontend["response_headers"] != existing["response_headers"]:
                     has_changes = True
                     changes["response_headers"] = {"old": existing["response_headers"], "new": frontend["response_headers"]}
@@ -1124,6 +1185,7 @@ async def parse_bulk_config(
             existing = await conn.fetchrow("""
                 SELECT * FROM backends 
                 WHERE name = $1 AND cluster_id = $2
+                ORDER BY is_active DESC
             """, backend["name"], request.cluster_id)
             
             if existing:
@@ -1197,10 +1259,30 @@ async def parse_bulk_config(
                 if has_changes:
                     update_backends += 1
                 
-                # Check servers for this backend
+                # Check servers for this backend — field-level comparison
+                SERVER_COMPARISON_FIELDS = [
+                    # (parser_key, db_key, default_value)
+                    ("server_address", "server_address", None),
+                    ("server_port", "server_port", None),
+                    ("weight", "weight", 100),
+                    ("max_connections", "maxconn", None),
+                    ("check_enabled", "check_enabled", True),
+                    ("check_port", "check_port", None),
+                    ("backup_server", "backup_server", False),
+                    ("ssl_enabled", "ssl_enabled", False),
+                    ("ssl_verify", "ssl_verify", None),
+                    ("ssl_sni", "ssl_sni", None),
+                    ("ssl_min_ver", "ssl_min_ver", None),
+                    ("ssl_max_ver", "ssl_max_ver", None),
+                    ("ssl_ciphers", "ssl_ciphers", None),
+                    ("cookie_value", "cookie_value", None),
+                    ("inter", "inter", None),
+                    ("fall", "fall", None),
+                    ("rise", "rise", None),
+                ]
                 for server in backend.get("servers", []):
                     existing_server = await conn.fetchrow("""
-                        SELECT id FROM backend_servers 
+                        SELECT * FROM backend_servers 
                         WHERE backend_name = $1 AND server_name = $2 
                         AND cluster_id = $3 AND is_active = TRUE
                     """, backend["name"], server["server_name"], request.cluster_id)
@@ -1210,6 +1292,32 @@ async def parse_bulk_config(
                         new_servers += 1
                     else:
                         server["_isNew"] = False
+                        server_changes = {}
+                        for parser_key, db_key, default_val in SERVER_COMPARISON_FIELDS:
+                            parser_val = server.get(parser_key)
+                            db_val = existing_server.get(db_key)
+                            if default_val is not None:
+                                parser_val = default_val if parser_val is None else parser_val
+                                db_val = default_val if db_val is None else db_val
+                            if parser_val != db_val:
+                                server_changes[db_key] = {"old": db_val, "new": parser_val}
+                        if server_changes:
+                            server["_isUpdate"] = True
+                            server["_changes"] = server_changes
+                            update_servers += 1
+                        else:
+                            server["_isUpdate"] = False
+                
+                # Propagate server changes to parent backend
+                # _hasServerChanges is informational only (UI tooltip); bulk_create decisions use _isUpdate
+                has_server_changes = any(
+                    s.get("_isNew") or s.get("_isUpdate")
+                    for s in backend.get("servers", [])
+                )
+                if has_server_changes and not backend["_isUpdate"]:
+                    backend["_isUpdate"] = True
+                    backend["_hasServerChanges"] = True
+                    update_backends += 1
             else:
                 backend["_isNew"] = True
                 backend["_isUpdate"] = False
@@ -1234,7 +1342,8 @@ async def parse_bulk_config(
             update_frontends=update_frontends,
             new_backends=new_backends,
             update_backends=update_backends,
-            new_servers=new_servers
+            new_servers=new_servers,
+            update_servers=update_servers
         )
         
         # Close connection before returning
@@ -1259,7 +1368,8 @@ async def parse_bulk_config(
                 "update_frontends": update_frontends,
                 "new_backends": new_backends,
                 "update_backends": update_backends,
-                "new_servers": new_servers
+                "new_servers": new_servers,
+                "update_servers": update_servers
             }
         }
         
@@ -1427,9 +1537,11 @@ async def bulk_create_entities(
                     continue
                 
                 # Check if backend already exists (check both active AND inactive)
+                # ORDER BY is_active DESC ensures active backend is preferred over soft-deleted duplicates
                 existing = await conn.fetchrow("""
                     SELECT id, is_active FROM backends 
                     WHERE name = $1 AND cluster_id = $2
+                    ORDER BY is_active DESC
                 """, backend_data["name"], request.cluster_id)
                 
                 backend_id = None
@@ -1669,20 +1781,20 @@ async def bulk_create_entities(
                 # SERVERS: Process servers for both CREATE and UPDATE modes
                 # MVP: Only add new servers, preserve existing ones (no deletion)
                 # BUGFIX: Handle soft-deleted servers - check for existing (including inactive) before INSERT
-                backend_has_new_servers = False  # Track if new servers were added
+                backend_has_server_changes = False
                 if backend_id:  # Only if we have a valid backend_id
                     for server_data in backend_data.get("servers", []):
-                        # Only create server if marked as new (MVP: skip existing)
-                        if not server_data.get("_isNew", True):
+                        if not server_data.get("_isNew", True) and not server_data.get("_isUpdate", False):
                             logger.debug(f"Server '{server_data['server_name']}' already exists in backend '{backend_data['name']}', preserving")
                             continue
                         
                         # BUGFIX: Check if server already exists (including soft-deleted)
-                        # This prevents unique constraint violation when re-importing after soft delete
+                        # Use (backend_name, server_name, cluster_id) to match the unique constraint
+                        # instead of backend_id, which may differ after backend soft-delete/re-create cycles
                         existing_server = await conn.fetchrow("""
-                            SELECT id, is_active FROM backend_servers
-                            WHERE backend_id = $1 AND server_name = $2
-                        """, backend_id, server_data["server_name"])
+                            SELECT id, is_active, backend_id FROM backend_servers
+                            WHERE backend_name = $1 AND server_name = $2 AND cluster_id = $3
+                        """, backend_data["name"], server_data["server_name"], request.cluster_id)
                         
                         if existing_server:
                             # Server exists - UPDATE instead of INSERT (reactivate if soft-deleted)
@@ -1691,7 +1803,7 @@ async def bulk_create_entities(
                             
                             # Log warning if active server is being overwritten (unexpected state)
                             # This helps debug when frontend incorrectly marks existing server as new
-                            if not was_inactive:
+                            if not was_inactive and not server_data.get("_isUpdate", False):
                                 logger.warning(f"BULK IMPORT: Server '{server_data['server_name']}' in backend '{backend_data['name']}' already exists and is ACTIVE, will be overwritten")
                             
                             # PHASE 4: Create snapshot BEFORE update for rollback support
@@ -1713,14 +1825,15 @@ async def bulk_create_entities(
                             
                             await conn.execute("""
                                 UPDATE backend_servers SET
-                                    backend_name = $1, server_address = $2, server_port = $3, weight = $4, maxconn = $5,
-                                    check_enabled = $6, check_port = $7, backup_server = $8,
-                                    ssl_enabled = $9, ssl_verify = $10, ssl_certificate_id = $11,
-                                    ssl_sni = $12, ssl_min_ver = $13, ssl_max_ver = $14, ssl_ciphers = $15,
-                                    cookie_value = $16, inter = $17, fall = $18, rise = $19,
+                                    backend_id = $1, backend_name = $2, server_address = $3, server_port = $4, weight = $5, maxconn = $6,
+                                    check_enabled = $7, check_port = $8, backup_server = $9,
+                                    ssl_enabled = $10, ssl_verify = $11, ssl_certificate_id = $12,
+                                    ssl_sni = $13, ssl_min_ver = $14, ssl_max_ver = $15, ssl_ciphers = $16,
+                                    cookie_value = $17, inter = $18, fall = $19, rise = $20,
                                     is_active = TRUE, last_config_status = 'PENDING', updated_at = CURRENT_TIMESTAMP
-                                WHERE id = $20
+                                WHERE id = $21
                             """,
+                                backend_id,  # Fix backend_id if it drifted after soft-delete/re-create
                                 backend_data["name"],  # backend_name - keep consistent
                                 server_data["server_address"],
                                 server_data["server_port"],
@@ -1760,7 +1873,7 @@ async def bulk_create_entities(
                                     "overwritten": True
                                 })
                             
-                            backend_has_new_servers = True
+                            backend_has_server_changes = True
                         else:
                             # Server doesn't exist - INSERT new
                             server_id = await conn.fetchval("""
@@ -1803,7 +1916,7 @@ async def bulk_create_entities(
                                 "name": server_data["server_name"],
                                 "backend": backend_data["name"]
                             })
-                            backend_has_new_servers = True
+                            backend_has_server_changes = True
                             
                             # PHASE 4: Create snapshot for new server (CREATE operation)
                             snapshot = await save_entity_snapshot(
@@ -1818,14 +1931,14 @@ async def bulk_create_entities(
                     
                     # If backend wasn't updated but has new servers, add to updated_entities
                     # This ensures backend gets marked as PENDING for Apply Management
-                    if backend_has_new_servers and existing and backend_data.get("_isUpdate"):
+                    if backend_has_server_changes and existing and backend_data.get("_isUpdate"):
                         if backend_id not in [b["id"] for b in updated_entities["backends"]]:
                             updated_entities["backends"].append({
                                 "id": backend_id,
                                 "name": backend_data["name"],
                                 "was_inactive": not existing['is_active']
                             })
-                            logger.info(f"Backend '{backend_data['name']}' marked for update (new servers added)")
+                            logger.info(f"Backend '{backend_data['name']}' marked for update (server changes detected)")
             
             # BULK IMPORT MVP: Process frontends with UPSERT (merge strategy)
             for frontend_data in request.frontends:
@@ -1840,9 +1953,11 @@ async def bulk_create_entities(
                     continue
                 
                 # Check if frontend already exists (check both active AND inactive)
+                # ORDER BY is_active DESC ensures active frontend is preferred over soft-deleted duplicates
                 existing = await conn.fetchrow("""
                     SELECT id, is_active FROM frontends 
                     WHERE name = $1 AND cluster_id = $2
+                    ORDER BY is_active DESC
                 """, frontend_data["name"], request.cluster_id)
                 
                 frontend_id = None

@@ -474,8 +474,11 @@ backend web-backend
         if (record._isNew) {
           return <Tag color="green">NEW</Tag>;
         } else if (record._isUpdate) {
+          const tooltipText = record._hasServerChanges && !record._changes
+            ? 'Server changes detected - server updates will be applied'
+            : 'Existing backend - values will be compared and updated fields will be saved';
           return (
-            <Tooltip title="Existing backend - values will be compared and updated fields will be saved">
+            <Tooltip title={tooltipText}>
               <Tag color="orange">UPDATE</Tag>
             </Tooltip>
           );
@@ -543,9 +546,20 @@ backend web-backend
       width: 90,
       render: (_, record) => {
         if (record._isNew) {
-          return <Tag color="green">New</Tag>;
+          return <Tag color="green">NEW</Tag>;
+        } else if (record._isUpdate) {
+          const changedFields = record._changes ? Object.keys(record._changes).join(', ') : '';
+          return (
+            <Tooltip title={changedFields ? `Changed: ${changedFields}` : 'Server will be updated'}>
+              <Tag color="orange">UPDATE</Tag>
+            </Tooltip>
+          );
         } else {
-          return <Tag color="blue">Exists</Tag>;
+          return (
+            <Tooltip title="Server already exists with identical configuration">
+              <Tag color="default">NO CHANGES</Tag>
+            </Tooltip>
+          );
         }
       }
     },
@@ -1022,6 +1036,9 @@ backend web-backend
                       <Tag color="purple">{parseResult.summary.total_servers_count} total</Tag>
                       {parseResult.summary.new_servers > 0 && (
                         <Tag color="green">{parseResult.summary.new_servers} new</Tag>
+                      )}
+                      {parseResult.summary.update_servers > 0 && (
+                        <Tag color="orange">{parseResult.summary.update_servers} update</Tag>
                       )}
                     </Space>
                   </Descriptions.Item>

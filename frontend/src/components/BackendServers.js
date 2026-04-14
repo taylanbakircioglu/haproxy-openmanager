@@ -100,6 +100,8 @@ const BackendServers = () => {
   const [pendingChanges, setPendingChanges] = useState(false);
   const [versionModalVisible, setVersionModalVisible] = useState(false);
   const [selectedEntityForVersion, setSelectedEntityForVersion] = useState(null);
+  const [selectedBackendKeys, setSelectedBackendKeys] = useState([]);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [backendForm] = Form.useForm();
   const [serverForm] = Form.useForm();
 
@@ -116,12 +118,12 @@ const BackendServers = () => {
 
   useEffect(() => {
     // CRITICAL FIX: Clear state when cluster changes to prevent showing other cluster's data
-    // Race condition: Old cluster data remains visible while new cluster data is fetching
     if (selectedCluster) {
       setBackends([]);
       setFilteredBackends([]);
       setFrontends([]);
       setSslCertificates([]);
+      setSelectedBackendKeys([]);
     }
     
     fetchBackends();
@@ -651,6 +653,71 @@ const BackendServers = () => {
             8
           );
         }
+      }
+    });
+  };
+
+  const handleBulkDeleteBackends = () => {
+    if (!selectedCluster || selectedBackendKeys.length === 0) return;
+
+    const selectedBackends = backends.filter(b => selectedBackendKeys.includes(b.id));
+    const names = selectedBackends.map(b => b.name);
+    const displayNames = names.length <= 10
+      ? names.join(', ')
+      : `${names.slice(0, 10).join(', ')} ... and ${names.length - 10} more`;
+
+    Modal.confirm({
+      title: `Delete ${selectedBackendKeys.length} Backend(s)`,
+      content: (
+        <div>
+          <p>Are you sure you want to delete the following backends?</p>
+          <p><Text code>{displayNames}</Text></p>
+          <p><strong>This action cannot be undone.</strong></p>
+        </div>
+      ),
+      okText: 'Delete All',
+      okType: 'danger',
+      cancelText: 'Cancel',
+      onOk: async () => {
+        setBulkDeleting(true);
+        let successCount = 0;
+        let errorCount = 0;
+        const errors = [];
+
+        for (const backendId of selectedBackendKeys) {
+          try {
+            await axios.delete(`/api/backends/${backendId}`, {
+              data: { cluster_id: selectedCluster.id }
+            });
+            successCount++;
+          } catch (error) {
+            errorCount++;
+            const backend = backends.find(b => b.id === backendId);
+            const errorMsg = error.response?.data?.detail || error.message;
+            errors.push(`${backend?.name || backendId}: ${errorMsg}`);
+          }
+        }
+
+        setBulkDeleting(false);
+        setSelectedBackendKeys([]);
+
+        if (errorCount === 0) {
+          message.success(`${successCount} backend(s) deleted successfully`);
+        } else {
+          message.warning(
+            <div>
+              <div><strong>{successCount} deleted, {errorCount} failed</strong></div>
+              <div style={{ marginTop: 4, fontSize: '12px' }}>
+                {errors.slice(0, 5).map((e, i) => <div key={i}>{e}</div>)}
+                {errors.length > 5 && <div>... and {errors.length - 5} more errors</div>}
+              </div>
+            </div>,
+            10
+          );
+        }
+
+        fetchBackends();
+        checkPendingChanges();
       }
     });
   };
@@ -1439,7 +1506,7 @@ const BackendServers = () => {
           </Title>
         </Col>
         <Col span={12} style={{ textAlign: 'right' }}>
-          <Space>
+          <Space wrap>
             <Space>
               <span style={{ fontSize: 12 }}>Pending</span>
               <Switch
@@ -1524,6 +1591,16 @@ const BackendServers = () => {
             >
               Add Backend
             </Button>
+            {selectedBackendKeys.length > 0 && (
+              <Button
+                danger
+                icon={<DeleteOutlined />}
+                onClick={handleBulkDeleteBackends}
+                loading={bulkDeleting}
+              >
+                Delete Selected ({selectedBackendKeys.length})
+              </Button>
+            )}
             {pendingChanges && (
               <Button
                 type="primary"
@@ -1550,6 +1627,10 @@ const BackendServers = () => {
               dataSource={filteredBackends}
               rowKey="id"
               loading={loading}
+              rowSelection={{
+                selectedRowKeys: selectedBackendKeys,
+                onChange: setSelectedBackendKeys,
+              }}
               expandable={{
                 expandedRowRender: record => {
                   // CRITICAL FIX: Handle null/undefined servers array for backends without servers
