@@ -934,6 +934,45 @@ async def parse_bulk_config(
                 "request_headers": backend.request_headers,
                 "response_headers": backend.response_headers,
                 "options": backend.options,
+        # Strip auto-generated ACME content from parsed data.
+        # HAProxy config generator injects ACME challenge routing when acme_enabled.
+        # These are internal, auto-managed rules that should not appear in bulk import
+        # preview or be stored in the database as user-defined configuration.
+        backends_data = [b for b in backends_data if b["name"] != "_acme_challenge_backend"]
+
+        for frontend in frontends_data:
+            frontend["acl_rules"] = [
+                r for r in (frontend.get("acl_rules") or [])
+                if "is_acme_challenge" not in r
+            ]
+            frontend["use_backend_rules"] = [
+                r for r in (frontend.get("use_backend_rules") or [])
+                if "_acme_challenge_backend" not in r
+            ]
+            if frontend.get("request_headers"):
+                lines = [
+                    l for l in frontend["request_headers"].split("\n")
+                    if "is_acme_challenge" not in l
+                ]
+                frontend["request_headers"] = "\n".join(lines) if lines else None
+            if frontend.get("tcp_request_rules"):
+                lines = [
+                    l for l in frontend["tcp_request_rules"].split("\n")
+                    if "is_acme_challenge" not in l
+                ]
+                frontend["tcp_request_rules"] = "\n".join(lines) if lines else None
+            if frontend.get("default_backend") == "_acme_challenge_backend":
+                remaining = frontend.get("use_backend_rules") or []
+                if remaining:
+                    m = re.match(r'^use_backend\s+(\S+)', remaining[0])
+                    frontend["default_backend"] = m.group(1) if m else None
+                else:
+                    frontend["default_backend"] = None
+
+        parse_result.warnings = [
+            w for w in parse_result.warnings if "_acme_challenge_backend" not in w
+        ]
+
                 "timeout_connect": backend.timeout_connect,
                 "timeout_server": backend.timeout_server,
                 "timeout_queue": backend.timeout_queue,
