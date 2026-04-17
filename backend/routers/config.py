@@ -934,27 +934,41 @@ async def parse_bulk_config(
                 "request_headers": backend.request_headers,
                 "response_headers": backend.response_headers,
                 "options": backend.options,
-        # Strip auto-generated ACME content from parsed data.
-        # HAProxy config generator injects ACME challenge routing when acme_enabled.
-        # These are internal, auto-managed rules that should not appear in bulk import
-        # preview or be stored in the database as user-defined configuration.
+        # Strip auto-generated content from parsed data.
+        # The config generator injects content from multiple sources (ACME, rate_limit
+        # field, WAF rules table) that the parser cannot distinguish from user-defined
+        # configuration. Strip all auto-managed patterns so the preview and comparison
+        # only reflect user-defined configuration.
+        def _is_auto_header(line):
+            s = line.strip()
+            if "is_acme_challenge" in s:
+                return True
+            if "track-sc0 src" in s:
+                return True
+            if "sc_http_req_rate(0)" in s:
+                return True
+            if s.startswith("http-request") and " waf_" in s:
+                return True
+            return False
+
+        def _strip_auto_headers(headers_str):
+            if not headers_str:
+                return None
+            lines = [l for l in headers_str.split("\n") if not _is_auto_header(l)]
+            return "\n".join(lines) if lines else None
+
         backends_data = [b for b in backends_data if b["name"] != "_acme_challenge_backend"]
 
         for frontend in frontends_data:
             frontend["acl_rules"] = [
                 r for r in (frontend.get("acl_rules") or [])
-                if "is_acme_challenge" not in r
+                if "is_acme_challenge" not in r and not r.strip().startswith("acl waf_")
             ]
             frontend["use_backend_rules"] = [
                 r for r in (frontend.get("use_backend_rules") or [])
                 if "_acme_challenge_backend" not in r
             ]
-            if frontend.get("request_headers"):
-                lines = [
-                    l for l in frontend["request_headers"].split("\n")
-                    if "is_acme_challenge" not in l
-                ]
-                frontend["request_headers"] = "\n".join(lines) if lines else None
+            frontend["request_headers"] = _strip_auto_headers(frontend.get("request_headers"))
             if frontend.get("tcp_request_rules"):
                 lines = [
                     l for l in frontend["tcp_request_rules"].split("\n")
