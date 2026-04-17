@@ -2637,6 +2637,10 @@ SYSTEM_INFO_EOF
         local haproxy_stats_csv=$(get_haproxy_stats_csv)
         local system_info=$(collect_system_info)
 
+        # Detect primary IP for backend update
+        local agent_ip=""
+        agent_ip=$(ifconfig | grep "inet " | grep -v 127.0.0.1 | head -1 | awk '{print $2}' 2>/dev/null || echo "")
+
         # Get HAProxy version for heartbeat (safe extraction, fallback to "unknown")
         local haproxy_version="unknown"
         if command -v haproxy &> /dev/null; then
@@ -2657,6 +2661,7 @@ SYSTEM_INFO_EOF
         local heartbeat_payload="{
             \"name\": \"$AGENT_NAME\",
             \"hostname\": \"$(hostname)\",
+            \"ip_address\": \"$agent_ip\",
             \"status\": \"online\",
             \"platform\": \"$platform\",
             \"architecture\": \"$(uname -m)\",
@@ -2669,6 +2674,9 @@ SYSTEM_INFO_EOF
         
         # Always send keepalive state (even empty) so backend can clear stale data
         heartbeat_payload+=",\"keepalive_state\": \"$keepalive_state\",\"keepalive_ip\": \"$keepalive_ip\""
+        
+        # Include applied config version for backend tracking
+        heartbeat_payload+=",\"applied_config_version\": \"${last_applied_version:-none}\""
         
         # CRITICAL: Add haproxy_stats_csv only if available (for dashboard metrics)
         if [[ -n "$haproxy_stats_csv" && "$haproxy_stats_csv" != "" ]]; then

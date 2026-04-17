@@ -7,6 +7,8 @@ import base64
 import string
 import os
 import json
+import ipaddress
+import hashlib
 # Pipeline trigger - force backend redeploy v2
 
 from models import AgentCreate
@@ -597,13 +599,12 @@ async def generate_install_script(req_data: AgentScriptRequest, request: Request
             
             # Sync file template to database for future use
             try:
+                file_hash = hashlib.sha256(script_template.encode()).hexdigest()
                 await conn.execute("""
-                    INSERT INTO agent_script_templates (platform, version, script_content, is_active)
-                    VALUES ($1, $2, $3, true)
-                    ON CONFLICT (platform, version) DO UPDATE SET
-                        script_content = EXCLUDED.script_content,
-                        updated_at = CURRENT_TIMESTAMP
-                """, platform_key, latest_version, script_template)
+                    INSERT INTO agent_script_templates (platform, version, script_content, source_file_hash, is_active)
+                    VALUES ($1, $2, $3, $4, true)
+                    ON CONFLICT (platform, version) DO NOTHING
+                """, platform_key, latest_version, script_template, file_hash)
                 logger.info(f"SCRIPT SYNC: Synced file template to database for {platform_key} version {latest_version}")
             except Exception as sync_error:
                 logger.warning(f"Could not sync template to database: {sync_error}")
@@ -847,6 +848,27 @@ async def delete_agent(agent_id: int, authorization: str = Header(None)):
         logger.error(f"Failed to delete agent: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
 
+def _safe_ip_for_inet(ip_str: Optional[str]) -> Optional[str]:
+    """Validate IP string for PostgreSQL INET column. Returns None for invalid/empty."""
+    if not ip_str or not ip_str.strip():
+        return None
+    try:
+        ipaddress.ip_address(ip_str.strip())
+        return ip_str.strip()
+    except ValueError:
+        return None
+
+def _extract_agent_ip(heartbeat_data: AgentHeartbeat) -> Optional[str]:
+    """Extract validated IP from heartbeat - top-level first, then system_info fallback."""
+    ip = _safe_ip_for_inet(heartbeat_data.ip_address)
+    if ip:
+        return ip
+    if heartbeat_data.system_info and isinstance(heartbeat_data.system_info, dict):
+        ip = _safe_ip_for_inet(heartbeat_data.system_info.get("ip_address"))
+        if ip:
+            return ip
+    return None
+
 @router.post("/{agent_id}/heartbeat")
 async def agent_heartbeat(agent_id: int, heartbeat_data: AgentHeartbeat):
     """Receive agent heartbeat and update status."""
@@ -862,10 +884,11 @@ async def agent_heartbeat(agent_id: int, heartbeat_data: AgentHeartbeat):
                 haproxy_version = COALESCE($4, haproxy_version),
                 keepalive_state = CASE WHEN $5::text IS NOT NULL THEN NULLIF($5::text, '') ELSE keepalive_state END,
                 keepalive_ip = CASE WHEN $6::text IS NOT NULL THEN NULLIF($6::text, '') ELSE keepalive_ip END,
+                ip_address = COALESCE($7::inet, ip_address),
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
         """, agent_id, heartbeat_data.hostname, heartbeat_data.haproxy_status, heartbeat_data.haproxy_version,
-            heartbeat_data.keepalive_state, heartbeat_data.keepalive_ip)
+            heartbeat_data.keepalive_state, heartbeat_data.keepalive_ip, _extract_agent_ip(heartbeat_data))
         
         await close_database_connection(conn)
         
@@ -1603,6 +1626,24 @@ async def agent_heartbeat_by_name(
                 detected_platform = 'linux'
                 logger.info(f"PLATFORM AUTO-DETECT: Agent '{agent_name}' platform defaulted to 'linux' (unknown)")
 
+        # Extract validated agent IP (returns None for invalid/empty)
+        agent_ip = _extract_agent_ip(heartbeat_data)
+
+        # IP/VIP change detection (non-critical logging)
+        try:
+            if agent_ip or heartbeat_data.keepalive_ip:
+                current_agent = await conn.fetchrow(
+                    "SELECT ip_address, keepalive_ip FROM agents WHERE id = $1", agent_id)
+                if current_agent:
+                    old_ip = str(current_agent['ip_address']) if current_agent['ip_address'] else None
+                    old_vip = current_agent['keepalive_ip']
+                    if agent_ip and old_ip and agent_ip != old_ip:
+                        logger.info(f"IP CHANGE: Agent '{agent_name}' (id={agent_id}) IP changed: {old_ip} -> {agent_ip}")
+                    if heartbeat_data.keepalive_ip and old_vip and heartbeat_data.keepalive_ip != old_vip:
+                        logger.info(f"VIP CHANGE: Agent '{agent_name}' (id={agent_id}) VIP changed: {old_vip} -> {heartbeat_data.keepalive_ip}")
+        except Exception:
+            pass  # Non-critical, never break heartbeat processing
+
         # CRITICAL FIX: Only update applied_config_version if agent sends a VALID value
         # Agent sends "none" on startup before any config is applied - don't override DB value with this
         update_applied_version = heartbeat_data.applied_config_version and heartbeat_data.applied_config_version not in ["none", ""]
@@ -1639,7 +1680,7 @@ async def agent_heartbeat_by_name(
             # Convert lists to JSON for JSONB columns
             heartbeat_data.network_interfaces if isinstance(heartbeat_data.network_interfaces, str) else json.dumps(heartbeat_data.network_interfaces or []),
             heartbeat_data.capabilities if isinstance(heartbeat_data.capabilities, str) else json.dumps(heartbeat_data.capabilities or []),
-            heartbeat_data.ip_address, heartbeat_data.haproxy_status, heartbeat_data.haproxy_version,
+            agent_ip, heartbeat_data.haproxy_status, heartbeat_data.haproxy_version,
             heartbeat_data.applied_config_version, new_status, update_applied_version,
             heartbeat_data.keepalive_state, heartbeat_data.keepalive_ip)
 
@@ -2432,8 +2473,6 @@ async def get_agent_versions(authorization: str = Header(None)):
             ORDER BY platform, created_at DESC
         """)
         
-        await close_database_connection(conn)
-        
         # Group by platform
         result = {}
         for version_row in versions:
@@ -2464,7 +2503,43 @@ async def get_agent_versions(authorization: str = Header(None)):
                     "created_at": "2024-01-23T00:00:00Z"
                 }]
         
-        return {"platforms": result}
+        # Detect if on-disk agent scripts differ from database (new version shipped)
+        script_update_available = False
+        try:
+            script_files = {'linux': 'linux_install.sh', 'macos': 'macos_install.sh'}
+            for platform_key, filename in script_files.items():
+                file_path = os.path.join(os.path.dirname(__file__), '..', 'utils', 'agent_scripts', filename)
+                if not os.path.exists(file_path):
+                    continue
+                with open(file_path, 'r') as f:
+                    current_file_hash = hashlib.sha256(f.read().encode()).hexdigest()
+
+                db_row = await conn.fetchrow("""
+                    SELECT source_file_hash FROM agent_script_templates
+                    WHERE platform = $1 AND is_active = true
+                    ORDER BY updated_at DESC LIMIT 1
+                """, platform_key)
+
+                if db_row and db_row['source_file_hash']:
+                    if current_file_hash != db_row['source_file_hash']:
+                        script_update_available = True
+                        break
+                else:
+                    db_content_row = await conn.fetchrow("""
+                        SELECT script_content FROM agent_script_templates
+                        WHERE platform = $1 AND is_active = true
+                        ORDER BY updated_at DESC LIMIT 1
+                    """, platform_key)
+                    if db_content_row:
+                        db_hash = hashlib.sha256(db_content_row['script_content'].encode()).hexdigest()
+                        if current_file_hash != db_hash:
+                            script_update_available = True
+                            break
+        except Exception as e:
+            logger.warning(f"Script update detection failed: {e}")
+
+        await close_database_connection(conn)
+        return {"platforms": result, "script_update_available": script_update_available}
         
     except HTTPException:
         raise
@@ -2764,7 +2839,7 @@ async def get_agent_activity_logs(agent_name: str, limit: int = 50, authorizatio
 
 # ==== HELPER FUNCTION FOR SCRIPT UPDATES ====
 
-async def update_agent_script_in_database(conn, platform: str, version: str, script_content: str, changelog: list = None):
+async def update_agent_script_in_database(conn, platform: str, version: str, script_content: str, changelog: list = None, source_file_hash: str = None):
     """
     Helper function to update agent script in database
     Used by both Edit and Reset to Default operations
@@ -2778,13 +2853,14 @@ async def update_agent_script_in_database(conn, platform: str, version: str, scr
     
     # Insert/update version with script content in agent_script_templates
     await conn.execute("""
-        INSERT INTO agent_script_templates (platform, version, script_content, is_active)
-        VALUES ($1, $2, $3, true)
+        INSERT INTO agent_script_templates (platform, version, script_content, source_file_hash, is_active)
+        VALUES ($1, $2, $3, $4, true)
         ON CONFLICT (platform, version) DO UPDATE SET
             script_content = EXCLUDED.script_content,
+            source_file_hash = COALESCE(EXCLUDED.source_file_hash, agent_script_templates.source_file_hash),
             is_active = true,
             updated_at = CURRENT_TIMESTAMP
-    """, platform, version, script_content)
+    """, platform, version, script_content, source_file_hash)
     
     # CRITICAL: Also update agent_versions table for UI to display correct Available version
     # Deactivate all existing versions in agent_versions
@@ -2910,11 +2986,13 @@ async def sync_scripts_from_files(
                     new_version = "1.0.0"
             
             # Use the same update logic as Edit operation
+            file_hash = hashlib.sha256(file_content.encode()).hexdigest()
             await update_agent_script_in_database(
                 conn=conn,
                 platform=platform_key,
                 version=new_version,
                 script_content=file_content,
+                source_file_hash=file_hash,
                 changelog=["Reset to file-based defaults", "Original stable version"]
             )
             

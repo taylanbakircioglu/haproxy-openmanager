@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+import hashlib
 import secrets
 from datetime import datetime, timedelta
 from database.connection import get_database_connection, close_database_connection
@@ -1585,6 +1586,7 @@ async def run_all_migrations():
     await ensure_validation_error_columns()
     await remove_haproxy_user_group_columns()
     await ensure_agent_versions_table()
+    await ensure_agent_script_templates_source_hash()
     await ensure_agent_script_templates_table()
     await ensure_agent_activity_logs_table()
     await ensure_agent_config_management_tables()
@@ -2544,6 +2546,7 @@ async def ensure_agent_script_templates_table():
                 platform VARCHAR(50) NOT NULL,
                 version VARCHAR(20) NOT NULL,
                 script_content TEXT NOT NULL,
+                source_file_hash VARCHAR(64),
                 is_active BOOLEAN DEFAULT true,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -2568,13 +2571,12 @@ async def ensure_agent_script_templates_table():
             with open(macos_script_path, 'r') as f:
                 macos_script = f.read()
             
+            macos_hash = hashlib.sha256(macos_script.encode()).hexdigest()
             await conn.execute("""
-                INSERT INTO agent_script_templates (platform, version, script_content) 
-                VALUES ('macos', $1, $2)
-                ON CONFLICT (platform, version) DO UPDATE SET
-                script_content = EXCLUDED.script_content,
-                updated_at = CURRENT_TIMESTAMP
-            """, macos_current_version, macos_script)
+                INSERT INTO agent_script_templates (platform, version, script_content, source_file_hash) 
+                VALUES ('macos', $1, $2, $3)
+                ON CONFLICT (platform, version) DO NOTHING
+            """, macos_current_version, macos_script, macos_hash)
             
             logger.info(f"✅ Loaded macOS script template version {macos_current_version}")
         
@@ -2584,13 +2586,12 @@ async def ensure_agent_script_templates_table():
             with open(linux_script_path, 'r') as f:
                 linux_script = f.read()
             
+            linux_hash = hashlib.sha256(linux_script.encode()).hexdigest()
             await conn.execute("""
-                INSERT INTO agent_script_templates (platform, version, script_content) 
-                VALUES ('linux', $1, $2)
-                ON CONFLICT (platform, version) DO UPDATE SET
-                script_content = EXCLUDED.script_content,
-                updated_at = CURRENT_TIMESTAMP
-            """, linux_current_version, linux_script)
+                INSERT INTO agent_script_templates (platform, version, script_content, source_file_hash) 
+                VALUES ('linux', $1, $2, $3)
+                ON CONFLICT (platform, version) DO NOTHING
+            """, linux_current_version, linux_script, linux_hash)
             
             logger.info(f"✅ Loaded Linux script template version {linux_current_version}")
         
@@ -2602,6 +2603,22 @@ async def ensure_agent_script_templates_table():
             await close_database_connection(conn)
         logger.error(f"Error creating agent_script_templates table: {e}")
         # Don't raise - this is not critical for system operation
+
+async def ensure_agent_script_templates_source_hash():
+    """Add source_file_hash column to agent_script_templates for update detection"""
+    conn = None
+    try:
+        conn = await get_database_connection()
+        await conn.execute("""
+            ALTER TABLE agent_script_templates
+            ADD COLUMN IF NOT EXISTS source_file_hash VARCHAR(64)
+        """)
+        await close_database_connection(conn)
+        logger.info("Agent script templates source_file_hash column ensured")
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"Error adding source_file_hash column: {e}")
 
 async def ensure_agent_config_management_tables():
     """Create tables for Configuration Management feature"""

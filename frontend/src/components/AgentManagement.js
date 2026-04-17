@@ -185,6 +185,7 @@ const AgentManagement = () => {
   const [scriptHasChanges, setScriptHasChanges] = useState(false); // Track if script has changes
   const [scriptSaving, setScriptSaving] = useState(false); // Track script saving state
   const [currentEditingPlatform, setCurrentEditingPlatform] = useState(null); // Track which platform is being edited
+  const [scriptUpdateAvailable, setScriptUpdateAvailable] = useState(false);
   
   const { clusters, selectedCluster } = useCluster();
   const { hasPermission, isAdmin } = useAuth();
@@ -702,6 +703,7 @@ const AgentManagement = () => {
       });
       
       setAgentVersions(platforms);
+      setScriptUpdateAvailable(response.data.script_update_available || false);
     } catch (error) {
       message.error('Failed to fetch agent versions: ' + (error.response?.data?.detail || error.message));
     } finally {
@@ -763,6 +765,8 @@ const AgentManagement = () => {
           ),
           duration: 10,
         });
+        
+        setScriptUpdateAvailable(false);
         
         // Refresh agent versions to show new versions
         await fetchAgentVersions();
@@ -1569,11 +1573,14 @@ const AgentManagement = () => {
           <Alert
             message="This will sync agent scripts from files to database"
             description={
-              <ul style={{ marginTop: '8px', paddingLeft: '20px', marginBottom: 0 }}>
-                <li>Override any manual script edits in database</li>
-                <li>All existing agents will detect new version</li>
-                <li>Agents can upgrade to latest script</li>
-              </ul>
+              <div>
+                <ul style={{ marginTop: '8px', paddingLeft: '20px', marginBottom: 8 }}>
+                  <li>File-based default scripts will be written to the database</li>
+                  <li><strong>All custom script edits made via the UI editor will be lost</strong></li>
+                  <li>All existing agents will detect the new version</li>
+                  <li>Agents with customized scripts will revert to the default version after upgrade</li>
+                </ul>
+              </div>
             }
             type="warning"
             showIcon
@@ -1749,6 +1756,28 @@ const AgentManagement = () => {
 
         <Divider />
 
+        {scriptUpdateAvailable && (
+          <Alert
+            message="New Agent Script Version Available"
+            description={
+              <div>
+                <p style={{ marginBottom: 8 }}>
+                  A newer version of agent scripts has been shipped with this OpenManager update. 
+                  To apply the update, go to the <strong>Agent Script Management</strong> tab and click <strong>Reset to Defaults</strong>.
+                </p>
+                <p style={{ marginBottom: 0, color: '#faad14' }}>
+                  <strong>Warning:</strong> Reset to Defaults will overwrite any custom script edits made via the UI editor. 
+                  Agents with customized scripts will revert to the default version after upgrade.
+                </p>
+              </div>
+            }
+            type="warning"
+            showIcon
+            closable
+            style={{ marginBottom: 16 }}
+          />
+        )}
+
         {/* Registered Agents and Script Management */}
         <Tabs defaultActiveKey="agents">
           <TabPane 
@@ -1902,9 +1931,10 @@ const AgentManagement = () => {
                         <Text strong>⚠️ This will:</Text>
                         <ul style={{ marginTop: '8px', marginBottom: '8px', paddingLeft: '20px' }}>
                           <li>Reset all agent scripts to file-based defaults (from code)</li>
-                          <li>Discard any UI edits you've made</li>
+                          <li><strong>All custom script edits made via the UI editor will be permanently lost</strong></li>
                           <li>Create new versions with latest bug fixes</li>
                           <li>All existing agents will need to be upgraded</li>
+                          <li>Agents with customized scripts will revert to the default version</li>
                         </ul>
                         <Text type="warning">
                           💡 Use this after code updates to apply fixes to database
