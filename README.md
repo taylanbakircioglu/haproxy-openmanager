@@ -249,6 +249,8 @@ This architecture provides better security (no inbound connections to HAProxy se
 - **External Account Binding (EAB)**: Support for CAs that require EAB (ZeroSSL, Google Trust Services)
 - **Structured Error Diagnostics** *(v1.4.0)*: All ACME failures (challenge, finalize, download) persist structured JSON to `letsencrypt_orders.error_detail` for clear post-mortem analysis
 - **Audit Logging** *(v1.4.0)*: Every ACME operation (request, revoke, CA-chain import, account ops) is captured in `user_activity_logs` for compliance review
+- **ACME Diagnostic Panel** *(v1.5.0 — Issue #13)*: Live pre-flight + post-failure diagnostics (DNS / port-80 / routing / account / agents) and merged event timeline (`acme_order_events` + correlated `user_activity_logs`) accessible from the ACME Automation page; humanized error rendering for 11+ RFC8555 problem types with backwards-compatible fallback for legacy plain-string `error_detail`; per-user 5/min rate-limit
+- **New Site Setup Wizard** *(v1.5.0 — Issue #14)*: Single guided flow that creates a Backend + Servers + HTTP Frontend (and optional HTTPS Frontend with chosen SSL mode: ACME / Upload / Existing / None) in one atomic transaction, with diff preview, draft persistence (PEM stripped), and ACME-staged order completion gated by agent confirmation. Per-mode reject path cleanly rolls back including any wizard-staged ACME orders.
 - **Backward Compatible**: ACME-managed and manually uploaded certificates coexist seamlessly; existing SSL workflows are completely unaffected
 
 #### Integration & API
@@ -2192,6 +2194,749 @@ Developed with ❤️ for the HAProxy community
 - [FastAPI](https://fastapi.tiangolo.com/) - Backend framework
 - [React.js](https://reactjs.org/) - Frontend framework
 - [Ant Design](https://ant.design/) - UI component library
+
+---
+
+## Release Notes
+
+### v1.5.0 — ACME Diagnostics & Site Wizard
+
+#### Highlights
+
+- **Issue #13: ACME Diagnostic Panel.** From the ACME Automation list, click the new `Diagnose` button (or the order's status tag) to launch a Modal with three Tabs:
+  1. **Pre-flight Checks** — DNS resolution, port-80 reachability, HAProxy routing, ACME account status, agent health. Each check has its own `Re-run` button.
+  2. **Event Log** — Merged timeline of typed `acme_order_events` rows (added in v1.5.0) and correlated `user_activity_logs` entries; auto-tails every 5s while the order is in `pending`/`processing`.
+  3. **Raw Error** — Humanized error display covering 11+ RFC8555 problem types (`badNonce`, `caa`, `connection`, `rateLimited`, `unauthorized`, ...) with full backwards compatibility for legacy plain-string `error_detail`.
+- **Issue #14: New Site Setup Wizard.** A single guided flow (`/sites/new`) that creates a Backend + Servers + HTTP Frontend (and optional HTTPS Frontend) in one atomic transaction. SSL choice supports four modes:
+  - `acme` — defers HTTPS frontend creation to a deferred `post_completion_actions` block on a wizard-staged ACME order; the order is promoted to a real LE call only after the agent confirms the gating `bulk-site-create-{ts}` config version (legacy `bulk-proxied-host-create-{ts}` is still recognised by the reject path for historical APPLIED versions).
+  - `upload` — uploads PEM cert+key in the same transaction.
+  - `existing` — reuses an admin-uploaded cert and ensures the cluster junction is set.
+  - `none` — HTTP-only host.
+  The wizard ships with the same visual ACL rule builder used by the standalone Frontend Management page (Routing & ACLs section on the Frontend step) so operators define `acl` / `use_backend` / `redirect` rules from cluster-scoped backend dropdowns instead of free-text HAProxy directives. Drafts persist for 30 days with PEM material stripped at rest. Reject of the wizard's PENDING version cleanly rolls back ALL wizard entities (backends, servers, frontend(s), SSL row if any, AND the wizard-staged `letsencrypt_orders` row).
+
+#### Migration Release Notes
+
+This release adds **idempotent** migrations only — no destructive schema changes:
+
+- New columns on `letsencrypt_orders`:
+  - `post_completion_actions JSONB` (deferred actions for wizard ACME mode)
+  - `wizard_staged_until TIMESTAMPTZ` (24h timeout for wizard-staged orders)
+  - `pending_apply_version_name VARCHAR(255)` + partial index `WHERE status='wizard_staged'`
+  - `created_by INTEGER REFERENCES users(id) ON DELETE SET NULL`
+- New tables: `acme_order_events` (typed event log, 90d retention), `wizard_drafts` (30d retention).
+- New composite index `idx_user_activity_logs_user_action_time` for the per-user-per-minute rate-limit COUNT(*) used by both new features.
+
+The `letsencrypt_orders.status` column has no CHECK constraint; the new `wizard_staged` value coexists with all existing statuses (`pending`, `ready`, `processing`, `valid`, `invalid`, ...).
+
+The reject path's force-delete fallback now also covers `entity_type='letsencrypt_order'` snapshots so wizard-staged ACME orders are removed when their parent PENDING version is rejected.
+
+#### Rollback Considerations
+
+- **Forward compatibility (v1.5.0 → future).** All new columns/tables are additive; older code paths that do not know about them are unaffected.
+- **Backward rollback (v1.5.0 → v1.4.0).** The new columns/tables remain in the database harmlessly; v1.4.0 simply ignores them. Wizard-staged ACME orders that were never promoted to `pending` will not progress on v1.4.0 (the v1.4.0 background task does not select `status='wizard_staged'`); admins can either:
+  1. Wait for the 24h `wizard_staged_until` timeout to fire (v1.5.0 only) — only relevant if rolling back temporarily, OR
+  2. Manually `DELETE FROM letsencrypt_orders WHERE status='wizard_staged'` and re-run the wizard once you re-deploy v1.5.0.
+- **Wizard ACME failure scenarios.** If the agent never confirms the gating config version (e.g. agent down), the wizard-staged ACME order will time out and transition to `status='invalid'` after 24h with `error_detail='wizard staged timeout (>24h with no agent confirm)'` — surfaced in the new Diagnostic Panel.
+- **Drafts.** PEM material is server-side stripped from `wizard_drafts.payload`; rolling back will not leak keys at rest.
+
+#### v1.5.x — Site Wizard module rename + ACL UX parity
+
+A non-breaking follow-up to v1.5.0 that retires the internal "Proxied Host" namespace in favour of "Site" everywhere it used to leak into operators' workflow:
+
+- **Module file rename.** `backend/routers/proxied_host.py` and `backend/models/proxied_host.py` are now `site_wizard.py`. The Pydantic class `ProxiedHostCreate` (and its sibling `ProxiedHostPreflightAcme` / `ProxiedHostDraftCreate`) was renamed to `SiteCreate` etc. with a module-level alias `ProxiedHostCreate = SiteCreate` so existing imports keep working.
+- **API URL prefix rename.** The wizard now mounts at `/api/sites/*` (canonical). The legacy `/api/proxied-hosts/*` slug is preserved as a hidden `308 Permanent Redirect` alias on `main.py`, so external integrators keep working through the redirect during the transition window. The frontend axios calls all target `/api/sites/*` directly.
+- **Audit-log version-name rename.** Wizard-applied versions now carry the prefix `bulk-site-create-{ts}`. The cluster reject path on `cluster.py` recognises BOTH the new prefix and the legacy `bulk-proxied-host-create-{ts}` so historical APPLIED versions still clean up.
+- **Activity-log action + resource_type.** The wizard's explicit `log_user_activity` call now writes `action='wizard_create_site'` and `resource_type='site'` (was `wizard_create_proxied_host` / `proxied_host`). Older audit rows already in the database keep their pre-rename strings.
+- **Rate-limit dual-name aliasing.** The wizard's per-user-per-minute rate-limit (`COUNT(*)` over `user_activity_logs`) now passes `ANY($::text[])` so it counts BOTH the canonical `site_*` action_name and its legacy `proxied_host_*` companion. A deploy that lands mid-minute cannot reset the quota, and the limit cannot be bypassed by an attacker who picks the legacy name.
+- **DB schema rebrand (Phase I).** The `wizard_drafts.wizard_type` column's schema-level `DEFAULT` flipped from `'proxied_host'` to `'site'`. New rows land with the canonical value via an explicit `INSERT … VALUES ($1, 'site', …)`. The list / cap / cluster-delete-purge queries all filter on `wizard_type IN ('site', 'proxied_host')` so pre-rebrand drafts owned by the same user remain visible and remain rejectable. **Existing rows are NOT row-rewritten** — the migration is a metadata-only `ALTER TABLE … SET DEFAULT 'site'` that takes a non-blocking lock and is idempotent.
+- **Wizard ACL UX parity.** The Frontend step now embeds the same `ACLRuleBuilder` component used by the Frontend Management page, with cluster-scoped existing backends populated automatically and the wizard's brand-new backend surfaced as a virtual entry in the use_backend dropdown. Drafts persist the three rule arrays so a resumed draft hydrates with the same routing config.
+
+Backward compatibility is preserved at every layer: the DB-level `wizard_drafts.wizard_type='proxied_host'` enum value (still valid for pre-rebrand rows), the `LEGACY_WIZARD_DRAFT_SESSION_KEY` browser sessionStorage key, frontend route aliases (`/proxied-hosts/new`, `/proxied-hosts/drafts`), and the legacy `/api/proxied-hosts/*` URL all keep working.
+
+##### Phase J — UI mount-time race fix ("clusters don't appear after deploy")
+
+**Reported symptom.** After every rolling deploy, operators saw the cluster
+selector empty for "a long time" — closing and re-opening the browser did
+not help, but waiting ~30s did. The user diagnosed it as a UI problem.
+
+**Root cause.** A React mount-time race between `<AuthProvider>` (parent)
+and `<ClusterProvider>` (child). React's useEffect commit phase fires
+CHILD effects before PARENT effects, so `ClusterProvider.useEffect` —
+which dispatches the very first `axios.get('/api/clusters')` — ran BEFORE
+`AuthProvider.useEffect` set `axios.defaults.headers.common['Authorization']`.
+The first request went out un-authenticated → backend returned 401 →
+ClusterContext's `catch` block silently committed `clusters=[]`. The
+operator-visible UI rendered "no clusters" until the 30-second
+auto-refresh interval re-fired the request, by which point auth had
+hydrated and the call succeeded. Restarting the browser kept hitting the
+same race because localStorage carried the token but the useEffect
+ordering was identical.
+
+**Fix (3 layers of defence).**
+
+1. **`src/index.js` module-level axios bootstrap.** Runs before
+   `<App />` is rendered, so no React tree (and therefore no useEffect)
+   can fire before it. Synchronously seeds
+   `axios.defaults.headers.common['Authorization']` from localStorage
+   AND installs an `axios.interceptors.request` that re-reads the token
+   on every outbound request. The interceptor is the belt-and-suspenders
+   defence — it cannot be raced by mount ordering and survives any
+   future code path that mutates `axios.defaults`.
+2. **`AuthContext` synchronous useState lazy initialisers.** The
+   `_hydrateAuthSync` helper runs during the AuthProvider RENDER phase,
+   which precedes ANY child useEffect. It reads localStorage and seeds
+   `loading=false`, `isAuthenticated=true`, and the user object —
+   eliminating the post-mount async hydration that produced the race.
+3. **`ClusterContext` auth-gate + exponential-backoff retry.** The
+   first fetch is gated on `isAuthenticated && !authLoading`, and a
+   transient 5xx / network failure now triggers up to 4 fast retries
+   (1s, 2s, 4s, 8s — total ~15s) instead of immediately blanking the
+   cluster list and depending on the 30s auto-refresh interval. 401/403
+   intentionally do NOT retry (re-auth is the user's job). The previous
+   cluster list is preserved on transient hiccups so periodic refreshes
+   no longer flash an "empty state".
+
+**Verification.** 22 static-source pin tests in
+`backend/tests/test_frontend_auth_bootstrap_phase_j.py` cover all three
+layers (bootstrap order, AuthContext lazy init, ClusterContext retry +
+auth-gate) plus the six audit-loop hotfixes below. 590 backend tests
+pass; frontend `npm run build` clean.
+
+**Operator-visible outcome.** After deploy, the cluster selector
+populates on the FIRST fetch — no 30-second wait. A transient kube-proxy
+convergence window collapses to a few seconds (covered by retries) instead
+of being masked by the 30-second interval.
+
+##### Phase J audit hotfixes (audit fix #2 → #6)
+
+Successive audit loops surfaced six follow-on issues that each
+reproduced one or more of the original symptoms in narrower windows.
+Each fix is pinned in the same Phase J pin-test file:
+
+- **Audit fix #2 — stale closure in `fetchClusters`.** Wrapping
+  `fetchClusters` in `useCallback(…, [])` froze `selectedCluster` at
+  its mount-time value (`null`), so the 30-second auto-refresh
+  reported stale agent-health data forever. Bridged via
+  `selectedClusterRef`, updated in a passive effect, and read inside
+  the callback.
+- **Audit fix #3 — missing `setLoading(true)` on the auth-gated
+  first fetch.** During the login flow, the ClusterContext effect
+  fired with `loading=false` (the initial value), so the cluster
+  selector briefly rendered "No Cluster Selected" before the spinner
+  came back. Now the effect explicitly seeds `setLoading(true)` when
+  the auth gate flips open.
+- **Audit fix #4 — `loading=false` between retry waves.** The
+  `finally` clause unconditionally released the loading flag, so the
+  spinner blinked off between each backoff attempt and the UI
+  flashed "No Cluster Selected" for up to ~15 seconds — the very
+  symptom Phase J was meant to eliminate. The release is now gated
+  on `retryTimerRef.current === null` so the spinner stays on across
+  the entire retry budget.
+- **Audit fix #5 — exhausted retry budget left counter at 4.**
+  `retryAttemptRef` was reset only on a successful fetch and on the
+  auth-gate transition. After 4 transient failures in a row the
+  counter stayed at 4 for the rest of the session, so any subsequent
+  invocation (the 30s background refresh, an explicit refetch from a
+  mutator like `deleteCluster`) skipped the retry pattern entirely
+  on the first transient failure. The settle-into-empty-state branch
+  now resets the counter so each fresh invocation gets a full retry
+  budget.
+- **Audit fix #6 — page-content "No Cluster Selected" during the
+  fetch window.** The cluster selector itself already showed a
+  spinner via `loading`, but page-level components
+  (`SSLManagement`, `Configuration`, `DashboardV2`,
+  `BulkConfigImport`, `BulkVersionHistory`) checked
+  `!selectedCluster` directly and rendered a permanent warning
+  affordance. During the 15-second retry budget the page therefore
+  read as "you forgot to pick a cluster" even though the cluster
+  list was simply still being fetched. Each page now also consumes
+  `loading: clustersLoading` from `useCluster()` and shows a neutral
+  "Loading clusters…" affordance until the fetch settles, only then
+  flipping to the warning. This is the fix that fully closes the
+  user-visible loop on the original "clusters don't appear after
+  deploy" report.
+
+##### Phase K — Site Wizard validation hardening + UX simplification
+
+Operators reported that completing the wizard and clicking **Create &
+Apply** repeatedly surfaced opaque 422 errors at the final step:
+
+```
+HTTP→HTTPS redirect cannot be combined with custom redirect rules.
+body -> frontend -> acl_rules -> 0: Input should be a valid dictionary
+body -> frontend -> use_backend_rules -> 0: Input should be a valid dictionary
+```
+
+Root causes (each fixed by Phase K):
+
+1. **Contract mismatch on rule fields.** `ACLRuleBuilder.js`
+   serialised ACL / use_backend / redirect rules as `string[]` while
+   `FrontendStep` typed them as `List[dict]`. Every wizard POST
+   carrying a single ACL rule failed Pydantic validation. The
+   downstream renderer in `services/haproxy_config.py` had always
+   expected strings, so the schema mismatch was the stale side.
+2. **Step 2 mutex was advisory only.** The
+   `https_redirect ⊕ redirect_rules` validator existed at the model
+   level but the wizard let the operator advance through Step 2 → 3 →
+   4 with the conflict in place, only to be punted back at Create.
+3. **No HAProxy validation before Create.** `/api/sites/preview`
+   only checked collisions; the real validator ran inside the
+   `create_site` transaction *after* entity inserts. Operators
+   discovered errors at apply time.
+4. **HTTPS step overcrowded.** 11 SSL bind-line knobs flat on Step 3
+   without a defaults summary or any visible grouping.
+
+**What changed**
+
+- **Phase A — Backend contract + safety validators**
+  (`backend/models/site_wizard.py`).
+  - `acl_rules`, `use_backend_rules` are now `List[str]`.
+    `redirect_rules` stays `List[Union[str, dict]]` to preserve the
+    structured-redirect path used by the renderer's
+    `_format_redirect_rule`.
+  - Per-element safety validators reject embedded newlines (HAProxy
+    directive injection prevention), shell-substitution patterns
+    (`system`, `exec`, `eval`, `$(`, backtick — same set the
+    manual frontend API has been blocking since pre-R14), 4 KB
+    string limit, and empty / whitespace-only strings.
+  - Two new cross-field model validators close silent-bug gaps:
+    `FrontendStep.reject_tcp_mode_with_https_redirect` (the renderer
+    used to emit an HTTP-only directive into a TCP frontend) and
+    `SSLChoice.reject_inverted_tls_versions` (when both `ssl_min_ver`
+    and `ssl_max_ver` are set, reject `min > max`).
+- **Phase B — Step 2 hard-block + TCP-mode guard**
+  (`SiteWizard.js`, `ACLRuleBuilder.js`).
+  - The Step 2 Next handler now hard-blocks the
+    `https_redirect ⊕ redirect_rules` and `mode='tcp' ⊕
+    https_redirect` combinations with one-click resolve buttons
+    ("Disable HTTP→HTTPS switch" / "Remove redirect rules").
+  - Switching the frontend to TCP mode auto-clears `https_redirect`;
+    the Switch is also `disabled` while `mode==='tcp'` with an
+    explanatory tooltip.
+  - `ACLRuleBuilder` accepts a new `disableRedirectRules` prop that
+    visually disables the Redirect Rules section (`aria-disabled`,
+    greyed-out cards, tooltip) when the parent passes
+    `https_redirect=true`. The rules data stays in component state
+    so toggling the switch off restores them.
+- **Phase C — Real HAProxy dry-run gate before Create**
+  (`backend/routers/site_wizard.py`, `SiteWizard.js`).
+  - New shared helper `_synthesize_candidate_haproxy_config(body,
+    conn, *, entities_already_inserted)` is used by both
+    `create_site` (post-insert validation gate) and a new dry-run
+    path on `POST /api/sites/preview`. Two callsites pinned by
+    `test_phase_k_create_site_and_preview_use_same_synthesis_helper`
+    so the apply gate and the dry-run gate cannot silently desync.
+  - `POST /api/sites/preview` now accepts an optional
+    `validate_haproxy_config=true` query param. When set, the
+    endpoint runs `HAProxyConfigValidator` against the synthesised
+    candidate config and returns a `validation: {is_valid,
+    error_count, warning_count, errors, warnings, infos}` block in
+    the same 200 OK envelope. Validator crashes return
+    `is_valid: null` + `validator_error` (matches `create_site`'s
+    non-fatal posture). The dry-run path is rate-limited at 5/min
+    via `_enforce_rate_limit` and emits structured ENTER/EXIT
+    `logger.info` lines for telemetry. Legacy preview callers
+    (`SiteDrafts.handlePreview`) are unaffected — they pass no flag.
+  - The wizard auto-fires the dry-run on Step 4 entry with an
+    `AbortController` so rapid Step 4 → Step 2 → Step 4 navigation
+    cancels the in-flight request. A six-state validation card
+    renders inline: idle / loading / clean (green) /
+    `warnings_only` (yellow) / `errors` (red, blocks Create) /
+    `pydantic_error` (red, body-parse failures from Phase A's new
+    validators or PEM-stripped resume drafts) / `unavailable`
+    (orange, advisory — Create stays enabled to mirror the
+    validator-crash-is-non-fatal contract). Each error /
+    `pydantic_error` row gets an `Edit Step N` jumpback button via
+    a static directive→step + loc→step mapping table.
+  - Audit-fix #1 (post-implementation review): the wizard also
+    resets `dryRunResult.status` to `idle` whenever the operator
+    leaves Step 4. The ACL builder lives outside the antd Form
+    so its mutations don't fire `Form.onValuesChange`; without
+    this reset a stale `clean`/`errors`/`warnings_only` status
+    survives Step 4 → Step 2 (ACL edit) → Step 4 round-trips
+    and the auto-fire branch suppresses the next fetch. With
+    the reset every Step 4 entry triggers a fresh dry-run
+    (rate-limit-safe — entry is operator-initiated, not
+    programmatic).
+  - Audit-fix #2 (post-implementation review): the
+    `Edit Step N` jumpback now also resolves the target step
+    from the error **message text** when `loc` cannot pinpoint
+    it. Pydantic v2 raises `model_validator(mode="after")`
+    errors with `loc=()`; FastAPI prepends `'body'` so the
+    operator-visible envelope is `loc=['body']` (length 1).
+    The legacy `_locPathToStep` early-returned null for this
+    case, dropping the jumpback for PEM-stripped resume
+    ("ssl.mode='upload' requires a non-empty PEM-encoded
+    certificate_content …") and every
+    `enforce_acme_apply_and_http` cross-field rejection. A
+    small ordered pattern table recovers the step from the
+    failure message text so operators always get a working
+    "fix-from-here" button.
+  - Audit-fix #2 round 3 (post-implementation review): the
+    pattern table is ordered so cross-field ACME messages
+    route to the step the operator must EDIT to fix the
+    error, not the step that "feels related". A naive ordering
+    ("SSL first because every cross-field message starts with
+    `ssl.mode='acme'`") would route every cross-field hit to
+    Step 3, defeating the jumpback. Order is now:
+    `apply_immediately` (Step 4) → `wildcard`/`domains` (Step
+    0) → `frontend.*`/`bind_port` (Step 2) → `backend.*` (Step
+    1) → SSL catch-all (Step 3, LAST). With this ordering,
+    "ssl.mode='acme' requires apply_immediately=true" routes
+    to Step 4 (toggle the switch), "ssl.mode='acme' requires
+    frontend.bind_port=80" routes to Step 2 (edit FE port),
+    and "(HTTP-01) cannot issue wildcard certs" routes to
+    Step 0 (remove wildcard). PEM-stripped and other SSL-only
+    errors still hit Step 3 via the final catch-all.
+  - Audit-fix #2 round 4 (post-implementation review): the
+    pydantic_error renderer no longer emits a stray
+    `<strong>: </strong>` orphan-colon prefix when the failing
+    error has no field path. SiteCreate-level model_validator
+    errors land with `loc=['body']` (length 1); after dropping
+    the leading `'body'` marker the joined path is empty.
+    Pre-fix the renderer wrapped that empty string in
+    `<strong>...: </strong>`, producing a visually broken " : "
+    prefix in front of every PEM-stripped resume message and
+    every `enforce_acme_apply_and_http` cross-field rejection.
+    Post-fix the strong/colon prefix renders only when a real
+    field path exists.
+- **Phase D — HTTPS step simplification + UI parity**
+  (`SiteWizard.js`).
+  - TLS bounds (`ssl_min_ver`, `ssl_max_ver`) and the HSTS quartet
+    stay first-class on the SSL step; rarely-used knobs
+    (`https_bind_port`, `https_frontend_name_suffix`, `ssl_alpn`,
+    `ssl_ciphers`, `ssl_ciphersuites`, `ssl_strict_sni`,
+    `ssl_verify`) move into a nested **Advanced TLS settings
+    (rarely needed)** Collapse that defaults to closed. A read-only
+    summary line ("Port 443, ALPN h2,http/1.1, …") shows the safe
+    defaults that apply unless overridden.
+  - The Advanced Collapse auto-opens (`defaultActiveKey`) when a
+    saved draft has any non-default value, so resumed drafts
+    surface their custom tuning instead of silently hiding it.
+  - HSTS UI parity for the Phase A
+    `reject_hsts_preload_without_hsts` validator: the
+    `hsts_preload` Switch is `disabled` until HSTS is enabled,
+    `max-age ≥ 31536000`, AND `includeSubDomains=true`.
+    `hsts_max_age` and `hsts_include_subdomains` are also disabled
+    while `hsts_enabled=false`.
+  - TLS min/max ordering UI parity: the `ssl_min_ver` /
+    `ssl_max_ver` Selects use Antd `dependencies` + a custom
+    validator that rejects min > max client-side with the same
+    wording the Phase A model validator uses.
+
+**Backward compatibility**
+
+- The existing `/api/sites` POST envelope is unchanged.
+- The existing `/api/sites/preview` POST envelope gains an optional
+  `validation` field that legacy callers can ignore. The
+  `validate_haproxy_config` flag defaults to `false`, so
+  `SiteDrafts.handlePreview` and any external integrators keep
+  their pre-Phase K behaviour.
+- `redirect_rules` retains its `List[Union[str, dict]]` shape, so
+  any historical caller (or saved draft) that used the structured
+  dict form continues to work.
+- The Pydantic safety validators (`system`, `exec`, `eval`, `$(`,
+  backtick) match the manual frontend API's existing
+  `validate_acl_rules` posture, which has been in production
+  blocking the same substrings since pre-R14 with no operator
+  complaint. No existing wizard payload that previously round-
+  tripped through `services/haproxy_config.py` can be rejected by
+  these new validators.
+- The `_synthesize_candidate_haproxy_config` helper in
+  `entities_already_inserted=True` mode is functionally identical
+  to the previous inline `generate_haproxy_config_for_cluster`
+  call inside `create_site`. The refactor is pure DRY plumbing.
+
+##### Rollback considerations (Phase K)
+
+If you must roll back to a pre-Phase-K v1.5.x build:
+
+- **Saved drafts** with the new `acl_rules: List[str]` shape are
+  forward- and backward-compatible: the legacy build also expected
+  string elements at the renderer level, the rejection only ever
+  happened at the wizard model boundary. Operators on the legacy
+  build hit the same 422 the new build is fixing — no DB rewrite
+  needed.
+- **`/api/sites/preview` `validation` block** is a new optional
+  field; legacy frontend callers ignore unknown fields. The
+  `validate_haproxy_config` query param default is `false`, so
+  legacy callers do not exercise the dry-run branch.
+- **No DB migrations** are introduced by Phase K. The
+  `frontends.acl_rules` / `redirect_rules` / `use_backend_rules`
+  JSONB columns remain unchanged.
+
+##### Phase K Phase D — Operator-feedback follow-ups (Bulgu #1–#6)
+
+Operator review of the Phase A–C release surfaced six additional
+issues. Each is rooted in a UX inconsistency or a residual stuck
+state, and the fixes converge on a "single source of truth + ref-
+based dry-run lifecycle" architecture:
+
+- **Bulgu #1 — Cluster scope.** Pre-fix Step 0 had its own cluster
+  Select dropdown decoupled from the header. Operators routinely
+  picked cluster A in the header and cluster B in the wizard with
+  zero visual signal that the wizard would target a different
+  cluster than every other tool. Phase D pipes the wizard through
+  the SAME `ClusterContext` that FrontendManagement / BackendServers
+  / SSLManagement consume, hides Step 0's `cluster_id` `Form.Item`,
+  and replaces the picker with a read-only `<Tag>` display + hint
+  to change cluster via the header. A `useEffect` keeps
+  `form.cluster_id` synchronised with `selectedCluster.id` so mid-
+  wizard header changes propagate; the existing cluster-transition
+  cleanup effect handles cert-id orphan reconciliation. Resume from
+  a draft that targets a different cluster now auto-swaps the
+  header cluster (best-effort `selectCluster()` call) so post-
+  resume edits stay cluster-consistent.
+
+- **Bulgu #2 — SSL CA bundle dropdown filter.** Backend's
+  `BackendServers.js` filters the CA-bundle Select with
+  `?usage_type=server`, so operators only see certs imported with
+  the right purpose. The wizard pre-fix surfaced EVERY cert in the
+  cluster regardless of usage, letting an operator submit a payload
+  that apply-time HAProxy would parse-error on (`unable to load
+  SSL private key`). Phase D filters explicitly:
+    * Per-server CA bundle Select → `usage_type === 'server'`.
+    * SSL & ACME step's "Existing certificate" Select →
+      `usage_type === 'frontend'`.
+  The empty-state Alert was also updated to reason about only the
+  filtered list so a cluster with N server-side certs but zero
+  frontend certs renders the "no certs imported" hint correctly.
+
+- **Bulgu #3 — Stuck "Validating against HAProxy…".** The root
+  cause was a self-cancel race in the auto-fire `useEffect`. The
+  effect deps array included `dryRunResult.status`, and the effect
+  body called `setDryRunResult({status: 'loading'})` at the top.
+  The status change re-triggered the effect; React's cleanup of the
+  previous run fired BEFORE the new body, aborting the in-flight
+  controller; the new body returned early because `status !==
+  'idle'`; the aborted fetch's `.catch` block detected
+  `signal.aborted` and returned without setting state. Status
+  stayed `'loading'` forever. Audit-fix #1 (round 1) had addressed
+  the leave-Step-4 cleanup branch but the enter-Step-4 self-abort
+  was a separate failure mode that only surfaced on a real backend.
+  Phase D switches the lifecycle to a ref-driven model:
+    * `dryRunStatusRef` shadows the latest status (synced via a
+      passive `useEffect`).
+    * `dryRunInvalidationTick` is the external re-trigger channel;
+      `onValuesChange` bumps it when the operator edits a Step-4-
+      visible field (e.g. the Apply Immediately switch).
+    * The main effect's deps array drops `dryRunResult.status` and
+      becomes `[step, form, aclBuilderData, dryRunInvalidationTick]`
+      — none of these change on a self-issued setDryRunResult, so
+      the self-cancel race is structurally impossible.
+    * Cleanup nulls the abort ref only if it still points to the
+      torn-down controller, so a fresh fetch's ref is never
+      accidentally cleared.
+
+- **Bulgu #4 — Preview missing fields.** The /api/sites/preview
+  response previously echoed only a sparse subset of fields, so the
+  SiteDrafts Preview modal could not show whether per-server
+  timings, backend cookie persistence, frontend maxconn, HSTS, or
+  ciphersuites would actually land on disk. Phase D enriches both
+  the backend response (additive — all existing keys preserved)
+  AND the SiteDrafts UI:
+    * Backend: emits the full operator-settable surface area on
+      `would_create` (backend cookie/timeouts/options, per-server
+      timings + SSL+CA-bundle details, frontend maxconn/timeouts/
+      compression/ACL counts, HTTPS ciphersuites, etc.).
+    * Frontend: replaces the four flat Descriptions blocks with a
+      typed renderer that only surfaces NON-DEFAULT values
+      (`isMeaningful` predicate) so the modal stays scannable. A
+      dedicated per-server card surfaces every per-server field
+      the operator customised. HSTS gets its own section when
+      enabled.
+
+- **Bulgu #5 — Resume hydration regressions.** Two issues:
+    1. Existing certificate was wiped on resume. Root cause was
+       the orphan-detect effect running on the SAME render that
+       the resume effect committed the new cluster_id. existingCerts
+       was still `[]` (fetch in flight), so `certIds = new Set()`
+       and the freshly-resumed `ssl.ssl_certificate_id` looked like
+       an orphan and got cleared. Phase D fix: short-circuit the
+       orphan-detect when `existingCertsLoading=true` and add the
+       loading flag to the effect deps so the check re-runs after
+       the fetch settles. ALSO: pin `prevClusterRef.current` to
+       `merged.cluster_id` BEFORE `form.setFieldsValue(merged)` so
+       the cluster-transition cleanup effect does not misread the
+       hydration as a user-driven cluster switch.
+    2. The same stuck "Validating against HAProxy…" — resolved by
+       the Bulgu #3 self-cancel-race fix above.
+
+- **Bulgu #6 — Create as PENDING button removed.** Pre-fix the
+  wizard had TWO submit buttons. The "Create as PENDING" button
+  bypassed the standard manual-flow convention (entity Create →
+  PENDING version → Apply Management review → operator Apply). The
+  "Create & Apply" button bypassed Apply Management entirely.
+  Operators were trained to "always Create & Apply", defeating the
+  change-review benefit of Apply Management. Phase D consolidates:
+    * Single button: "Create Site" (or "Create & Apply (ACME)" when
+      sslMode='acme', because ACME forces the immediate apply for
+      the HTTP-01 challenge).
+    * `handleSubmit` derives `effectiveApply` from `sslModeAtSubmit
+      === 'acme'` — no button-driven branching.
+    * Non-ACME flow: `apply_immediately=false` → backend returns
+      `created_pending` → operator is navigated to /apply-management
+      where they review the bulk version and click Apply (same
+      Agent-pull cadence as manual entity creation).
+    * ACME flow: `apply_immediately=true` (M22 model_validator
+      enforces this) → standard `created_applied` response.
+    * The `acmeBlocksDraft` derivation that gated the (now-removed)
+      PENDING button is retired — handleSubmit's `effectiveApply`
+      replaces the gate.
+
+##### Phase K Phase D — Backward compatibility / rollback
+
+- **Cluster picker change.** Operators who relied on the wizard-
+  internal cluster Select must switch via the header instead. No
+  data-layer change. Drafts saved on a different cluster
+  auto-swap the header on resume.
+- **`/api/sites/preview` response shape.** Additive only — every
+  pre-existing key keeps the same shape; new keys are
+  `cluster_id`, `domains`, additive fields on `backend` / `servers`
+  / `frontend_http` / `frontend_https`. Legacy frontend callers
+  ignore unknown fields.
+- **`/api/sites` request shape.** Unchanged.
+- **No DB migrations** are introduced by Phase K Phase D.
+
+##### Phase K Phase D — Follow-up audit findings (Bulgu #7–#8)
+
+A deeper post-implementation audit surfaced two additional
+race conditions that were not visible in the first pass. Both
+are now resolved on the same `pilot` branch:
+
+- **Bulgu #7 — Resume cluster swap race on cold mount.** On a
+  browser refresh of `/sites/new` while a Resume click had
+  already pre-populated sessionStorage, the wizard mount races
+  against `ClusterContext`'s `fetchClusters()`. The resume
+  effect ran with `clustersFromContext=[]`, so
+  `selectCluster(draftCluster)` was silently skipped. Then
+  `ClusterContext` finished loading and `selectedCluster`
+  became the user's `defaultCluster` (NOT the draft's
+  cluster). The naive header sync then overwrote
+  `form.cluster_id` with the default cluster, and the
+  cluster-transition cleanup effect read that overwrite as a
+  user-driven switch and wiped the draft's cert selections —
+  the Bulgu #5 second-order failure that survived the
+  short-circuit fix on a cold mount path.
+
+  Fix: header sync effect grew a one-shot post-resume swap
+  branch keyed on `resumedFromDraft && !resumeClusterSynced`.
+  When the draft's `cluster_id` is in the freshly-loaded
+  `clustersFromContext`, the swap pushes the HEADER to the
+  draft cluster instead of forcing the form to follow the
+  header. The `resumeClusterSynced` state gates this to
+  exactly ONE attempt so a later operator-driven header
+  cluster change is honoured normally. `selectClusterRef`
+  (a `useRef(selectCluster)` updated by a tiny sync effect)
+  keeps the dep set small so the header sync effect does not
+  re-run on every `ClusterProvider` render.
+
+  Pin: `tests/test_frontend_auth_bootstrap_phase_j.py::
+  test_phase_k_phase_d_resume_cluster_swap_race_fix`.
+
+- **Bulgu #8 — Mid-wizard cluster change leaves stale dry-run.**
+  When an operator on Step 4 changes the header cluster, the
+  wizard's cluster_id transitions through `form.setFieldsValue`
+  (the header sync effect's standard force path). Antd's
+  `setFieldsValue` is a SILENT update that does NOT fire
+  `onValuesChange`, so the dry-run invalidation tied to
+  `onValuesChange` never ran. Result: the Step 4 validation
+  card kept displaying the PREVIOUS cluster's "clean" verdict
+  even though the wizard payload now targeted a different
+  cluster.
+
+  Fix: the cluster-transition cleanup effect (which already
+  detected the change to wipe stale cert ids) now also resets
+  `dryRunResult` to idle and bumps `dryRunInvalidationTick`
+  whenever `dryRunStatusRef.current !== 'idle'`. The dry-run
+  effect's dep list picks up the tick bump and re-fires
+  against the new cluster as soon as the operator reaches
+  Step 4.
+
+  Pin: `tests/test_frontend_auth_bootstrap_phase_j.py::
+  test_phase_k_phase_d_cluster_change_invalidates_dry_run`.
+
+Both fixes are additive (no API or DB changes) and rollback
+without leaving residual state — disabling the new effects
+simply restores the previous (racy) behaviour.
+
+##### Phase K Phase D — Operator-feedback round 2 (Bulgu #9–#11)
+
+A second operator-feedback round surfaced one parity gap and two
+follow-ups on the wizard's HAProxy validation experience:
+
+- **Bulgu #9 — Wizard PEM upload parity with SSL Management page.**
+  Pre-fix `services.ssl_service.create_cert_row` (the helper the
+  wizard calls when `ssl.mode='upload'`) was a thin INSERT that
+  never parsed the PEM. It stored `primary_domain` / `all_domains`
+  from the operator-entered FRONTEND domains (not the cert SAN),
+  left `expiry_date` / `issuer` / `fingerprint` NULL, hard-coded
+  `status='valid'` and `days_until_expiry=0`, never validated the
+  private key or chain, never checked name uniqueness (so a
+  duplicate name would 500 at the DB unique constraint), and could
+  not reactivate a soft-deleted row of the same name. The
+  resulting cert showed up on the SSL Management page with empty
+  expiry/issuer columns and a permanent "valid" status — confusing
+  UX and clearly inconsistent with the dedicated SSL Management
+  upload flow (`POST /api/ssl/certificates`).
+
+  Fix: `create_cert_row` now mirrors `routers/ssl.py::
+  create_ssl_certificate`:
+  - parses the PEM via `utils.ssl_parser.parse_ssl_certificate`
+    (raises HTTPException 400 on parse failure),
+  - validates private_key + chain via `validate_private_key`
+    / `validate_certificate_chain`,
+  - computes status / days_until_expiry from the normalised
+    timezone-naive UTC `expiry_date`,
+  - enforces name uniqueness within the target cluster (returns
+    400 instead of a DB-level 500),
+  - reactivates soft-deleted rows of the same name (preserves
+    the row id for downstream references).
+
+  Pin: `tests/test_ssl_service_extraction.py` — 11 tests cover
+  the happy path, all 6 negative paths (parse fail, empty content,
+  bad private key, bad chain, duplicate active name, soft-delete
+  reactivation), and the "metadata comes from PEM, not payload"
+  contract.
+
+- **Bulgu #10 — Heuristic validator rejected wizard's own default
+  timeouts.** The wizard's config synthesis emits `timeout connect
+  10000ms` / `timeout server 60000ms` / `timeout client 100ms`
+  (millisecond suffix is canonical HAProxy syntax). The pre-fix
+  heuristic regex was `^\d+[smhd]?$`, which only allowed the
+  single-character suffixes `s`/`m`/`h`/`d` — `ms` was rejected
+  outright even though the same validator's own suggestion text
+  said "Use format like '5s', '30000ms', '1m'". Operators saw
+  10+ FALSE-POSITIVE "Invalid timeout value '10000ms'" errors on
+  the wizard's defaults at Step 4 and could not click Create.
+
+  Fix: `utils/haproxy_validator.py::_validate_timeout_directive`
+  regex relaxed to `^\d+(us|ms|s|m|h|d)?$` — accepting the full
+  set of HAProxy time-format suffixes (per the HAProxy docs Time
+  format chapter) while still rejecting malformed values like
+  `10000xx`, `abc`, `-100ms`, `1.5s`, and bare `ms`.
+
+  Pin: `tests/test_haproxy_validator_timeout_units.py` — 17
+  parametrised cases (11 valid formats, 5 invalid formats, plus
+  the exact operator-reported failure mode).
+
+- **Bulgu #11 — Operator reported "Previous loses values".**
+  Architectural review confirmed the wizard's contract is sound:
+  every step is rendered into a long-lived `<div>` whose only
+  step-driven prop is the CSS `display` toggle (`block` vs
+  `none`). React does NOT unmount the children, Antd's Form.Item
+  registrations stay intact, and the Antd default `preserve=true`
+  keeps values in form state even for the inner Form.Items that
+  conditional-render inside `<Form.Item shouldUpdate>` (SSL mode
+  branches, TCP/http frontend mode toggle). All wizard
+  `setFieldsValue` call-sites are guarded by domain triggers
+  (cluster change, sslMode change, TCP-mode-clears-https_redirect,
+  resume hydration) — none fire on a Previous/Next click alone.
+
+  No code regression was identified. Most likely operator
+  perception driver: with Bulgu #10 fixed, the `timeout
+  connect=10000` / `timeout server=60000` values the operator
+  saw in the "Advanced backend settings" Collapse after coming
+  back from Step 4 are simply the wizard's pre-existing defaults
+  (`backend.timeout_connect=10000`, `backend.timeout_server=
+  60000`, `backend.timeout_queue=60000`), not regressed values
+  — these were never operator-entered, just defaults the
+  operator did not notice in the collapsed Advanced section on
+  the forward pass.
+
+  Defensive measure: a static-source pin test asserts the
+  architectural contract so a future refactor cannot regress
+  to per-step conditional rendering or sneak a
+  `preserve={false}` in:
+  `tests/test_frontend_auth_bootstrap_phase_j.py::
+  test_phase_k_phase_d_wizard_preserves_form_state_across_step_navigation`.
+
+  If the operator can reproduce specific field-level state loss
+  on a Previous click after the Bulgu #10 fix, please file the
+  repro steps so we can target the actual scenario.
+
+##### Rollback considerations (Phase I)
+
+If you must roll back to a pre-rebrand v1.5.x build after operators have already saved drafts on the new build:
+
+- New rows on `wizard_drafts` with `wizard_type='site'` will be invisible to the legacy code path that filters on `wizard_type='proxied_host'` only. Operators will see those new drafts disappear from the listing AND will not be counted against the 50-draft cap. The rows themselves are not deleted — they expire via the standard 30-day TTL prune.
+- Pre-rebrand rows with `wizard_type='proxied_host'` continue to work on the legacy build because their value never changed.
+- The schema-level `DEFAULT` is not rolled back automatically. Operators rolling back can either (a) leave it at `'site'` (harmless — the legacy build hard-codes `'proxied_host'` in every INSERT, so the default is never consulted) or (b) re-run an `ALTER TABLE wizard_drafts ALTER COLUMN wizard_type SET DEFAULT 'proxied_host'` to restore the original schema.
+
+##### Phase K Phase D — Operator-feedback round 3 (Bulgu #12)
+
+**Operator-reported failure flow** (May 11, 2026):
+
+The wizard's Step 4 dry-run showed 8 WARNINGs but no ERRORs, so Create proceeded; the operator then applied via Apply Management and the real `haproxy -c` parse rejected the config:
+
+```
+[ALERT] parsing [/tmp/haproxy-new-config.cfg:79] : error detected while parsing ACL 'acl1' : failed to open pattern file </path>.
+[ALERT] parsing [/tmp/haproxy-new-config.cfg:87] : error detected while parsing switching rule : no such ACL : 'acl1'.
+[ALERT] Fatal errors found in configuration.
+```
+
+The 8 WARNINGs were ALSO operator-confusing false positives:
+
+```
+[frontend] Directive 'stick-table' may not be valid in 'frontend' section
+[frontend] Directive 'tcp-request' may not be valid in 'frontend' section  (×2)
+[backend] Directive 'cookie' may not be valid in 'backend' section  (×2)
+[backend] Missing 'global' section - recommended for production
+```
+
+**Two root causes:**
+
+1. **Heuristic validator `valid_directives` was incomplete** — `stick-table`, `tcp-request`, `tcp-response`, `cookie`, `http-after-response`, `errorfile`, `description`, `id`, `filter`, etc. are perfectly valid in their respective sections but the validator's small hand-picked sets did not list them. Every wizard / manual page that emitted them flagged a spurious "may not be valid" WARNING. The wizard's pre-persist apply-time gate uses the same validator; even though it only blocks on ERROR-level findings, the noise polluted the operator-visible response trail and the version-history page.
+
+2. **ACL `-f <file>` pattern-file references** — the visual ACL builder offered `-f (from file)` as a selectable flag, and neither the manual Frontend API's Pydantic validator (`models/frontend.py::validate_acl_rules`) nor the wizard's Pydantic validator (`models/site_wizard.py::_validate_haproxy_directive_string`) rejected `-f`. HAProxy OpenManager is a fully-managed product: it does NOT provision pattern files onto the HAProxy node's filesystem, so any operator-typed `-f /path/...` ALWAYS resolves to "file not found" at HAProxy reload time. The UI made it trivial to author an unsupported state.
+
+**Three-layer fix:**
+
+**Layer A — Heuristic validator** (`backend/utils/haproxy_validator.py`):
+
+- Expanded `valid_directives['frontend']` to include `stick-table`, `stick`, `tcp-request`, `tcp-response`, `http-after-response`, `errorfile`, `errorloc`, `errorloc302`, `errorloc303`, `http-error`, `description`, `id`, `filter`, `monitor`, `unique-id-format`, `unique-id-header`, `declare`, `http-buffer-request`, plus a long-tail of less-common-but-valid directives.
+- Expanded `valid_directives['backend']` to include `cookie`, `appsession`, `tcp-request`, `tcp-response`, `tcp-check`, `retries`, `fullconn`, `dispatch`, `redirect`, `use-server`, `acl`, `capture`, `errorfile`, `description`, `id`, `filter`, `rate-limit`, `email-alert`, `force-persist`, `transparent`, `source`, plus a long-tail.
+- Added `partial_fragment: bool = False` parameter to `HAProxyConfigValidator.validate_config()` and the module-level `validate_haproxy_config()`. When True (or auto-detected via the wizard's marker comment), the validator suppresses the "Missing 'global' section" / "Consider adding 'defaults' section" diagnostics — the wizard / cluster synthesis intentionally OMITS those blocks because the agent merges them with its local copy on disk.
+- Both the wizard's `/preview` dry-run AND the apply-time pre-persist gate now pass `partial_fragment=True` (`backend/routers/site_wizard.py`).
+
+**Layer B — ACL `-f` rejection in Pydantic** (server-side gate):
+
+- `backend/models/site_wizard.py`: Added `_ACL_FILE_FLAG_PATTERN = re.compile(r"(^|\s)-f(\s|$)")` and rejected the pattern inside `_validate_haproxy_directive_string` with an operator-friendly message explaining why the product cannot support pattern files. This covers `acl_rules`, `use_backend_rules`, and string-shaped `redirect_rules`.
+- `backend/models/frontend.py::validate_acl_rules`: Mirrored the same rejection on the manual Frontend API so both create paths return the identical 400/422 envelope.
+
+**Layer C — ACL `-f` removal from the visual builder + UI gates** (client-side authoring guardrail):
+
+- `frontend/src/components/ACLRuleBuilder.js`: Removed `-f` from the selectable `FLAGS` list. Updated `FLAG_HINTS` to drop the `-f` mention. Existing rules that already carry `-f` (loaded from saved drafts pre-fix) keep the tag visible as `-f (deprecated — remove)` so operators can SEE and REMOVE the flag, but cannot re-add it once removed. Added a section-level red `Alert` that counts every rule carrying `-f` and explains the failure mode + remediation. Inline rule-card error decoration (`status='error'` + red border + inline description) surfaces the same message at the per-rule level. Mirrored the regex client-side so raw-mode typed `-f` immediately flags inline.
+- `frontend/src/components/SiteWizard.js`: Added a Step 2 → Step 3 hard-gate on the Next button — if ANY rule still carries `-f`, the click surfaces the same operator-friendly error and refuses to advance.
+- `frontend/src/components/FrontendManagement.js::handleSubmit`: Mirrored the same gate so the manual Frontend page rejects submit identically.
+
+**Backward compatibility:**
+
+- Existing drafts that contain `-f`-flagged rules still load — the ACLRuleBuilder displays them visibly so operators can remove them. Submit is blocked until they do.
+- Existing PERSISTED frontend rows in the DB that already carry `-f` (created before this fix) continue to work at the agent level — the validator changes do NOT retroactively reject them. They can still be EDITED through the UI (which will block save until `-f` is removed) or read via the API for visibility / audit.
+- The expanded `valid_directives` sets only ADD entries; nothing previously accepted is now flagged. Pre-existing tests that asserted "Directive X is valid" continue to pass.
+
+**Tests added:**
+
+- `backend/tests/test_haproxy_validator_bulgu12.py` (27 new tests):
+  - Per-directive false-positive regression pins for both frontend and backend sections.
+  - `partial_fragment=True` suppression + marker-comment auto-detect.
+  - Wizard Pydantic `-f` rejection across spacing/position variants.
+  - Anchor-correctness pin: regex must NOT match `-foo` / `-file` substrings inside other tokens.
+  - Manual Frontend API parity pin.
+  - End-to-end pin replaying the user's actual config (minus `-f`) with zero spurious WARNINGs.
+
+- `backend/tests/test_site_wizard_phase2_validator_gate.py`: Widened the pre-window lookback from 400 to 1500 chars to accommodate the partial-fragment forwarding comment block.
+
+**Rollback considerations:**
+
+- Reverting the `valid_directives` expansion brings back operator-visible WARNING noise but does NOT break apply (which only gates on ERROR). Safe to roll back if a regression is discovered.
+- Reverting the `-f` Pydantic rejection ALLOWS operators to author the failure mode again, but does not break anything that worked before. Roll back ONLY if a customer has pre-provisioned pattern files and a tightly-controlled need to reference them.
+- Reverting the ACLRuleBuilder UI changes is a pure visual revert; the Pydantic gate keeps the safety net.
+
+### Earlier Releases
+
+For earlier release notes (v1.4.0 ACME stability + enterprise audit, v1.3.0, ...) see the [GitHub Releases](https://github.com/taylanbakircioglu/haproxy-openmanager/releases) page.
 
 ---
 

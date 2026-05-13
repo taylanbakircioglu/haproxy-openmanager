@@ -38,4 +38,4 @@ subjects:
 # Backend service account needs cluster access for remote HAProxy management
 - kind: ServiceAccount
   name: haproxy-openmanager-backend
-  namespace: haproxy-openmanager 
+  namespace: internal-haproxy-openmanager 

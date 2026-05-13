@@ -9,6 +9,502 @@ from database.connection import get_database_connection, close_database_connecti
 
 logger = logging.getLogger(__name__)
 
+
+def _format_redirect_rule(rule: Any) -> Optional[str]:
+    """Render a single redirect rule into a HAProxy `redirect ...` line.
+
+    R11.A-1 fix (PR-1 hotfix): pre-fix the generator stringified dicts
+    via ``str(rule)``, which produced parser-fatal output like
+    ``redirect {'type': 'scheme', 'code': 301, ...}``. The wizard's
+    ``_build_redirect_rules`` always emits dicts, so every wizard-
+    generated HTTPS redirect failed agent reload at the apply stage.
+
+    Schema accepted (forward + backward compatible):
+
+    - ``{type: 'scheme', scheme: 'https', code: 301, condition: ...}``
+    - ``{type: 'location', location: 'http://...', code: 302, ...}``
+    - ``{type: 'prefix', prefix: '/v2', code: 301, ...}``
+    - Plain string (legacy raw HAProxy fragment, e.g.
+      ``"scheme https if !{ ssl_fc }"``).
+
+    Returns ``None`` for entries that should be skipped (empty,
+    invalid type, missing required field for the chosen type).
+    The returned line is already indented with 4 spaces so callers can
+    drop it straight into the frontend block.
+    """
+    if rule is None:
+        return None
+
+    if isinstance(rule, dict):
+        rtype = (rule.get("type") or "").strip().lower()
+        code = rule.get("code")
+        condition = (rule.get("condition") or "").strip()
+
+        if rtype == "scheme":
+            scheme = (rule.get("scheme") or "https").strip()
+            if scheme not in ("http", "https"):
+                logger.warning(
+                    f"REDIRECT: ignoring invalid scheme '{scheme}' "
+                    "(only 'http' or 'https' allowed for redirect scheme)"
+                )
+                return None
+            parts = ["redirect scheme", scheme]
+        elif rtype == "location":
+            url = (rule.get("location") or "").strip()
+            if not url:
+                logger.warning(
+                    "REDIRECT: ignoring redirect type=location with empty 'location' field"
+                )
+                return None
+            parts = ["redirect location", url]
+        elif rtype == "prefix":
+            prefix = (rule.get("prefix") or rule.get("location") or "").strip()
+            if not prefix:
+                logger.warning(
+                    "REDIRECT: ignoring redirect type=prefix with empty 'prefix' field"
+                )
+                return None
+            parts = ["redirect prefix", prefix]
+        else:
+            logger.warning(
+                f"REDIRECT: ignoring unknown redirect type '{rtype}' "
+                "(expected: scheme | location | prefix)"
+            )
+            return None
+
+        if code is not None:
+            try:
+                parts.append(f"code {int(code)}")
+            except (TypeError, ValueError):
+                logger.warning(f"REDIRECT: invalid 'code' value {code!r}, dropping")
+        if condition:
+            # R11-audit-2 (FIX-2): defend against double 'if' when the
+            # caller already wrote `condition='if !{ ssl_fc }'`. Without
+            # this guard the rendered line would be
+            # ``redirect ... if if !{ ssl_fc }`` which HAProxy rejects
+            # as a parser error. Mirrors the legacy string-rule branch
+            # below (which never prepends 'if').
+            cond_lower = condition.lstrip().lower()
+            if cond_lower.startswith("if ") or cond_lower.startswith("unless "):
+                parts.append(condition)
+            else:
+                parts.append(f"if {condition}")
+
+        return "    " + " ".join(parts)
+
+    # Legacy string entries (e.g. "scheme https if !{ ssl_fc }").
+    # FIX-11 (R11-audit round 2): some legacy DB rows from earlier
+    # releases stored the FULL `redirect ...` line including the
+    # leading 'redirect ' keyword. Without this guard the helper
+    # would prepend a second 'redirect ', producing the parser-
+    # fatal `redirect redirect scheme https ...`. Strip a leading
+    # `redirect` token (with OR without trailing space — `"redirect"`
+    # alone after `.strip()` no longer carries the trailing space)
+    # so both legacy variants render to a single, syntactically
+    # valid line and a naked keyword cleanly returns None.
+    s = str(rule).strip()
+    if not s or s in ("[]", "{}", "null", "None"):
+        return None
+    s_lower = s.lower()
+    if s_lower == "redirect" or s_lower.startswith("redirect "):
+        # Strip the keyword (and any whitespace following it).
+        # `"redirect"` alone reduces to `""` → return None below.
+        s = s[len("redirect"):].lstrip()
+        if not s:
+            return None
+    return f"    redirect {s}"
+
+
+def _normalize_haproxy_config_text_for_diff(text: str) -> str:
+    """Apply renderer-side normalizations to an already-rendered HAProxy
+    config text so that diffs between two versions surface ONLY
+    operator-intent changes — not renderer evolution.
+
+    Why this exists
+    ---------------
+    The `config_versions` table stores the verbatim rendered config
+    at the time each version was created. When the renderer is then
+    improved (e.g. Bulgu #13 added `http-request track-sc<N> <fetch>`
+    dedup and stripped per-server `cookie <name>` when the parent
+    backend has no `cookie_name`), the PREVIOUS-version text was
+    written with the OLD renderer and the CURRENT-version text is
+    written with the NEW renderer. `difflib.unified_diff` then
+    surfaces those renderer-driven differences as `+`/`-` lines on
+    entities the operator never touched, which is extremely
+    confusing — especially when the operator's actual change was
+    just "add one new frontend".
+
+    The fix: run BOTH sides of the diff through this normalization
+    pass first. After normalization, two configs that differ only
+    by renderer-evolution will compare equal and the diff will
+    surface ONLY the operator's actual changes.
+
+    Normalizations applied (must match the renderer):
+
+      1. **`http-request track-sc<N> <fetch>` dedup within a
+         section.** The (counter, fetch) tuple uniquely identifies
+         the tracker; identical signatures within the same
+         frontend / listen block collapse to the first occurrence.
+
+      2. **`cookie <name>` strip on `server` lines whose parent
+         backend has no top-level `cookie` directive.** Matches the
+         renderer guard added for Bulgu #13 (per-server cookie value
+         is silently broken stickiness without a backend-level
+         `cookie_name`).
+
+    Safety
+    ------
+    - Idempotent: running this on an already-normalized config
+      produces the same config (set membership / strip both
+      handle re-application).
+    - Section-scoped: dedup tracker signatures reset on every new
+      section header so unrelated frontends don't cross-pollute.
+    - Conservative: only the two transformations above are applied;
+      we do NOT rewrite ACLs, reorder buckets, or touch operator-
+      authored content. Lines we don't recognise pass through verbatim.
+
+    Args:
+        text: Full rendered HAProxy config as a single string.
+
+    Returns:
+        Normalized config text. Empty / None input passes through.
+    """
+    if not text:
+        return text
+
+    lines = text.split('\n')
+
+    # ── Pass 1: scan for `cookie` directives that license per-server
+    # `cookie <value>` attributes. Bulgu #13 strips per-server
+    # cookies whose parent block has no licensing directive; we
+    # mirror that decision here.
+    #
+    # HAProxy semantics (docs section 4.1 — keyword matrix):
+    #
+    #     The `cookie` directive may appear in `defaults`, `frontend`,
+    #     `listen`, AND `backend` sections. A `cookie` in `defaults`
+    #     is INHERITED by every subsequent `backend` and `listen` so
+    #     they no longer need to repeat it. A `cookie` inside a
+    #     `frontend` is unusual and applies to that frontend only.
+    #
+    # Tracking is therefore per-section (backend + listen) PLUS one
+    # global flag for defaults inheritance. We DO NOT track frontends
+    # because per-server cookie attributes only exist on `server`
+    # lines, which only exist in `backend` / `listen`.
+    cookie_licensed_sections: set = set()
+    defaults_has_cookie = False
+    cur_section_kind: Optional[str] = None
+    cur_section_name: Optional[str] = None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        is_indented = line.startswith((' ', '\t'))
+        if not is_indented and not stripped.startswith('#'):
+            parts = stripped.split()
+            if not parts:
+                continue
+            kind = parts[0]
+            if kind in ('frontend', 'backend', 'listen', 'global', 'defaults'):
+                cur_section_kind = kind
+                # `defaults` and `global` need no name. `frontend`,
+                # `backend`, `listen` carry the entity name as the
+                # second token (which is what we key the licensed
+                # set off).
+                cur_section_name = parts[1] if (
+                    kind in ('frontend', 'backend', 'listen')
+                    and len(parts) >= 2
+                ) else None
+            else:
+                cur_section_kind = None
+                cur_section_name = None
+        elif (
+            cur_section_kind in ('backend', 'listen', 'defaults')
+            and not stripped.startswith('#')
+            and stripped.startswith('cookie ')
+        ):
+            # Top-level `cookie ...` directive — this is the cookie_name
+            # directive that licenses per-server `cookie <value>` lines.
+            if cur_section_kind == 'defaults':
+                defaults_has_cookie = True
+            elif cur_section_name is not None:
+                cookie_licensed_sections.add((cur_section_kind, cur_section_name))
+
+    # ── Pass 2: emit normalized lines. ──────────────────────
+    out: List[str] = []
+    cur_section_kind = None
+    cur_section_name = None
+    # Per-section state for track-sc<N> dedup
+    cur_track_sigs: set = set()
+    for raw in lines:
+        line = raw
+        stripped = line.strip()
+        is_indented = line.startswith((' ', '\t'))
+
+        # Detect section boundary (top-level non-comment directive
+        # starts a new section)
+        if stripped and not is_indented and not stripped.startswith('#'):
+            parts = stripped.split()
+            if parts and parts[0] in ('frontend', 'backend', 'listen', 'global', 'defaults'):
+                cur_section_kind = parts[0]
+                cur_section_name = parts[1] if (
+                    parts[0] in ('frontend', 'backend', 'listen')
+                    and len(parts) >= 2
+                ) else None
+                cur_track_sigs = set()
+            else:
+                cur_section_kind = None
+                cur_section_name = None
+
+        # ── Normalization 1: track-sc<N> dedup (frontend/listen). ──
+        # HAProxy semantics: `http-request track-sc<N>` only exists
+        # in `frontend` / `listen` sections. The (counter, fetch)
+        # tuple uniquely identifies the tracker.
+        if (
+            cur_section_kind in ('frontend', 'listen')
+            and stripped.startswith('http-request track-sc')
+        ):
+            tparts = stripped.split()
+            if len(tparts) >= 3:
+                sig = (tparts[1], tparts[2])
+                if sig in cur_track_sigs:
+                    # Skip this duplicate.
+                    continue
+                cur_track_sigs.add(sig)
+
+        # ── Normalization 2: strip per-server `cookie <value>` when
+        # the parent section (backend OR listen) has no licensing
+        # `cookie` directive AND `defaults` does not declare one
+        # for inheritance. ──
+        #
+        # Conservative: when in doubt (defaults declares cookie, or
+        # section declares cookie), we KEEP the per-server cookie.
+        # Stripping is only applied when we are SURE no licensing
+        # path exists.
+        section_licenses_cookie = (
+            defaults_has_cookie
+            or (
+                cur_section_kind in ('backend', 'listen')
+                and cur_section_name is not None
+                and (cur_section_kind, cur_section_name) in cookie_licensed_sections
+            )
+        )
+        if (
+            cur_section_kind in ('backend', 'listen')
+            and cur_section_name is not None
+            and not section_licenses_cookie
+            and is_indented
+            and stripped.startswith('server ')
+        ):
+            tokens = stripped.split()
+            new_tokens: List[str] = []
+            i = 0
+            while i < len(tokens):
+                tok = tokens[i]
+                # HAProxy server-line layout:
+                #   server <name> <address>[:port] [keyword <value>]*
+                #
+                # The `cookie <value>` pair is ALWAYS a keyword pair
+                # in the trailing parameters — it can never appear
+                # at i=1 (that's the server name) or i=2 (the
+                # address). Guarding with i >= 3 protects against
+                # legitimate corner cases where an operator named a
+                # server `cookie` or used `cookie:port` as a
+                # hostname.
+                if tok == 'cookie' and i >= 3 and i + 1 < len(tokens):
+                    # Drop `cookie <value>` pair. HAProxy syntax:
+                    # the cookie attribute value is exactly one
+                    # token.
+                    i += 2
+                    continue
+                new_tokens.append(tok)
+                i += 1
+            # Preserve original leading whitespace so indentation
+            # stays consistent with the rest of the block.
+            leading_len = len(line) - len(line.lstrip())
+            line = (line[:leading_len]) + ' '.join(new_tokens)
+
+        out.append(line)
+
+    return '\n'.join(out)
+
+
+def _categorize_haproxy_directive(line: str) -> str:
+    """Classify a single emitted HAProxy directive line into its
+    correct frontend-block emission category for ordering purposes.
+
+    R2.3 / R3.3 (PR-1 hotfix): HAProxy parser emits soft warnings
+    when ``http-request`` rules appear after ``use_backend`` /
+    ``default_backend``, or when ``tcp-request`` appears after
+    ``http-request``. Some warnings (``stick-table already declared``,
+    ``http-request placed after use_backend``) escalate to fatal in
+    strict mode. We classify each directive once and reorder before
+    flushing to ``config_lines`` so the rendered config matches the
+    canonical HAProxy ordering:
+
+        bind → mode → option → timeout → maxconn → monitor-uri →
+        compression → log → stick-table → tcp-request → acl →
+        http-request → http-response → redirect → use_backend →
+        default_backend
+
+    Comments (``# ...``) are routed to the same category as the next
+    directive heuristically (they keep their semantic anchor in the
+    rendered output). Unknown directives default to 'prelude' so
+    they appear early; the validator surfaces them as warnings.
+    """
+    s = line.strip()
+    if not s:
+        return "prelude"
+    # Strip the indent for prefix matching
+    if s.startswith("#"):
+        # Heuristic: comments containing WAF / filter / rate-limit /
+        # custom-condition keywords stick to the `acl` bucket so they
+        # are emitted next to the rule they describe (operator UX —
+        # otherwise the comment lands at the top of the frontend block
+        # and the rule lands lower down, making the rendered config
+        # confusing). Mode-mismatch warnings emitted by the
+        # default_backend branch use the 'BACKEND-MODE-WARNING' marker
+        # below and are routed into `default_be` so they sit right
+        # next to the `default_backend` directive they refer to.
+        cmt = s.lower()
+        if "backend-mode-warning" in cmt:
+            # FIX-10 (R11-audit round 2): mode-mismatch warnings must
+            # emit next to the default_backend directive, not at the
+            # top of the frontend block.
+            return "default_be"
+        if (
+            "waf rule:" in cmt
+            or "ip filter" in cmt
+            or "rate limit" in cmt
+            or "header filter" in cmt
+            or "request filter" in cmt
+            # FIX-9 (R11-audit round 2): WAF custom-comment keywords
+            # that the original heuristic missed. Pre-fix the
+            # `# Log Message:`, `# Custom Log:`, `# Custom Condition
+            # for ...` and size_limit log markers landed in 'prelude'
+            # (top of the block) while their rules landed in
+            # 'http_req' (later) — visually disconnected.
+            or "log message:" in cmt
+            or "custom log:" in cmt
+            or "custom condition for" in cmt
+            or "filter log:" in cmt
+        ):
+            return "acl"
+        return "prelude"
+    if s.startswith("acl "):
+        return "acl"
+    if s.startswith("stick-table") or s.startswith("stick "):
+        return "stick"
+    if s.startswith("tcp-request"):
+        return "tcp_req"
+    if s.startswith("http-request"):
+        return "http_req"
+    if s.startswith("http-response"):
+        return "http_resp"
+    if s.startswith("redirect "):
+        return "redirect"
+    if s.startswith("use_backend"):
+        return "use_be"
+    if s.startswith("default_backend"):
+        return "default_be"
+    if (
+        s.startswith("option ")
+        or s.startswith("timeout ")
+        or s.startswith("maxconn ")
+        or s.startswith("compression ")
+        or s.startswith("monitor-uri")
+        or s.startswith("log ")
+        or s.startswith("description ")
+        or s.startswith("disabled")
+        or s.startswith("enabled")
+    ):
+        return "prelude"
+    return "prelude"
+
+
+def _resolve_frontend_client_ca_path(
+    frontend: Dict[str, Any], cluster_id: Optional[int] = None
+) -> Optional[str]:
+    """Return the client-CA bundle path for bind-side mTLS, or None.
+
+    Forward-path placeholder for PR-7 (`ssl_client_ca_certificate_id`
+    column). Until that column exists we always return None — callers
+    treat None as "no CA configured", which combined with
+    ``ssl_verify ∈ {required, optional}`` triggers the safeguard
+    that suppresses the `verify` directive (see
+    `_apply_bind_ssl_verify`). When PR-7 lands this helper will look
+    up the cert via the same query as `_get_ssl_certificate_path` but
+    filtered by ``usage_type IN ('client_ca', 'frontend')``.
+    """
+    return None
+
+
+def _apply_bind_ssl_verify(
+    bind_line: str, frontend: Dict[str, Any], cluster_id: Optional[int] = None
+) -> str:
+    """Append `verify <mode>` (and `ca-file <path>` when needed) to a bind line.
+
+    R11.A-2 (PR-1 hotfix): bind-side `verify required|optional` requires
+    a `ca-file <path>` argument — without it HAProxy emits the fatal
+    ALERT::
+
+        Proxy 'X': verify is enabled but no CA file specified for bind '...'
+
+    Pre-fix the generator emitted ``verify <mode>`` verbatim regardless
+    of whether a client-CA bundle was resolvable, breaking every
+    frontend that had ``ssl_verify ∈ {required, optional}`` (the
+    column DEFAULT was 'optional' until PR-2). Symmetric to the
+    server-side downgrade in the `backend ... server` block.
+
+    Behaviour:
+
+    - ``ssl_verify`` empty / ``'none'`` → no directive appended.
+    - ``ssl_verify == 'required' | 'optional'`` and a client-CA path is
+      resolvable → emit ``ca-file <path> verify <mode>``.
+    - ``ssl_verify == 'required' | 'optional'`` and NO client-CA path →
+      emit nothing, log ERROR with frontend name + cluster id so apply
+      diagnostics surface the cause.
+    - Unknown ``ssl_verify`` value → emit nothing, log WARNING.
+    """
+    raw = frontend.get("ssl_verify")
+    if raw is None:
+        return bind_line
+    val = str(raw).strip().lower()
+    if val in ("", "none", "[]", "{}", "null"):
+        return bind_line
+    if val not in ("required", "optional"):
+        logger.warning(
+            f"BIND SSL_VERIFY: frontend '{frontend.get('name')}' has "
+            f"unknown ssl_verify value '{raw}' — skipping verify directive."
+        )
+        return bind_line
+
+    client_ca_path = _resolve_frontend_client_ca_path(frontend, cluster_id)
+    if not client_ca_path:
+        # FIX-12 (R11-audit round 2): the prior message hinted at a
+        # "Frontend Management → Advanced TLS" UI path that does not
+        # yet exist (it lands with PR-7 of the rollout). Operators
+        # following the hint hit a dead end and assumed the safeguard
+        # was a bug. Switched to a hint that is ALWAYS actionable on
+        # the current release: clear the column or set it to 'none'.
+        # The forward-compat hint that PR-7 will introduce a proper
+        # client-CA bundle field is preserved as a follow-up note.
+        logger.error(
+            f"BIND SSL_VERIFY DOWNGRADE: frontend '{frontend.get('name')}' "
+            f"(cluster_id={cluster_id}) requested ssl_verify='{val}' but "
+            "no client-CA bundle is resolvable. Skipping the 'verify' "
+            "directive on the bind line to prevent fatal HAProxy ALERT "
+            "'verify is enabled but no CA file specified'. To clear "
+            "this diagnostic, either set ssl_verify='none' on the "
+            "frontend or wait for the upcoming "
+            "ssl_client_ca_certificate_id column (PR-7) which will "
+            "let you bind a client-CA bundle for inbound mTLS."
+        )
+        return bind_line
+
+    return bind_line + f" ca-file {client_ca_path} verify {val}"
+
+
 async def _get_ssl_certificate_path(frontend: Dict[str, Any], cluster_id: int, db_conn: Any) -> Optional[str]:
     """
     Get SSL certificate path for frontend based on ssl_certificate_id
@@ -288,7 +784,20 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                             bind_line += f" ssl-max-ver {frontend['ssl_max_ver']}"
                         if frontend.get('ssl_strict_sni'):
                             bind_line += " strict-sni"
-                        
+                        # R11.A-2 fix (PR-1 hotfix): emit `verify required|optional`
+                        # on bind line ONLY when a client-CA bundle is resolvable.
+                        # Pre-fix the directive was emitted verbatim, but the
+                        # `frontends` schema has no client-CA bundle column yet
+                        # — so `bind ... ssl crt <server.pem> verify required`
+                        # produced HAProxy fatal ALERT
+                        # "verify is enabled but no CA file specified".
+                        # Symmetric to the server-side downgrade at line ~840.
+                        # Forward path: a future `ssl_client_ca_certificate_id`
+                        # column will resolve `client_ca_path`; until then the
+                        # directive is silently skipped with an ERROR log so
+                        # operator-facing diagnostics surface the cause.
+                        bind_line = _apply_bind_ssl_verify(bind_line, frontend, cluster_id)
+
                         config_lines.append(bind_line)
                         bind_added = True
                         logger.info(f"SSL NEW MODE: Added {len(cert_paths)} certificate(s) on port {frontend['bind_port']}")
@@ -319,7 +828,10 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                             bind_line += f" ssl-max-ver {frontend['ssl_max_ver']}"
                         if frontend.get('ssl_strict_sni'):
                             bind_line += " strict-sni"
-                        
+                        # R11.A-2 fix (PR-1 hotfix): see NEW MODE branch above
+                        # for the bind-side ssl_verify safeguard rationale.
+                        bind_line = _apply_bind_ssl_verify(bind_line, frontend, cluster_id)
+
                         config_lines.append(bind_line)
                         bind_added = True
                         logger.info(f"SSL OLD MODE: Separate HTTPS port {https_port} with single cert")
@@ -328,171 +840,279 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 else:
                     logger.warning(f"SSL enabled but no certificates configured for frontend '{frontend['name']}'")
             
-            # If no SSL bind was added (SSL disabled or failed), add plain HTTP bind
+            # R18c audit fix (round 3 #2 — KRITIK SECURITY): if SSL was
+            # ENABLED on this frontend but no certificate could be
+            # resolved (cert deleted between INSERT and config gen,
+            # or ACME-deferred state where the cert isn't issued
+            # yet), the pre-fix branch fell through to a plain
+            # `bind addr:port` (no `ssl` keyword) — i.e. it
+            # silently downgraded the operator's HTTPS frontend to
+            # CLEARTEXT on the same port. Anyone hitting that port
+            # over the wire then got plaintext HTTP, leaking
+            # cookies and credentials before the operator noticed.
+            #
+            # The correct behaviour is to OMIT the bind entirely
+            # so HAProxy's reload either (a) keeps the previous
+            # SSL bind from the running config, or (b) the apply
+            # surfaces an empty/incomplete frontend that fails
+            # validation rather than degrading to cleartext.
             if not bind_added:
-                config_lines.append(f"    bind {frontend['bind_address']}:{frontend['bind_port']}")
+                if frontend.get('ssl_enabled', False):
+                    logger.error(
+                        f"SSL BIND OMITTED: frontend '{frontend['name']}' "
+                        "has ssl_enabled=true but no certificate path could "
+                        "be resolved — refusing to emit a cleartext fallback "
+                        "bind on the SSL port (would silently downgrade "
+                        "HTTPS to plaintext). Resolve the cert binding "
+                        "before applying."
+                    )
+                else:
+                    config_lines.append(
+                        f"    bind {frontend['bind_address']}:{frontend['bind_port']}"
+                    )
             
             config_lines.append(f"    mode {frontend['mode']}")
-            
+
+            # ─────────────────────────────────────────────────────────────────
+            # R2.3 / R3.3 (PR-1 hotfix): emit ordering buckets.
+            # All directives between `bind/mode` and the closing blank line
+            # are routed into per-category buckets and flushed at the
+            # end of this frontend block in canonical HAProxy order:
+            #
+            #   prelude (option/timeout/maxconn/monitor-uri/compression/log)
+            #   stick   (stick-table/track-sc0)              — DEDUP'ed
+            #   tcp_req (tcp-request *)
+            #   acl     (acl *)
+            #   http_req (http-request *)
+            #   http_resp (http-response *)
+            #   redirect (redirect *)
+            #   use_be  (use_backend *)
+            #   default_be (default_backend)
+            #
+            # Pre-fix the `http-request` / `tcp-request` / `use_backend`
+            # rules emitted in source-code order produced HAProxy
+            # warnings of the form
+            #   "a 'http-request' rule placed after a 'use_backend' rule
+            #    will still be processed before"
+            # for every WAF, ACL and rate-limit directive in user
+            # configurations. The user's reported bug shows ~30 such
+            # warnings on a real config. Buckets eliminate that.
+            # `_stick_emitted` tracks whether the global rate-limit
+            # `stick-table` line has already been written so subsequent
+            # WAF `rate_limit` rules don't redeclare it (HAProxy fatal
+            # "stick-table already declared").
+            # ─────────────────────────────────────────────────────────────────
+            _fe_buckets: Dict[str, List[str]] = {
+                "prelude": [], "stick": [], "tcp_req": [],
+                "acl": [], "http_req": [], "http_resp": [],
+                "redirect": [], "use_be": [], "default_be": [],
+            }
+            _stick_table_emitted = False
+            # Phase K Phase D follow-up (Bulgu #13) — same dedup
+            # contract for `http-request track-sc<N> <fetch>` lines.
+            # HAProxy only NEEDS one tracking call per
+            # (counter, fetch) tuple per frontend; the subsequent
+            # rate-limit / WAF rules can all consume the already-
+            # tracked counter via `sc_http_req_rate(N)`. Pre-fix
+            # every WAF rate_limit rule emitted its own
+            # `track-sc0 src` line, producing N-1 redundant
+            # directives per frontend (each one a state-table
+            # operation per request).
+            #
+            # We dedup on the FULL `track-sc<N> <fetch>` signature so
+            # the (rare) operator who uses both `track-sc0 src` AND
+            # `track-sc0 dst` (different sample fetches → different
+            # counter keys) keeps both lines — only IDENTICAL
+            # signatures collapse.
+            _track_sc_signatures: set = set()
+
+            def _emit_fe(line: str) -> None:
+                """Route a single rendered HAProxy directive line into the
+                correct frontend-block bucket. Idempotent for stick-table
+                lines (R3.3 dedup) AND http-request track-sc<N> lines
+                (Bulgu #13 dedup)."""
+                nonlocal _stick_table_emitted
+                cat = _categorize_haproxy_directive(line)
+                stripped = line.strip()
+                if cat == "stick":
+                    if _stick_table_emitted and stripped.startswith("stick-table"):
+                        logger.debug(
+                            f"STICK-TABLE DEDUP: skipping duplicate "
+                            f"declaration in frontend '{frontend['name']}': "
+                            f"{stripped}"
+                        )
+                        return
+                    if stripped.startswith("stick-table"):
+                        _stick_table_emitted = True
+                # Bulgu #13 dedup (round 2) — categorisation routes
+                # `http-request track-sc<N>` to the `http_req` bucket
+                # (it IS an http-request rule). Build a stable
+                # signature from the directive + counter + fetch so
+                # multiple counters / fetches don't collide.
+                if stripped.startswith("http-request track-sc"):
+                    parts = stripped.split()
+                    # parts looks like ['http-request', 'track-sc0', 'src', ...]
+                    # The (track-scN, fetch) tuple uniquely identifies
+                    # the tracker. Anything after that (e.g. `table foo`)
+                    # is part of the SAME tracker and shouldn't change
+                    # the signature.
+                    if len(parts) >= 3:
+                        sig = (parts[1], parts[2])
+                        if sig in _track_sc_signatures:
+                            logger.debug(
+                                f"TRACK-SC DEDUP: skipping duplicate "
+                                f"`{stripped}` in frontend "
+                                f"'{frontend['name']}' — same "
+                                f"(counter, fetch) signature already "
+                                f"emitted; subsequent rate-limit "
+                                f"rules consume the same counter."
+                            )
+                            return
+                        _track_sc_signatures.add(sig)
+                _fe_buckets[cat].append(line)
+
             # ACME HTTP-01 Challenge routing (auto-managed)
             if frontend['mode'] == 'http' and cluster_info.get('acme_enabled', False):
-                config_lines.append("    acl is_acme_challenge path_beg /.well-known/acme-challenge/")
-                config_lines.append("    http-request allow if is_acme_challenge")
-                config_lines.append("    use_backend _acme_challenge_backend if is_acme_challenge")
-            
+                _emit_fe("    acl is_acme_challenge path_beg /.well-known/acme-challenge/")
+                _emit_fe("    http-request allow if is_acme_challenge")
+                _emit_fe("    use_backend _acme_challenge_backend if is_acme_challenge")
+
             # Frontend Options (option httplog, option forwardfor, etc.)
             # Place options early as per HAProxy best practice
             if frontend.get('options'):
                 for line in frontend['options'].split('\n'):
                     line_stripped = line.strip()
-                    # Skip empty strings, "[]", or invalid rules
                     if line_stripped and line_stripped not in ('[]', '{}', 'null', 'None'):
-                        # Lines are complete HAProxy option directives
-                        # Examples: "option httplog", "option forwardfor", "option dontlognull"
-                        config_lines.append(f"    {line_stripped}")
-            
+                        _emit_fe(f"    {line_stripped}")
+
             # CRITICAL: Validate frontend-backend mode compatibility
             if frontend.get('default_backend'):
                 default_backend_name = frontend['default_backend'].strip() if frontend['default_backend'] else ''
-                # Skip empty strings, "[]", or invalid backend names
                 if default_backend_name and default_backend_name not in ('[]', '{}', 'null', 'None'):
                     backend_mode = backend_modes.get(default_backend_name)
-                    
+
                     if backend_mode and backend_mode != frontend['mode']:
-                        # Mode mismatch - this will cause HAProxy validation to fail!
                         logger.error(f"CONFIG ERROR: Frontend '{frontend['name']}' mode '{frontend['mode']}' does not match backend '{default_backend_name}' mode '{backend_mode}'")
-                        config_lines.append(f"    # WARNING: Backend '{default_backend_name}' has mode '{backend_mode}' but frontend has mode '{frontend['mode']}'")
-                        config_lines.append(f"    # WARNING: HAProxy will reject this configuration! Please fix the mode mismatch in UI.")
-                    
-                    config_lines.append(f"    default_backend {default_backend_name}")
+                        # FIX-10 marker: 'BACKEND-MODE-WARNING' keyword in
+                        # the comment body routes it to the 'default_be'
+                        # bucket via _categorize_haproxy_directive, so the
+                        # warning emits next to the actual default_backend
+                        # directive instead of at the top of the block.
+                        _emit_fe(f"    # BACKEND-MODE-WARNING: Backend '{default_backend_name}' has mode '{backend_mode}' but frontend has mode '{frontend['mode']}'")
+                        _emit_fe(f"    # BACKEND-MODE-WARNING: HAProxy will reject this configuration! Please fix the mode mismatch in UI.")
+
+                    _emit_fe(f"    default_backend {default_backend_name}")
                 else:
                     logger.warning(f"CONFIG WARNING: Frontend '{frontend['name']}' has invalid default_backend: '{frontend.get('default_backend')}' - skipping")
-            
+
             # Timeouts - CRITICAL FIX: Append 'ms' suffix
             if frontend.get('timeout_client'):
-                config_lines.append(f"    timeout client {frontend['timeout_client']}ms")
+                _emit_fe(f"    timeout client {frontend['timeout_client']}ms")
             if frontend.get('timeout_http_request'):
-                config_lines.append(f"    timeout http-request {frontend['timeout_http_request']}ms")
-                
+                _emit_fe(f"    timeout http-request {frontend['timeout_http_request']}ms")
+
             # Max connections
             if frontend.get('maxconn'):
-                config_lines.append(f"    maxconn {frontend['maxconn']}")
-                
-            # Rate limiting
+                _emit_fe(f"    maxconn {frontend['maxconn']}")
+
+            # Rate limiting (frontend.rate_limit)
+            # R3.3: only the FIRST stick-table line is kept; subsequent
+            # WAF rate_limit rules track-sc0 against the same table.
             if frontend.get('rate_limit'):
-                config_lines.append(f"    stick-table type ip size 100k expire 30s store http_req_rate(10s)")
-                config_lines.append(f"    http-request track-sc0 src")
-                config_lines.append(f"    http-request deny if {{ sc_http_req_rate(0) gt {frontend['rate_limit']} }}")
-            
+                _emit_fe(f"    stick-table type ip size 100k expire 30s store http_req_rate(10s)")
+                _emit_fe(f"    http-request track-sc0 src")
+                _emit_fe(f"    http-request deny if {{ sc_http_req_rate(0) gt {frontend['rate_limit']} }}")
+
             # Compression
             if frontend.get('compression', False):
-                config_lines.append("    compression algo gzip")
-                config_lines.append("    compression type text/html text/plain text/css text/javascript application/javascript")
-            
+                _emit_fe("    compression algo gzip")
+                _emit_fe("    compression type text/html text/plain text/css text/javascript application/javascript")
+
             # Monitor URI
             if frontend.get('monitor_uri'):
                 monitor_uri = frontend['monitor_uri'].strip() if frontend['monitor_uri'] else ''
-                # Skip empty strings, "[]", or invalid values
                 if monitor_uri and monitor_uri not in ('[]', '{}', 'null', 'None'):
-                    config_lines.append(f"    monitor-uri {monitor_uri}")
+                    _emit_fe(f"    monitor-uri {monitor_uri}")
             
-            # CRITICAL FIX: ACL Rules MUST come BEFORE http-request directives
-            # HAProxy requires ACL definitions before they are referenced
-            # ACL Rules
+            # ACL Rules — categorized into 'acl' bucket; the buffer
+            # ordering already guarantees they are emitted before any
+            # http-request / use_backend that references them.
             if frontend.get('acl_rules'):
                 acl_rules = frontend['acl_rules']
-                
-                # CRITICAL DEBUG: Log type and raw value for troubleshooting
                 logger.info(f"ACL_RULES DEBUG: Frontend '{frontend['name']}' acl_rules type: {type(acl_rules)}, repr: {repr(acl_rules)}")
-                
-                # Parse JSON string if needed
+
                 if isinstance(acl_rules, str):
                     try:
                         acl_rules = json.loads(acl_rules)
                         logger.info(f"ACL_RULES DEBUG: Parsed as JSON list with {len(acl_rules) if isinstance(acl_rules, list) else 'N/A'} items")
-                    except:
+                    except (ValueError, json.JSONDecodeError):
                         logger.warning(f"ACL_RULES DEBUG: JSON parse failed, setting to empty list")
                         acl_rules = []
-                
+
                 if isinstance(acl_rules, list):
                     for idx, acl in enumerate(acl_rules):
                         if acl and isinstance(acl, str) and acl.strip():
-                            acl_text = acl.strip()
-                            
-                            # CRITICAL FIX: Remove any stray JSON characters that might have leaked
-                            acl_text = acl_text.strip('[]"\'')
-                            acl_text = acl_text.strip()
-                            
+                            acl_text = acl.strip().strip('[]"\'').strip()
                             logger.info(f"ACL_RULES DEBUG: Rule {idx}: original={repr(acl)}, cleaned={repr(acl_text)}")
-                            
-                            # Skip empty strings, "[]", or invalid ACL rules
                             if acl_text and acl_text not in ('[]', '{}', 'null', 'None'):
-                                # CRITICAL FIX: ACL rules from parser already include "acl" keyword
-                                # Don't add it again! Parser stores: "acl name condition value"
-                                # If ACL doesn't start with "acl ", add it (for manual entries)
                                 if not acl_text.startswith('acl '):
                                     acl_text = f"acl {acl_text}"
-                                config_lines.append(f"    {acl_text}")
-            
-            # HTTP Request Headers (must come AFTER ACL definitions)
+                                _emit_fe(f"    {acl_text}")
+
+            # HTTP Request Headers — categorized into 'http_req'.
             if frontend.get('request_headers'):
                 for line in frontend['request_headers'].split('\n'):
                     line_stripped = line.strip()
-                    # Skip empty strings, "[]", or invalid rules
                     if line_stripped and line_stripped not in ('[]', '{}', 'null', 'None'):
-                        # Lines are already complete directives (e.g., "http-request set-header X-Test 1")
-                        config_lines.append(f"    {line_stripped}")
-            
-            # HTTP Response Headers
+                        _emit_fe(f"    {line_stripped}")
+
+            # HTTP Response Headers — categorized into 'http_resp'.
             if frontend.get('response_headers'):
                 for line in frontend['response_headers'].split('\n'):
                     line_stripped = line.strip()
-                    # Skip empty strings, "[]", or invalid rules
                     if line_stripped and line_stripped not in ('[]', '{}', 'null', 'None'):
-                        # Lines are already complete directives (e.g., "http-response add-header X-Frame-Options DENY")
-                        config_lines.append(f"    {line_stripped}")
-            
-            # TCP Request Rules (for TCP mode frontends)
+                        _emit_fe(f"    {line_stripped}")
+
+            # TCP Request Rules — categorized into 'tcp_req' bucket so
+            # they always emit BEFORE any 'http-request' directive (HAProxy
+            # warns "tcp-request placed after http-request will still be
+            # processed before" — pre-fix that warning fired on every
+            # TCP-mode frontend with later WAF rules).
             if frontend.get('tcp_request_rules'):
                 for line in frontend['tcp_request_rules'].split('\n'):
                     line_stripped = line.strip()
-                    # Skip empty strings, "[]", or invalid rules
                     if line_stripped and line_stripped not in ('[]', '{}', 'null', 'None'):
-                        # Lines are already complete directives (e.g., "tcp-request inspect-delay 5s")
-                        config_lines.append(f"    {line_stripped}")
-            
-            # Redirect Rules
+                        _emit_fe(f"    {line_stripped}")
+
+            # Redirect Rules — categorized into 'redirect' bucket.
+            # R11.A-1 (PR-1 hotfix): use _format_redirect_rule helper which
+            # safely renders dict payloads (the wizard's `_build_redirect_rules`
+            # emits dicts) into proper HAProxy `redirect <type> ...` syntax.
             if frontend.get('redirect_rules'):
                 redirect_rules = frontend['redirect_rules']
-                # Parse JSON string if needed
                 if isinstance(redirect_rules, str):
                     try:
                         redirect_rules = json.loads(redirect_rules)
-                    except:
-                        # Legacy format: newline-separated string
+                    except (ValueError, json.JSONDecodeError):
                         redirect_rules = [r.strip() for r in redirect_rules.split('\n') if r.strip()]
-                
+
                 if isinstance(redirect_rules, list):
                     for redirect in redirect_rules:
-                        if redirect:
-                            redirect_text = str(redirect).strip() if redirect else ''
-                            # Skip empty strings, "[]", or invalid redirect rules
-                            if redirect_text and redirect_text not in ('[]', '{}', 'null', 'None'):
-                                # Redirect rules don't need prefix (e.g., "scheme https if !{ ssl_fc }")
-                                config_lines.append(f"    redirect {redirect_text}")
+                        line = _format_redirect_rule(redirect)
+                        if line:
+                            _emit_fe(line)
             
-            # Use Backend Rules
+            # Use Backend Rules — categorized into 'use_be' bucket so they
+            # always emit AFTER http-request rules (HAProxy parser
+            # warning fix) and BEFORE default_backend.
             if frontend.get('use_backend_rules'):
                 use_backend_rules = frontend['use_backend_rules']
-                
-                # CRITICAL DEBUG: Log type and raw value for troubleshooting
+
                 logger.info(f"USE_BACKEND DEBUG: Frontend '{frontend['name']}' use_backend_rules type: {type(use_backend_rules)}, repr: {repr(use_backend_rules)}")
-                
-                # Normalize to list
+
                 rules_list = None
-                
+
                 if isinstance(use_backend_rules, str):
-                    # String: try JSON parse first
                     try:
                         parsed = json.loads(use_backend_rules)
                         if isinstance(parsed, list):
@@ -501,72 +1121,49 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                         else:
                             logger.warning(f"Frontend '{frontend['name']}' use_backend_rules parsed to non-list: {type(parsed)}")
                     except json.JSONDecodeError as e:
-                        # Legacy format: newline-separated string
                         logger.info(f"USE_BACKEND DEBUG: JSON parse failed ({e}), trying newline split")
                         rules_list = [r.strip() for r in use_backend_rules.split('\n') if r.strip()]
-                
+
                 elif isinstance(use_backend_rules, (list, tuple)):
-                    # Already a sequence (asyncpg auto-converts JSONB to Python list)
                     rules_list = list(use_backend_rules)
                     logger.info(f"USE_BACKEND DEBUG: Already a list with {len(rules_list)} items")
-                
+
                 else:
-                    # Unexpected type - try to convert to string and log warning
                     logger.error(f"Frontend '{frontend['name']}' use_backend_rules has unexpected type {type(use_backend_rules)}: {use_backend_rules}")
-                    # Try to convert to string representation and parse
                     try:
                         rules_str = str(use_backend_rules)
                         if rules_str.startswith('[') and rules_str.endswith(']'):
-                            # Looks like a string representation of a list
                             rules_list = json.loads(rules_str)
                     except Exception as e:
                         logger.error(f"Failed to parse use_backend_rules: {e}")
                         rules_list = None
-                
-                # Write rules if we successfully parsed them
+
                 if rules_list:
                     for idx, rule in enumerate(rules_list):
                         if rule and isinstance(rule, str):
-                            rule_text = rule.strip()
-                            
-                            # CRITICAL FIX: Remove any stray JSON characters that might have leaked
-                            # This can happen due to serialization issues or database corruption
-                            # Remove leading/trailing brackets and quotes that shouldn't be there
-                            rule_text = rule_text.strip('[]"\'')
-                            rule_text = rule_text.strip()
-                            
+                            rule_text = rule.strip().strip('[]"\'').strip()
                             logger.info(f"USE_BACKEND DEBUG: Rule {idx}: original={repr(rule)}, cleaned={repr(rule_text)}")
-                            
-                            # Skip empty strings, "[]", or invalid use_backend rules
                             if rule_text and rule_text not in ('[]', '{}', 'null', 'None', '""', "''"):
-                                # CRITICAL FIX: use_backend rules from parser already include "use_backend" keyword
-                                # Don't add it again! Parser stores: "use_backend BackendName if condition"
-                                # If rule doesn't start with "use_backend ", add it (for manual entries)
                                 if not rule_text.startswith('use_backend '):
                                     rule_text = f"use_backend {rule_text}"
-                                config_lines.append(f"    {rule_text}")
+                                _emit_fe(f"    {rule_text}")
                                 logger.debug(f"Added use_backend rule: {rule_text}")
                         else:
                             logger.warning(f"Skipping invalid rule (type: {type(rule)}): {rule}")
-            
-            # Default backend (already added at the beginning of frontend section)
-            
+
             # Separate logging
             if frontend.get('log_separate', False):
-                config_lines.append(f"    log 127.0.0.1:514 local0 info")
-            
+                _emit_fe(f"    log 127.0.0.1:514 local0 info")
+
             # Add WAF rules for this frontend
             assigned_waf_rules = [rule for rule in waf_rules_records if frontend['id'] in rule['frontend_ids']]
-            # Combine with cluster-global rules
             effective_waf_rules = list(assigned_waf_rules) + list(cluster_global_waf_rules)
-            # Sort by priority then name if available
             try:
                 effective_waf_rules.sort(key=lambda r: (r.get('priority', 100), r.get('name', '')))
             except Exception:
                 pass
 
             for waf_rule in effective_waf_rules:
-                # Merge JSONB config payload into top-level dict for generator compatibility
                 merged_rule = dict(waf_rule)
                 cfg = waf_rule.get('config')
                 if cfg:
@@ -578,14 +1175,39 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                         cfg = {}
                     if isinstance(cfg, dict):
                         merged_rule.update(cfg)
-                
+
                 waf_config_lines = _generate_waf_config_lines(merged_rule)
                 if waf_config_lines:
                     logger.debug(f"Config Generation: Added {len(waf_config_lines)} lines for WAF rule '{waf_rule['name']}' (ID: {waf_rule['id']}, Status: {waf_rule.get('last_config_status', 'N/A')})")
-                    config_lines.extend(waf_config_lines)
+                    # R3.3: each WAF line is routed individually so the
+                    # buckets keep ordering correct AND so duplicate
+                    # `stick-table` declarations from multiple
+                    # rate_limit rules are deduped at the buffer.
+                    for waf_line in waf_config_lines:
+                        _emit_fe(waf_line)
                 else:
                     logger.warning(f"Config Generation: No config lines generated for WAF rule '{waf_rule['name']}' (ID: {waf_rule['id']}, Type: {waf_rule['rule_type']})")
-            
+
+            # ─────────────────────────────────────────────────────────────
+            # Flush the per-frontend buckets in canonical HAProxy order.
+            # The order below is the single source of truth for emit
+            # ordering in this generator. See `_categorize_haproxy_directive`
+            # for the per-prefix routing rules.
+            # ─────────────────────────────────────────────────────────────
+            for _bucket_key in (
+                "prelude",
+                "stick",
+                "tcp_req",
+                "acl",
+                "http_req",
+                "http_resp",
+                "redirect",
+                "use_be",
+                "default_be",
+            ):
+                if _fe_buckets[_bucket_key]:
+                    config_lines.extend(_fe_buckets[_bucket_key])
+
             config_lines.append("")
         
         # Add backends
@@ -767,10 +1389,43 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                             has_ca_file = True
                             logger.info(f"🔒 CONFIG SSL: Added ca-file for server {server_name}: {cert_path}")
                     
-                    # Handle ssl_verify option
-                    # Skip empty strings, "[]", or invalid values
+                    # Handle ssl_verify option.
+                    # Skip empty strings, "[]", or invalid values.
                     if ssl_verify and ssl_verify not in ('[]', '{}', 'null', 'None'):
-                        server_line += f" verify {ssl_verify}"
+                        # R18c audit fix (round 3 #3 — KRITIK config
+                        # validity): refuse to emit `verify required`
+                        # (or `verify optional`) when no `ca-file`
+                        # could be resolved for this server. Pre-fix
+                        # the operator's `ssl_verify=required` was
+                        # emitted verbatim even after a referenced
+                        # SSL cert was deleted / soft-deactivated,
+                        # producing a config that HAProxy reload
+                        # SOMETIMES rejected and SOMETIMES accepted
+                        # (depending on whether
+                        # `ssl-default-server-ca-file` was set in
+                        # the global block). The result was either a
+                        # hard reload failure or — worse — silent
+                        # acceptance with default system trust,
+                        # leading to upstream connections that
+                        # bypassed the operator's expected CA pin.
+                        # Downgrade to `verify none` with an ERROR
+                        # log so the operator sees the cause in
+                        # apply-changes diagnostics and can re-bind
+                        # the cert.
+                        verify_lower = ssl_verify.strip().lower()
+                        if verify_lower in ('required', 'optional') and not has_ca_file:
+                            server_line += " verify none"
+                            logger.error(
+                                f"CONFIG SSL DOWNGRADE: server {server_name} "
+                                f"requested verify={verify_lower} but no "
+                                "ca-file could be resolved (ssl_certificate_id "
+                                "missing or pointing at an inactive cert). "
+                                "Emitting 'verify none' to prevent reload "
+                                "failure / accidental system-trust validation. "
+                                "Re-bind the CA cert before applying."
+                            )
+                        else:
+                            server_line += f" verify {ssl_verify}"
                     elif not has_ca_file:
                         # CRITICAL: If SSL is enabled but no CA file and no explicit verify option,
                         # HAProxy 2.8+ defaults to 'verify required' which will fail without CA.
@@ -803,10 +1458,40 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     server_line += f" rise {server['rise']}"
                 
                 # Cookie Value (new field)
+                # Phase K Phase D follow-up (Bulgu #13) — only emit
+                # the per-server `cookie <value>` attribute when the
+                # PARENT backend actually has cookie-based session
+                # persistence enabled (`cookie SERVERID insert
+                # indirect nocache` directive). Without that, the
+                # per-server cookie is just metadata HAProxy stores
+                # but never inserts / reads → silently broken
+                # stickiness. Pre-fix the wizard let the operator
+                # set `cookie srv1` on a server while leaving the
+                # backend's cookie_name empty, producing a confusing
+                # half-configured stickiness.
                 cookie_val = server.get('cookie_value', '').strip() if server.get('cookie_value') else ''
+                parent_backend_has_cookie = bool(
+                    (backend.get('cookie_name') or '').strip()
+                    and backend['cookie_name'].strip() not in ('[]', '{}', 'null', 'None')
+                )
                 # Skip empty strings, "[]", or invalid values
                 if cookie_val and cookie_val not in ('[]', '{}', 'null', 'None'):
-                    server_line += f" cookie {cookie_val}"
+                    if parent_backend_has_cookie:
+                        server_line += f" cookie {cookie_val}"
+                    else:
+                        logger.warning(
+                            f"CONFIG COOKIE INCONSISTENT: server "
+                            f"{server_name} in backend "
+                            f"'{backend.get('name', '<unnamed>')}' has "
+                            f"cookie_value='{cookie_val}' but the "
+                            f"backend itself has no cookie persistence "
+                            f"directive (cookie_name is empty). The "
+                            f"per-server cookie is being SKIPPED in the "
+                            f"rendered config to prevent silently broken "
+                            f"stickiness. Enable backend-level cookie "
+                            f"persistence first, or clear the per-server "
+                            f"cookie_value."
+                        )
                 
                 # Backup Server
                 if server.get('backup_server', False):

@@ -32,9 +32,7 @@ print_error() {
 }
 
 # Configuration
-# Set REGISTRY environment variable or use default
-# Example: export REGISTRY="taylanbakircioglu"
-REGISTRY="${REGISTRY:-taylanbakircioglu}"
+REGISTRY="${REGISTRY:-your-registry.example.com/your-org}"
 BACKEND_IMAGE="${REGISTRY}/haproxy-openmanager-backend"
 FRONTEND_IMAGE="${REGISTRY}/haproxy-openmanager-frontend"
 VERSION="${VERSION:-latest}"
@@ -101,10 +99,10 @@ fi
 print_status "Updating Kubernetes manifests with new image versions..."
 
 # Update backend deployment
-sed -i.bak "s|image: taylanbakircioglu/haproxy-openmanager-backend:latest|image: $BACKEND_IMAGE:$VERSION|g" k8s/manifests/08-backend.yaml
+sed -i.bak "s|image: your-registry.example.com/your-org/haproxy-openmanager:<image-version>|image: $BACKEND_IMAGE:$VERSION|g" k8s/manifests/08-backend.yaml
 
 # Update frontend deployment  
-sed -i.bak "s|image: taylanbakircioglu/haproxy-openmanager-frontend:latest|image: $FRONTEND_IMAGE:$VERSION|g" k8s/manifests/09-frontend.yaml
+sed -i.bak "s|image: your-registry.example.com/your-org/haproxy-openmanager:<image-version>|image: $FRONTEND_IMAGE:$VERSION|g" k8s/manifests/09-frontend.yaml
 
 print_success "Kubernetes manifests updated"
 
@@ -123,8 +121,8 @@ echo "   oc apply -f k8s/manifests/08-backend.yaml"
 echo "   oc apply -f k8s/manifests/09-frontend.yaml"
 echo
 echo "3. Check deployment status:"
-echo "   oc get pods -n haproxy-openmanager"
-echo "   oc logs -f deployment/backend -n haproxy-openmanager"
-echo "   oc logs -f deployment/frontend -n haproxy-openmanager"
+echo "   oc get pods -n internal-haproxy-openmanager"
+echo "   oc logs -f deployment/backend -n internal-haproxy-openmanager"
+echo "   oc logs -f deployment/frontend -n internal-haproxy-openmanager"
 
 print_success "Docker image build completed!" 

@@ -82,6 +82,7 @@ import 'ace-builds/src-noconflict/ext-language_tools';
 
 // Configure ACE to use CDN for workers to avoid webpack/production issues
 import ace from 'ace-builds/src-noconflict/ace';
+import { extractApiError } from '../utils/apiError';
 ace.config.set('basePath', 'https://cdn.jsdelivr.net/npm/ace-builds@1.4.14/src-noconflict/');
 ace.config.set('workerPath', 'https://cdn.jsdelivr.net/npm/ace-builds@1.4.14/src-noconflict/');
 
@@ -295,7 +296,7 @@ const AgentManagement = () => {
       }
     } catch (error) {
       console.error('Failed to fetch agents:', error);
-      message.error('Failed to fetch agents: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to fetch agents: ' + (extractApiError(error, error.message)));
       setConnectionStatus('error');
     } finally {
       loadingRef.current = false;
@@ -509,7 +510,7 @@ const AgentManagement = () => {
         duration: 4
       });
     } catch (error) {
-      const errorMessage = error.response?.data?.detail || error.message;
+      const errorMessage = extractApiError(error, error.message);
       notification.error({
         message: 'Script Generation Failed',
         description: `Failed to generate installation script: ${errorMessage}`,
@@ -634,7 +635,7 @@ const AgentManagement = () => {
       // Refresh from server to ensure consistency (force=true to bypass throttling)
       await fetchAgents(true);
     } catch (error) {
-      const errorMessage = error.response?.data?.detail || error.message;
+      const errorMessage = extractApiError(error, error.message);
       notification.error({
         message: 'Delete Failed',
         description: `Failed to delete agent "${agentName}": ${errorMessage}`,
@@ -661,7 +662,7 @@ const AgentManagement = () => {
       });
       fetchAgents(true);
     } catch (error) {
-      const errorMessage = error.response?.data?.detail || error.message;
+      const errorMessage = extractApiError(error, error.message);
       notification.error({
         message: 'Toggle Failed',
         description: `Failed to ${newStatus ? 'enable' : 'disable'} agent "${agentName}": ${errorMessage}`,
@@ -705,7 +706,7 @@ const AgentManagement = () => {
       setAgentVersions(platforms);
       setScriptUpdateAvailable(response.data.script_update_available || false);
     } catch (error) {
-      message.error('Failed to fetch agent versions: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to fetch agent versions: ' + (extractApiError(error, error.message)));
     } finally {
       setAgentVersionLoading(false);
     }
@@ -776,7 +777,7 @@ const AgentManagement = () => {
       }
     } catch (error) {
       hide();
-      message.error('Failed to reset scripts: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to reset scripts: ' + (extractApiError(error, error.message)));
     }
   };
 
@@ -808,7 +809,7 @@ const AgentManagement = () => {
       });
       
     } catch (error) {
-      message.error('Failed to update version: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to update version: ' + (extractApiError(error, error.message)));
     }
   };
 
@@ -926,7 +927,7 @@ const AgentManagement = () => {
       });
       
     } catch (error) {
-      message.error('Failed to save script changes: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to save script changes: ' + (extractApiError(error, error.message)));
     } finally {
       setScriptSaving(false);
     }
@@ -1050,7 +1051,7 @@ const AgentManagement = () => {
         }
       }, 1000); // 1s delay for agent to complete upgrade (reduced from 3s)
     } catch (error) {
-      const errorMessage = error.response?.data?.detail || error.message;
+      const errorMessage = extractApiError(error, error.message);
       console.error(`❌ Upgrade failed for agent ${agentId}:`, errorMessage);
       notification.error({
         message: `${actionType} Failed`,
@@ -1088,7 +1089,7 @@ const AgentManagement = () => {
       
       setAgentLogs(response.data.logs || []);
     } catch (error) {
-      message.error('Failed to load activity logs: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to load activity logs: ' + (extractApiError(error, error.message)));
       setAgentLogs([]);
     } finally {
       setAgentLogsLoading(false);

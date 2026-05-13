@@ -20,7 +20,9 @@ import {
   SearchOutlined,
   ClusterOutlined,
   BulbOutlined,
-  BulbFilled
+  BulbFilled,
+  PlusOutlined,
+  ThunderboltOutlined
 } from '@ant-design/icons';
 
 import Dashboard from './components/DashboardV2';
@@ -43,6 +45,8 @@ import ClusterManagement from './components/ClusterManagement';
 import Configuration from './components/Configuration';
 import APIDocumentation from './components/APIDocumentation';
 import IPInventory from './components/IPInventory';
+import SiteWizard from './components/SiteWizard';
+import SiteDrafts from './components/SiteDrafts';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ClusterProvider } from './contexts/ClusterContext';
 import { ThemeProvider, useTheme } from './contexts/ThemeContext';
@@ -62,6 +66,51 @@ const { Text } = Typography;
       icon: <DashboardOutlined />,
       label: <Link to="/">Dashboard</Link>,
     },
+    // R18: rebrand to "Sites" / "New Site (Wizard)".
+    //
+    // Rationale (user feedback after R17):
+    //  - "Quick Setup" was ambiguous — it could mean "set up the cluster",
+    //    "set up an account", "set up TLS"... not specific enough.
+    //  - "New Site (Wizard)" matches what dominant ingress tools call
+    //    this exact concept: Cloudflare ("Add a site"), nginx-proxy-
+    //    manager ("Proxy Hosts"), Plesk/cPanel ("Add domain / new site"),
+    //    Caddy admin UIs ("Sites"). It is also self-explanatory: the
+    //    operator publishes a *site* (frontend + backend + SSL).
+    //  - Group label "Sites" is entity-oriented (matches Frontends,
+    //    Backend Servers, SSL Certificates pattern in this very menu).
+    //
+    // Backward-compat:
+    //  - Legacy R17 routes /quick-setup{,/drafts} kept as aliases.
+    //  - Pre-R17 routes /proxied-hosts/{new,drafts} also kept.
+    //  - All three resolve to the SAME components — old bookmarks /
+    //    screenshots / issue links keep working.
+    {
+      key: 'sites-group',
+      icon: <GlobalOutlined />,
+      label: 'Sites',
+      children: [
+        {
+          key: '/sites/new',
+          icon: <ThunderboltOutlined style={{ color: '#1677ff' }} />,
+          label: (
+            <Tooltip placement="right" title="New Site (Wizard) — publish a site (frontend + backend + SSL) in one guided flow">
+              <Link to="/sites/new">New Site (Wizard)</Link>
+            </Tooltip>
+          ),
+        },
+        {
+          key: '/sites/drafts',
+          icon: <FileTextOutlined />,
+          label: <Link to="/sites/drafts">Site Drafts</Link>,
+        },
+      ],
+    },
+    // R18b round 8: New Site (Wizard) is now a top-level group, so
+    // the Frontends entry no longer needs a single "All Frontends"
+    // child under a collapsible group. Flattening to a top-level
+    // link removes a click for every operator and matches the rest
+    // of the sidebar (Backends, SSL Certificates, Apply Changes...
+    // are all top-level).
     {
       key: '/frontends',
       icon: <GlobalOutlined />,
@@ -153,7 +202,19 @@ function AppContent() {
   const [appVersion, setAppVersion] = React.useState('');
 
   React.useEffect(() => {
-    setSelectedKey(location.pathname);
+    // R18 audit fix: legacy aliases (/proxied-hosts/* and /quick-setup/*)
+    // resolve to the same components as the canonical /sites/* paths,
+    // but the menu items only carry the canonical keys. Without this
+    // normalization, a user landing on a bookmarked legacy URL sees no
+    // sidebar highlight, which feels like the route is broken.
+    const path = location.pathname;
+    let key = path;
+    if (path === '/proxied-hosts/new' || path === '/quick-setup') {
+      key = '/sites/new';
+    } else if (path === '/proxied-hosts/drafts' || path === '/quick-setup/drafts') {
+      key = '/sites/drafts';
+    }
+    setSelectedKey(key);
   }, [location.pathname]);
 
   React.useEffect(() => {
@@ -264,6 +325,20 @@ function AppContent() {
             theme="dark"
             mode="inline"
             selectedKeys={[selectedKey]}
+            // R18: auto-open the relevant submenu based on the current
+            // route. The Sites group expands on the canonical /sites/*
+            // route AND on every legacy alias (/quick-setup/*, /proxied-
+            // hosts/*) — so a user landing on a bookmarked old URL still
+            // sees the menu in the right state.
+            defaultOpenKeys={[
+              ...(selectedKey.startsWith('/sites') ||
+              selectedKey.startsWith('/quick-setup') ||
+              selectedKey.startsWith('/proxied-hosts')
+                ? ['sites-group']
+                : []),
+              // R18b round 8: frontends-group flattened to a top-level
+              // link, so no defaultOpenKeys entry is needed for it.
+            ]}
             items={menuItems}
             style={isDarkMode ? { background: '#141414' } : undefined}
           />
@@ -363,6 +438,19 @@ function AppContent() {
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/frontends" element={<FrontendManagement />} />
+              {/* R18: canonical "Sites" routes — the New Site (Wizard)
+                  is the primary entry point under the top-level Sites
+                  group. Two layers of legacy aliases follow so neither
+                  v1.5.0 (proxied-hosts) nor R17 (quick-setup) deep links
+                  break. All three resolve to the same components. */}
+              <Route path="/sites/new" element={<SiteWizard />} />
+              <Route path="/sites/drafts" element={<SiteDrafts />} />
+              {/* R17 legacy aliases */}
+              <Route path="/quick-setup" element={<SiteWizard />} />
+              <Route path="/quick-setup/drafts" element={<SiteDrafts />} />
+              {/* v1.5.0 legacy aliases */}
+              <Route path="/proxied-hosts/new" element={<SiteWizard />} />
+              <Route path="/proxied-hosts/drafts" element={<SiteDrafts />} />
               <Route path="/backends" element={<BackendServers />} />
               <Route path="/ssl-certificates" element={<SSLManagement />} />
               <Route path="/waf" element={<WAFManagement />} />

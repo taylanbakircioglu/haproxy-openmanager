@@ -263,12 +263,18 @@ async def submit_config_response(
     Agent submits the haproxy.cfg content in response to a request.
     """
     try:
-        # Validate agent API key
+        # Bulgu #75 (round-22 audit) — same auth-bypass fix as in
+        # `routers/agent.py`. Pre-fix the `if x_api_key and not
+        # agent_auth` short-circuited when no header was sent at
+        # all, letting an unauthenticated caller post arbitrary
+        # HAProxy-config content claiming to come from an agent.
         agent_auth = await validate_agent_api_key(x_api_key)
-        
-        if x_api_key and not agent_auth:
-            logger.warning(f"Invalid API key provided by agent '{agent_name}' for config response")
-            raise HTTPException(status_code=401, detail="Invalid API key")
+        if not agent_auth:
+            logger.warning(
+                f"Rejected config-response call for agent {agent_name!r}: "
+                f"missing or invalid x-api-key"
+            )
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
         
         conn = await get_database_connection()
         
@@ -322,12 +328,28 @@ async def submit_config_response(
 # ====== CLEANUP ENDPOINT ======
 
 @router.delete("/cleanup-expired")
-async def cleanup_expired_requests():
+async def cleanup_expired_requests(authorization: str = Header(None)):
     """
     Cleanup expired config requests and responses.
     Called by scheduled job or manually.
+
+    Bulgu #78 (round-22 audit) — pre-fix this endpoint had NO
+    auth at all. Any unauthenticated caller could DROP rows
+    from `agent_config_requests` / `agent_config_responses`,
+    which directly drives the cluster's "what did the operator
+    ask the agent to fetch" history. Restrict to admin users —
+    legitimate callers are an internal scheduled job (which
+    can supply an admin bearer) or a human admin pressing
+    Maintenance → Cleanup in the UI.
     """
     try:
+        from auth_middleware import get_current_user_from_token
+        current_user = await get_current_user_from_token(authorization)
+        if not current_user.get("is_admin", False):
+            raise HTTPException(
+                status_code=403,
+                detail="Only admin users can run cleanup-expired"
+            )
         conn = await get_database_connection()
         
         # Delete expired responses

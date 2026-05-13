@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request, Header
-from typing import Optional
+from typing import Optional, List, Any
 import logging
 import time
 import hashlib
@@ -12,6 +12,73 @@ from services.haproxy_config import generate_haproxy_config_for_cluster
 
 router = APIRouter(prefix="/api/backends", tags=["backends", "servers"])
 logger = logging.getLogger(__name__)
+
+
+# Bulgu #71 / #72 (round-22 audit) — shared helpers for safe
+# manipulation of `use_backend` rule strings on backend delete /
+# rename cascades. Pre-fix the delete path used a naive
+# `backend_name in rule` substring match to decide which rules
+# referenced the deleted backend — which collaterally wiped:
+#
+#   * `use_backend api-v2 if is_apiv2`     (when deleting "api")
+#   * `use_backend mobile_api if is_mob`   (deleting "api")
+#   * any acl_rule whose body happened to mention the backend
+#     name, e.g. `is_api hdr(host) -i api.example.com` (deleting
+#     "api" would also delete the unrelated ACL definition).
+#
+# Worse, the rename path didn't update `use_backend_rules` at all,
+# so renaming the backend silently broke every routing rule that
+# referenced it — the rendered HAProxy config would reference a
+# non-existent backend and the agent's `haproxy -c` would either
+# reject the reload or send traffic to `default_backend`.
+#
+# `_extract_use_backend_target` parses the first non-keyword token
+# (the backend name) so callers can compare EXACTLY. ACL rules are
+# intentionally not touched here — ACLs are reusable predicates,
+# not tied to any single backend; the prior coupling was a bug.
+def _extract_use_backend_target(rule: Any) -> Optional[str]:
+    """Return the backend name targeted by a `use_backend` rule
+    string, or None for non-string / empty / malformed input.
+
+    Handles both stored shapes:
+      * raw HAProxy form: ``"use_backend api if is_api"``
+      * FE-stripped form: ``"api if is_api"`` (the FE rule builder
+        drops the ``use_backend`` keyword on round-trip).
+    """
+    if not isinstance(rule, str):
+        return None
+    s = rule.strip()
+    if not s:
+        return None
+    if s.lower().startswith("use_backend "):
+        s = s[len("use_backend "):].lstrip()
+    parts = s.split(None, 1)
+    if not parts:
+        return None
+    return parts[0]
+
+
+def _rename_use_backend_target(rule: Any, old_name: str, new_name: str) -> Any:
+    """Return a copy of `rule` with the targeted backend name
+    rewritten from `old_name` to `new_name`. Rules that don't
+    target `old_name` are returned UNCHANGED so unrelated rules
+    are never mutated. Preserves the ``use_backend `` prefix
+    exactly as it appeared in the input."""
+    if not isinstance(rule, str):
+        return rule
+    s = rule.strip()
+    if not s:
+        return rule
+    prefix = ""
+    body = s
+    if s.lower().startswith("use_backend "):
+        prefix = "use_backend "
+        body = s[len("use_backend "):].lstrip()
+    parts = body.split(None, 1)
+    if not parts or parts[0] != old_name:
+        return rule
+    rest = parts[1] if len(parts) > 1 else ""
+    return f"{prefix}{new_name}{' ' + rest if rest else ''}"
 
 def filter_httpchk_from_options(options: Optional[str]) -> Optional[str]:
     """
@@ -133,7 +200,11 @@ async def check_server_health(host: str, port: int, timeout: int = 5) -> str:
         return "DOWN"
 
 @router.get("", summary="Get All Backends", response_description="List of backends with servers")
-async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool = False):
+async def get_backends(
+    cluster_id: Optional[int] = None,
+    include_inactive: bool = False,
+    authorization: str = Header(None),
+):
     """
     # Get All Backends
     
@@ -202,6 +273,16 @@ async def get_backends(cluster_id: Optional[int] = None, include_inactive: bool 
     - **first**: First server with available slots
     """
     try:
+        # R18c audit fix (round 6 #2 — KRITIK info leak): require an
+        # authenticated caller. Pre-fix the endpoint accepted
+        # anonymous GETs and returned full backend topology
+        # (server addresses, ports, ca-file paths, weights). With
+        # wizard-created rows now in the table, any unauthenticated
+        # reader could enumerate the platform's complete backend
+        # inventory including upstream IP addresses behind the
+        # reverse proxy.
+        from auth_middleware import get_current_user_from_token
+        await get_current_user_from_token(authorization)
         conn = await get_database_connection()
         
         # Get backends with optional cluster filter
@@ -701,16 +782,43 @@ async def create_backend(backend: BackendConfig, authorization: str = Header(Non
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/{backend_id}/servers")
-async def add_server_to_backend(backend_id: int, server: ServerConfig):
-    """Add server to backend"""
+async def add_server_to_backend(
+    backend_id: int,
+    server: ServerConfig,
+    authorization: str = Header(None),
+):
+    """Add server to backend.
+
+    Bulgu #76 (round-22 audit) — pre-fix this handler had NO
+    authentication at all (no `authorization` Header, no call
+    to `get_current_user_from_token`, no `check_user_permission`).
+    Anyone who could reach the API surface could POST a server
+    into any backend in any cluster — a complete write-access
+    bypass on the data plane. The sibling DELETE / PUT / toggle
+    handlers all required authentication, so the omission was
+    almost certainly an oversight rather than intentional.
+    """
     try:
+        from auth_middleware import get_current_user_from_token, check_user_permission
+        current_user = await get_current_user_from_token(authorization)
+        has_permission = await check_user_permission(current_user["id"], "backends", "update")
+        if not has_permission:
+            raise HTTPException(
+                status_code=403,
+                detail="Insufficient permissions: backends.update required",
+            )
+
         conn = await get_database_connection()
-        
+
         # Get backend name and cluster_id
         backend = await conn.fetchrow("SELECT name, cluster_id FROM backends WHERE id = $1", backend_id)
         if not backend:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="Backend not found")
+
+        # Multi-tenancy: validate the operator has access to this cluster.
+        if backend['cluster_id']:
+            await validate_user_cluster_access(current_user['id'], backend['cluster_id'], conn)
         
         # Check if server name already exists in this backend within the same cluster (only active servers)
         existing = await conn.fetchrow("""
@@ -1006,29 +1114,135 @@ async def update_backend(backend_id: int, backend_update: BackendConfigUpdate, r
             # CRITICAL FIX: Update server backend_name references if backend name changed
             if backend_name_changed:
                 logger.info(f"BACKEND UPDATE: Backend name changed from '{old_backend_name}' to '{new_backend_name}', updating server references")
-                await conn.execute("""
-                    UPDATE backend_servers 
-                    SET backend_name = $1, updated_at = CURRENT_TIMESTAMP
-                    WHERE backend_name = $2
-                """, new_backend_name, old_backend_name)
-                
-                updated_servers_count = await conn.fetchval("""
-                    SELECT COUNT(*) FROM backend_servers WHERE backend_name = $1
-                """, new_backend_name)
+                # Bulgu #73 (round-22 audit) — cluster_id filter was
+                # MISSING pre-fix. The `backends` table allows the
+                # same name in different clusters (the unique key is
+                # `(cluster_id, name)`), so the un-scoped UPDATE
+                # would rewrite `backend_servers.backend_name` ACROSS
+                # CLUSTERS, leaving the OTHER cluster's backend
+                # orphaned (its servers now point at the new name on
+                # this cluster). Multi-tenant data-pollution at the
+                # storage layer. Scope to the rename's home cluster.
+                if cluster_id is not None:
+                    await conn.execute("""
+                        UPDATE backend_servers
+                        SET backend_name = $1, updated_at = CURRENT_TIMESTAMP
+                        WHERE backend_name = $2 AND cluster_id = $3
+                    """, new_backend_name, old_backend_name, cluster_id)
+                else:
+                    # Legacy cluster_id=NULL rows
+                    await conn.execute("""
+                        UPDATE backend_servers
+                        SET backend_name = $1, updated_at = CURRENT_TIMESTAMP
+                        WHERE backend_name = $2 AND cluster_id IS NULL
+                    """, new_backend_name, old_backend_name)
+
+                if cluster_id is not None:
+                    updated_servers_count = await conn.fetchval("""
+                        SELECT COUNT(*) FROM backend_servers
+                        WHERE backend_name = $1 AND cluster_id = $2
+                    """, new_backend_name, cluster_id)
+                else:
+                    updated_servers_count = await conn.fetchval("""
+                        SELECT COUNT(*) FROM backend_servers
+                        WHERE backend_name = $1 AND cluster_id IS NULL
+                    """, new_backend_name)
                 logger.info(f"BACKEND UPDATE: Updated {updated_servers_count} server references to new backend name")
-                
+
                 # CRITICAL FIX: Update frontend default_backend references if backend name changed
                 logger.info(f"FRONTEND UPDATE: Updating frontend default_backend references from '{old_backend_name}' to '{new_backend_name}'")
-                await conn.execute("""
-                    UPDATE frontends 
-                    SET default_backend = $1, updated_at = CURRENT_TIMESTAMP
-                    WHERE default_backend = $2 AND cluster_id = $3
-                """, new_backend_name, old_backend_name, cluster_id)
-                
-                updated_frontends_count = await conn.fetchval("""
-                    SELECT COUNT(*) FROM frontends WHERE default_backend = $1 AND cluster_id = $2
-                """, new_backend_name, cluster_id)
+                if cluster_id is not None:
+                    await conn.execute("""
+                        UPDATE frontends
+                        SET default_backend = $1, last_config_status = 'PENDING', updated_at = CURRENT_TIMESTAMP
+                        WHERE default_backend = $2 AND cluster_id = $3
+                    """, new_backend_name, old_backend_name, cluster_id)
+                else:
+                    await conn.execute("""
+                        UPDATE frontends
+                        SET default_backend = $1, last_config_status = 'PENDING', updated_at = CURRENT_TIMESTAMP
+                        WHERE default_backend = $2 AND cluster_id IS NULL
+                    """, new_backend_name, old_backend_name)
+
+                if cluster_id is not None:
+                    updated_frontends_count = await conn.fetchval("""
+                        SELECT COUNT(*) FROM frontends
+                        WHERE default_backend = $1 AND cluster_id = $2
+                    """, new_backend_name, cluster_id)
+                else:
+                    updated_frontends_count = await conn.fetchval("""
+                        SELECT COUNT(*) FROM frontends
+                        WHERE default_backend = $1 AND cluster_id IS NULL
+                    """, new_backend_name)
                 logger.info(f"FRONTEND UPDATE: Updated {updated_frontends_count} frontend default_backend references to new backend name")
+
+                # Bulgu #72 (round-22 audit) — cascade the rename
+                # into every frontend's `use_backend_rules` JSONB so
+                # `use_backend <old_name> if <cond>` becomes
+                # `use_backend <new_name> if <cond>`. Pre-fix the
+                # rename only touched `default_backend` and
+                # `backend_servers`; the routing rules silently
+                # broke because they still referenced the disappeared
+                # backend name. The agent's `haproxy -c` would then
+                # either fail the reload (`'no such backend'`) or —
+                # if a `default_backend` was also configured — emit
+                # traffic to the default and the operator would see
+                # 503 / wrong-app responses without an obvious
+                # control-plane cause.
+                #
+                # ACL rules are NOT cascaded — they don't reference
+                # backend names (they reference path/host patterns),
+                # and even if an ACL definition shared a backend's
+                # name as a substring, that was coincidence, not a
+                # contract.
+                if cluster_id is not None:
+                    frontends_with_use_backend = await conn.fetch("""
+                        SELECT id, name, use_backend_rules
+                        FROM frontends
+                        WHERE cluster_id = $1 AND is_active = TRUE
+                    """, cluster_id)
+                else:
+                    frontends_with_use_backend = await conn.fetch("""
+                        SELECT id, name, use_backend_rules
+                        FROM frontends
+                        WHERE cluster_id IS NULL AND is_active = TRUE
+                    """)
+
+                rename_count = 0
+                for fe in frontends_with_use_backend:
+                    raw_rules = fe['use_backend_rules'] if fe['use_backend_rules'] else []
+                    # asyncpg JSONB → already decoded; handle the
+                    # legacy string-shaped column defensively.
+                    if isinstance(raw_rules, str):
+                        try:
+                            raw_rules = json.loads(raw_rules)
+                        except (TypeError, ValueError):
+                            raw_rules = []
+                    if not isinstance(raw_rules, list):
+                        continue
+                    renamed = [
+                        _rename_use_backend_target(r, old_backend_name, new_backend_name)
+                        for r in raw_rules
+                    ]
+                    if renamed != raw_rules:
+                        await conn.execute("""
+                            UPDATE frontends
+                            SET use_backend_rules = $1,
+                                last_config_status = 'PENDING',
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = $2
+                        """, json.dumps(renamed), fe['id'])
+                        rename_count += 1
+                        logger.info(
+                            f"BACKEND RENAME: cascaded {old_backend_name!r}"
+                            f" → {new_backend_name!r} in frontend"
+                            f" {fe['name']!r} use_backend_rules"
+                        )
+                if rename_count:
+                    logger.info(
+                        f"BACKEND RENAME: updated use_backend_rules in"
+                        f" {rename_count} frontend(s)"
+                    )
 
         async with conn.transaction():
             # Update main backend properties
@@ -1268,22 +1482,39 @@ async def delete_backend(backend_id: int, authorization: str = Header(None)):
             # Parse use_backend_rules (JSONB array)
             use_backend_rules = frontend['use_backend_rules'] if frontend['use_backend_rules'] else []
             acl_rules = frontend['acl_rules'] if frontend['acl_rules'] else []
-            
-            # Filter out rules referencing deleted backend
-            filtered_use_backend = [rule for rule in use_backend_rules if backend_name not in rule]
-            filtered_acl = [rule for rule in acl_rules if backend_name not in rule]
-            
+
+            # Bulgu #71 (round-22 audit) — drop only the use_backend
+            # entries whose FIRST TOKEN matches the deleted backend
+            # exactly. Pre-fix the naive `backend_name not in rule`
+            # substring filter wiped `use_backend api-v2 ...` when
+            # "api" was deleted (and similarly for any `*api*` /
+            # `api*` backend pair). The `acl_rules` list is left
+            # untouched on purpose — ACL definitions are reusable
+            # predicates (e.g. `is_api hdr(host) -i api.example.com`)
+            # and have no semantic dependency on the deleted backend
+            # even when their name happens to share a substring.
+            filtered_use_backend = [
+                rule for rule in use_backend_rules
+                if _extract_use_backend_target(rule) != backend_name
+            ]
+            filtered_acl = list(acl_rules)
+
             # Update frontend if rules were removed
-            if len(filtered_use_backend) != len(use_backend_rules) or len(filtered_acl) != len(acl_rules):
+            if len(filtered_use_backend) != len(use_backend_rules):
                 import json
                 await conn.execute("""
-                    UPDATE frontends 
-                    SET use_backend_rules = $1, acl_rules = $2, 
+                    UPDATE frontends
+                    SET use_backend_rules = $1, acl_rules = $2,
                         last_config_status = 'PENDING', updated_at = CURRENT_TIMESTAMP
                     WHERE id = $3
                 """, json.dumps(filtered_use_backend), json.dumps(filtered_acl), frontend['id'])
-                
-                logger.info(f"BACKEND DELETE: Cleaned ACL/use_backend rules for frontend '{frontend['name']}' (removed {backend_name} references)")
+
+                logger.info(
+                    f"BACKEND DELETE: Cleaned use_backend rules for frontend "
+                    f"'{frontend['name']}' (removed {len(use_backend_rules) - len(filtered_use_backend)} "
+                    f"rule(s) targeting {backend_name!r}, "
+                    f"{len(filtered_acl)} acl_rules preserved)"
+                )
         
         # 3. Soft delete the backend (mark as inactive and set PENDING)
         await conn.execute("""
@@ -1332,12 +1563,36 @@ async def delete_backend(backend_id: int, authorization: str = Header(None)):
 
 @router.delete("/servers/{server_id}")
 async def delete_server(server_id: int, request: Request, authorization: str = Header(None)):
-    """Delete a server from backend"""
+    """Delete a server from backend.
+
+    Bulgu #77 (round-22 audit) — pre-fix this handler only
+    authenticated the caller (`get_current_user_from_token`)
+    and did NOT check `backends.update` permission, so any
+    logged-in user — including read-only viewers — could
+    delete servers. The sibling backend-level DELETE / PUT /
+    POST handlers all enforced `backends.delete` /
+    `backends.update`; servers are part of the same RBAC
+    surface and were missing the same gate.
+
+    Bulgu #79 (round-22 audit) — also missing cluster
+    access validation. An operator scoped to cluster 1 could
+    delete a server in cluster 2 if they had `backends.update`
+    permission globally.
+    """
     try:
-        from auth_middleware import get_current_user_from_token
+        from auth_middleware import get_current_user_from_token, check_user_permission
         current_user = await get_current_user_from_token(authorization)
-        
+        has_permission = await check_user_permission(current_user["id"], "backends", "update")
+        if not has_permission:
+            raise HTTPException(
+                status_code=403,
+                detail="Insufficient permissions: backends.update required",
+            )
+
         conn = await get_database_connection()
+        # Server's cluster is fetched right below; we validate
+        # access AFTER the fetch so the 404 path takes priority
+        # over the 403 (mirrors existing patterns in this file).
         
         # Get server info before deletion
         server = await conn.fetchrow("""
@@ -1348,20 +1603,25 @@ async def delete_server(server_id: int, request: Request, authorization: str = H
         if not server:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="Server not found")
-        
+
         cluster_id = server['cluster_id']
         backend_name = server['backend_name']
         server_name = server['server_name']
-        
+
+        # Bulgu #79 — validate the operator has access to the
+        # server's owning cluster BEFORE accepting the delete.
+        if cluster_id:
+            await validate_user_cluster_access(current_user['id'], cluster_id, conn)
+
         # Get request body for cluster_id validation
         request_body = await request.json() if hasattr(request, 'json') else {}
         expected_cluster_id = request_body.get('cluster_id')
-        
+
         # Validate cluster ownership for multi-cluster security
         if expected_cluster_id and cluster_id != expected_cluster_id:
             await close_database_connection(conn)
             raise HTTPException(
-                status_code=403, 
+                status_code=403,
                 detail=f"Server belongs to cluster {cluster_id}, not cluster {expected_cluster_id}"
             )
         
@@ -1456,11 +1716,21 @@ async def delete_server(server_id: int, request: Request, authorization: str = H
 
 @router.put("/servers/{server_id}")
 async def update_server(server_id: int, server_data: dict, request: Request, authorization: str = Header(None)):
-    """Update server details"""
+    """Update server details.
+
+    Bulgu #77 (round-22 audit) — see `delete_server` above; the
+    same authn-only / no-RBAC gap existed here.
+    """
     try:
-        from auth_middleware import get_current_user_from_token
+        from auth_middleware import get_current_user_from_token, check_user_permission
         current_user = await get_current_user_from_token(authorization)
-        
+        has_permission = await check_user_permission(current_user["id"], "backends", "update")
+        if not has_permission:
+            raise HTTPException(
+                status_code=403,
+                detail="Insufficient permissions: backends.update required",
+            )
+
         conn = await get_database_connection()
         
         # PHASE 2: Get FULL server record for snapshot
@@ -1471,9 +1741,13 @@ async def update_server(server_id: int, server_data: dict, request: Request, aut
         if not existing_server:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="Server not found")
-        
+
         cluster_id = existing_server['cluster_id']
-        
+
+        # Bulgu #79 — validate cluster access.
+        if cluster_id:
+            await validate_user_cluster_access(current_user['id'], cluster_id, conn)
+
         # Build dynamic update query
         update_fields = []
         update_values = []
@@ -1617,13 +1891,22 @@ async def update_server(server_id: int, server_data: dict, request: Request, aut
 
 @router.put("/servers/{server_id}/toggle")
 async def toggle_server(server_id: int, request: Request, authorization: str = Header(None)):
-    """Toggle server enabled/disabled status"""
+    """Toggle server enabled/disabled status.
+
+    Bulgu #77 (round-22 audit) — see `delete_server` above.
+    """
     logger.error(f"SERVER TOGGLE DEBUG: Starting toggle for server_id={server_id}")
     try:
-        from auth_middleware import get_current_user_from_token
+        from auth_middleware import get_current_user_from_token, check_user_permission
         current_user = await get_current_user_from_token(authorization)
+        has_permission = await check_user_permission(current_user["id"], "backends", "update")
+        if not has_permission:
+            raise HTTPException(
+                status_code=403,
+                detail="Insufficient permissions: backends.update required",
+            )
         logger.error(f"SERVER TOGGLE DEBUG: User authenticated: {current_user.get('username')}")
-        
+
         conn = await get_database_connection()
         
         # Get server info
@@ -1635,13 +1918,17 @@ async def toggle_server(server_id: int, request: Request, authorization: str = H
         if not server:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="Server not found")
-        
+
+        # Bulgu #79 — validate cluster access.
+        if server['cluster_id']:
+            await validate_user_cluster_access(current_user['id'], server['cluster_id'], conn)
+
         # Toggle server status
         new_status = not server['is_active']
         logger.error(f"SERVER TOGGLE DEBUG: Toggling server {server['server_name']} from {server['is_active']} to {new_status}")
         await conn.execute("""
-            UPDATE backend_servers 
-            SET is_active = $1, updated_at = CURRENT_TIMESTAMP 
+            UPDATE backend_servers
+            SET is_active = $1, updated_at = CURRENT_TIMESTAMP
             WHERE id = $2
         """, new_status, server_id)
         logger.error(f"SERVER TOGGLE DEBUG: Server status updated successfully")

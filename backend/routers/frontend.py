@@ -1,17 +1,218 @@
 from fastapi import APIRouter, HTTPException, Request, Header
-from typing import Optional
+from typing import Any, List, Optional, Tuple
 import logging
+import re
 import time
 import hashlib
 import json
 
 from models import FrontendConfig
+from models.frontend import _frontend_has_acl_contradiction
 from database.connection import get_database_connection, close_database_connection
 from utils.activity_log import log_user_activity
 from services.haproxy_config import generate_haproxy_config_for_cluster
 
 router = APIRouter(prefix="/api/frontends", tags=["frontends"])
 logger = logging.getLogger(__name__)
+
+
+# Bulgu #62 (round-22 audit) — handler-level enforcement of the
+# `X !X` self-contradiction guard. Pre-fix this check lived inside
+# the `FrontendConfig` Pydantic validators (Bulgu #13) and ran on
+# EVERY operation — including UPDATE. Frontends created before the
+# guard landed could carry stale contradictory rules (or were
+# inserted via a pre-Bulgu-#13 wizard build). After the guard
+# landed those frontends became unupdate-able from the
+# FrontendManagement UI: the operator opened the Edit modal to
+# change an unrelated field (port, max conn, default_backend), the
+# UI re-sent the full rule list verbatim, the model validator hit
+# the legacy `X !X` rule, and Save 400-ed with a contradiction
+# error the operator had not authored.
+#
+# The handler-level helpers below restore the strict POST behaviour
+# and let PUT GRANDFATHER rules that are unchanged from the existing
+# DB row: new or modified contradictions still hard-reject (400),
+# stale ones only emit a warning so the operator can fix at their
+# own pace without being locked out of unrelated edits.
+
+
+_NORMALISE_RULE_PREFIX_RE = re.compile(
+    r"^\s*(?:use_backend|redirect)\s+", re.IGNORECASE,
+)
+_NORMALISE_RULE_WS_RE = re.compile(r"\s+")
+
+
+def _normalize_rule_string(s: str) -> str:
+    """Bulgu #62 follow-up (round-22 hot-fix) — collapse whitespace
+    and strip the `use_backend ` / `redirect ` directive prefix so
+    a rule that round-trips through the FE's ACLRuleBuilder (which
+    parses the rule into a structured object and re-serialises
+    without the prefix) signs to the same value as the version
+    still sitting in the DB.
+
+    Without this normalisation the grandfathering check on UPDATE
+    silently fails: every PUT looks like a NEW rule even when the
+    operator hasn't touched the routing section. Mirrors the JS
+    `normalizeRuleString` helper in
+    `frontend/src/components/FrontendManagement.js`.
+    """
+    if not isinstance(s, str):
+        return ""
+    stripped = _NORMALISE_RULE_PREFIX_RE.sub("", s, count=1)
+    return _NORMALISE_RULE_WS_RE.sub(" ", stripped).strip()
+
+
+def _rule_to_signature(rule: Any) -> Optional[str]:
+    """Reduce a redirect/use_backend/acl rule entry to a stable string
+    key used for grandfathered-vs-new comparison.
+
+    `acl_rules` and `use_backend_rules` are always strings. The
+    wizard's auto-generated HTTP→HTTPS redirect lives in
+    `redirect_rules` as a dict (`{type, scheme, code, condition,
+    ...}`). For dicts we use `json.dumps(..., sort_keys=True)` so
+    semantically equal dicts collapse to the same key regardless of
+    Python's insertion-order.
+
+    Strings are normalised via `_normalize_rule_string` so a rule
+    that round-trips through the FE (where the ACLRuleBuilder
+    strips the `use_backend ` / `redirect ` prefix on serialise)
+    still matches the version stored in the DB.
+    """
+    if isinstance(rule, str):
+        normalised = _normalize_rule_string(rule)
+        return f"str::{normalised}" if normalised else None
+    if isinstance(rule, dict):
+        try:
+            return "dict::" + json.dumps(rule, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _decode_db_rules_jsonb(raw) -> List[Any]:
+    """JSONB column → Python list (handles str/list/None)."""
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return []
+    else:
+        decoded = raw
+    return decoded if isinstance(decoded, list) else []
+
+
+def _rule_contradiction_text(rule: Any) -> Optional[str]:
+    """Return the string used to evaluate the `X !X` contradiction
+    for a given rule entry. Strings are checked directly; for
+    dict-shaped redirect rules the `condition` / `if` field is the
+    relevant text. Returns None for entries that have no
+    contradiction-relevant payload."""
+    if isinstance(rule, str):
+        return rule
+    if isinstance(rule, dict):
+        cond = rule.get("condition") or rule.get("if")
+        return cond if isinstance(cond, str) else None
+    return None
+
+
+def _collect_routing_rule_contradictions(
+    rules: List[Any], origin_label: str,
+) -> List[Tuple[str, Any]]:
+    """Return `[(origin_label, offending_rule), ...]` for every entry
+    in `rules` whose contradiction text triggers
+    `_frontend_has_acl_contradiction`."""
+    out: List[Tuple[str, Any]] = []
+    for r in rules or []:
+        txt = _rule_contradiction_text(r)
+        if txt and _frontend_has_acl_contradiction(txt):
+            out.append((origin_label, r))
+    return out
+
+
+def _format_contradiction_error(
+    conflicts: List[Tuple[str, Any]],
+) -> str:
+    """Build the human-facing 400 message listing every conflicting
+    rule. Used by both the POST handler (strict) and the PUT
+    handler (only for new/modified rules)."""
+    lines = [
+        "One or more routing / redirect rules contain the same "
+        "ACL in both positive AND negated form (e.g. "
+        "`if acl1 !acl1`). HAProxy accepts the syntax but "
+        "`X AND NOT X` is always false, so the rule never fires "
+        "and traffic silently falls through to `default_backend`. "
+        "Remove one of the two tokens before saving."
+    ]
+    for label, rule in conflicts[:10]:
+        snippet = rule if isinstance(rule, str) else _rule_to_signature(rule)
+        if snippet and len(snippet) > 160:
+            snippet = snippet[:157] + "..."
+        lines.append(f"  - {label}: {snippet}")
+    if len(conflicts) > 10:
+        lines.append(f"  (+{len(conflicts) - 10} more)")
+    return "\n".join(lines)
+
+
+def _enforce_routing_rule_contradictions(
+    frontend: FrontendConfig,
+    *,
+    grandfathered_signatures: Optional[set] = None,
+) -> List[str]:
+    """Walk `use_backend_rules` and `redirect_rules` on the payload,
+    collect any `X !X` self-contradictions, and:
+
+    * raise HTTPException(400) when the conflicting rule is NEW or
+      MODIFIED relative to `grandfathered_signatures` (or whenever
+      the caller passes `grandfathered_signatures=None`, meaning
+      strict mode for POST), OR
+    * return them as a list of warning strings when the rule
+      already existed verbatim in the DB row (UPDATE
+      grandfathering).
+
+    `grandfathered_signatures` is the union of `_rule_to_signature`
+    outputs for the existing DB row's `use_backend_rules` and
+    `redirect_rules` columns. Passing `None` means "treat every
+    contradiction as new" (POST / strict path).
+    """
+    use_be = frontend.use_backend_rules or []
+    redirect = frontend.redirect_rules or []
+    conflicts = (
+        _collect_routing_rule_contradictions(use_be, "use_backend_rules")
+        + _collect_routing_rule_contradictions(redirect, "redirect_rules")
+    )
+    if not conflicts:
+        return []
+
+    if grandfathered_signatures is None:
+        # POST / strict path — every contradiction blocks.
+        raise HTTPException(
+            status_code=400,
+            detail=_format_contradiction_error(conflicts),
+        )
+
+    # PUT / grandfathered path — split into NEW vs UNCHANGED.
+    blocking: List[Tuple[str, Any]] = []
+    warnings: List[str] = []
+    for label, rule in conflicts:
+        sig = _rule_to_signature(rule)
+        if sig and sig in grandfathered_signatures:
+            warnings.append(
+                f"Grandfathered {label} entry contains a "
+                f"self-contradictory `X !X` condition that pre-dated "
+                f"this validation. The rule never fires; fix it at "
+                f"your convenience. (rule: "
+                f"{rule if isinstance(rule, str) else sig[:160]})"
+            )
+        else:
+            blocking.append((label, rule))
+    if blocking:
+        raise HTTPException(
+            status_code=400,
+            detail=_format_contradiction_error(blocking),
+        )
+    return warnings
 
 def filter_httpchk_from_options(options: Optional[str]) -> Optional[str]:
     """
@@ -113,7 +314,11 @@ async def validate_user_cluster_access(user_id: int, cluster_id: int, conn):
     return True
 
 @router.get("", summary="Get All Frontends", response_description="List of frontend configurations")
-async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool = False):
+async def get_frontends(
+    cluster_id: Optional[int] = None,
+    include_inactive: bool = False,
+    authorization: str = Header(None),
+):
     """
     # Get All Frontends
     
@@ -154,6 +359,19 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
     - HTTP to HTTPS redirection
     """
     try:
+        # R18c audit fix (round 6 #1 — KRITIK info leak): require
+        # an authenticated caller. Pre-fix the endpoint accepted
+        # anonymous GETs and returned the FULL listener layout
+        # (bind addresses, SSL cert IDs, ACL rules, redirect rules,
+        # use_backend rules) for every cluster. With wizard-created
+        # rows now in the table, any unauthenticated reader could
+        # enumerate the platform's complete frontend inventory.
+        # The frontend already attaches the JWT via axios defaults,
+        # so requiring auth is non-breaking; reverse-proxy
+        # deployments that previously relied on perimeter auth
+        # gain defense in depth.
+        from auth_middleware import get_current_user_from_token
+        await get_current_user_from_token(authorization)
         conn = await get_database_connection()
         
         if cluster_id:
@@ -342,7 +560,16 @@ async def get_frontends(cluster_id: Optional[int] = None, include_inactive: bool
                     "ssl_port": f.get("ssl_port"),
                     "ssl_cert_path": f.get("ssl_cert_path"),
                     "ssl_cert": f.get("ssl_cert"),
-                    "ssl_verify": f.get("ssl_verify", "optional"),
+                    # R18b audit fix: return ssl_verify verbatim (None
+                    # stays None). Pre-fix this masked NULL → "optional",
+                    # which the FrontendManagement edit form then sent
+                    # back on save and SILENTLY persisted as "optional"
+                    # — flipping operator intent ("verify clause omitted")
+                    # to ("verify optional"). The HAProxy config
+                    # generator already guards on a sentinel-empty
+                    # value before appending the verify directive, so
+                    # NULL → omitted is the correct round-trip.
+                    "ssl_verify": f.get("ssl_verify"),
                     # CRITICAL FIX: Include SSL advanced options (bind SSL parameters)
                     "ssl_alpn": f.get("ssl_alpn"),
                     "ssl_npn": f.get("ssl_npn"),
@@ -405,7 +632,14 @@ async def create_frontend(frontend: FrontendConfig, request: Request, authorizat
             )
         
         conn = await get_database_connection()
-        
+
+        # Bulgu #62 (round-22 audit) — strict X !X reject on CREATE.
+        # No existing row to grandfather against; every contradiction
+        # blocks. Mirrors the wizard's `_detect_acl_contradiction`
+        # gate (Bulgu #13) so both create paths reject the same
+        # shape.
+        _enforce_routing_rule_contradictions(frontend, grandfathered_signatures=None)
+
         # Validate cluster access for multi-cluster security
         if frontend.cluster_id:
             await validate_user_cluster_access(current_user['id'], frontend.cluster_id, conn)
@@ -677,7 +911,33 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
         if not existing:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="Frontend not found")
-        
+
+        # Bulgu #62 (round-22 audit) — UPDATE path: grandfather any
+        # `use_backend_rules` / `redirect_rules` entry that is
+        # IDENTICAL to what's already stored in the DB row. Only
+        # NEW or MODIFIED rules with `X !X` self-contradictions
+        # block the save. Stale entries (e.g. created by a pre-
+        # Bulgu-#13 wizard build, or by a direct API caller) emit
+        # a warning instead so the operator can change unrelated
+        # fields (port / max conn / default_backend) without first
+        # having to rewrite legacy routing rules.
+        grandfathered_signatures: set = set()
+        for r in _decode_db_rules_jsonb(existing["use_backend_rules"]):
+            sig = _rule_to_signature(r)
+            if sig:
+                grandfathered_signatures.add(sig)
+        for r in _decode_db_rules_jsonb(existing["redirect_rules"]):
+            sig = _rule_to_signature(r)
+            if sig:
+                grandfathered_signatures.add(sig)
+        contradiction_warnings = _enforce_routing_rule_contradictions(
+            frontend, grandfathered_signatures=grandfathered_signatures,
+        )
+        for w in contradiction_warnings:
+            logger.warning(
+                f"FRONTEND UPDATE id={frontend_id} name={frontend.name}: {w}"
+            )
+
         # Validate cluster access for multi-cluster security
         cluster_id = existing['cluster_id'] or frontend.cluster_id
         if cluster_id:
@@ -950,10 +1210,18 @@ async def update_frontend(frontend_id: int, frontend: FrontendConfig, request: R
                 user_agent=request.headers.get('user-agent')
             )
         
-        return {
+        response: dict = {
             "message": f"Frontend '{frontend.name}' updated successfully",
-            "sync_results": sync_results
+            "sync_results": sync_results,
         }
+        # Bulgu #62 (round-22 audit) — surface grandfathered
+        # contradiction warnings so the UI can render a non-blocking
+        # yellow toast on the next refresh. The save SUCCEEDED; the
+        # warnings only flag latent legacy data the operator may
+        # want to clean up at their convenience.
+        if contradiction_warnings:
+            response["warnings"] = contradiction_warnings
+        return response
     except HTTPException:
         raise
     except Exception as e:

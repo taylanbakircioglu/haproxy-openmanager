@@ -38,6 +38,16 @@ RESOURCE_MAPPING = {
     '/api/maintenance': 'maintenance',
     # Audit Tur 4/5 / Commit 8: ACME endpoint coverage
     '/api/letsencrypt': 'letsencrypt_order',
+    # v1.5.0 Feature B (Issue #14): site setup wizard
+    '/api/sites': 'site',
+    # Backward-compat alias for the legacy URL slug. The wizard router's
+    # primary mount is `/api/sites`; main.py also registers a hidden
+    # 308-redirect alias on `/api/proxied-hosts/*` so external
+    # integrators still pointing at the old slug keep working. The 308
+    # response is filtered out below (only 2xx is logged), so this map
+    # entry is here only for the rare in-flight pre-redirect call that
+    # somehow lands as a 2xx (edge case).
+    '/api/proxied-hosts': 'site',
 }
 
 # Special action mappings
@@ -58,11 +68,50 @@ SPECIAL_ACTIONS = {
     '/api/letsencrypt/accounts/{account_id}/permanent': 'acme_account_purged',
     '/api/letsencrypt/orders/{order_id}/retry': 'acme_order_retried',
     '/api/letsencrypt/orders/{order_id}': 'acme_order_cancelled',
+    # v1.5.0 Feature A (Issue #13): ACME diagnostics
+    '/api/letsencrypt/orders/{order_id}/diagnostics': 'acme_diagnostics_run',
+    '/api/letsencrypt/orders/{order_id}/diagnostics/{check_id}/rerun': 'acme_diagnostic_check_rerun',
+    # v1.5.0 Feature B (Issue #14): site setup wizard.
+    # R18c audit fix (round 1 #9): the wizard CREATE endpoint
+    # (POST /api/sites) emits a richer `wizard_create_site` row
+    # with wizard_status / cluster_id / domains / ssl_mode /
+    # apply_error / acme_staging_error directly from the router
+    # (R18b round 6 #15). If we ALSO log `site_created` here,
+    # every successful wizard create produces TWO
+    # user_activity_logs rows for the same operator action and
+    # dashboards counting "creates" by verb double-count. Drop
+    # that entry so the wizard owns its own audit row, while the
+    # other paths (preview, preflight, draft) still log via the
+    # middleware.
+    '/api/sites/preview': 'site_previewed',
+    '/api/sites/preflight-acme': 'site_acme_preflight',
+    '/api/sites/drafts': 'site_draft_saved',
+    '/api/sites/drafts/{draft_id}': 'site_draft_deleted',
+    # Backward-compat aliases for the legacy URL slug — the 308
+    # redirect should consume these in practice, but if a 2xx ever
+    # leaks through directly the action map is still correct.
+    '/api/proxied-hosts/preview': 'site_previewed',
+    '/api/proxied-hosts/preflight-acme': 'site_acme_preflight',
+    '/api/proxied-hosts/drafts': 'site_draft_saved',
+    '/api/proxied-hosts/drafts/{draft_id}': 'site_draft_deleted',
 }
 
 def extract_resource_info(path: str, method: str) -> tuple[str, str, Optional[str]]:
     """Extract resource type, action, and resource ID from request path and method"""
-    
+
+    # R18c audit fix (round 1 #9): the wizard CREATE endpoint
+    # (POST /api/sites, exact path) emits its OWN richer audit
+    # row from the router (`wizard_create_site`). Skip middleware
+    # logging for that single endpoint so we don't produce
+    # duplicate user_activity_logs rows per successful wizard
+    # create. Subpaths (`/preview`, `/preflight-acme`, `/drafts`,
+    # `/drafts/{id}`) still log via SPECIAL_ACTIONS below. The
+    # legacy `/api/proxied-hosts` slug is also covered for
+    # parity (the 308 redirect typically intercepts it before
+    # this point, but safety net).
+    if path in ('/api/sites', '/api/proxied-hosts') and method == 'POST':
+        return 'unknown', method.lower(), None
+
     # Check for special actions first
     for pattern, action in SPECIAL_ACTIONS.items():
         if matches_pattern(path, pattern):
@@ -100,6 +149,12 @@ def matches_pattern(path: str, pattern: str) -> bool:
 
 def extract_resource_type_from_path(path: str) -> str:
     """Extract resource type from path"""
+    # Bulgu #40: include v1.5.0 wizard path so audit rows aren't logged with
+    # resource_type='unknown'. Order matters — '/sites' / '/proxied-hosts'
+    # must be checked BEFORE generic '/frontends'/'/backends' fallbacks.
+    # Legacy `/proxied-hosts` slug is preserved for backward compat.
+    if '/sites' in path or '/proxied-hosts' in path:
+        return 'site'
     if '/letsencrypt' in path:
         return 'letsencrypt_order'
     elif '/frontends' in path:
@@ -145,7 +200,17 @@ async def log_activity_middleware(request: Request, call_next):
     if request.method == 'GET' or request.url.path in ['/health', '/api/health', '/']:
         response = await call_next(request)
         return response
-    
+
+    # R18c audit fix (round 1 #9): the wizard CREATE endpoint owns
+    # its own audit row; skip the middleware path for that exact
+    # endpoint+method to prevent duplicate user_activity_logs rows.
+    # See router site_wizard.py for the explicit log_user_activity
+    # call with action='wizard_create_site'. The legacy
+    # `/api/proxied-hosts` slug is also short-circuited so a 308
+    # redirect doesn't double-log.
+    if request.url.path in ('/api/sites', '/api/proxied-hosts') and request.method == 'POST':
+        return await call_next(request)
+
     # Get user from token
     user = None
     try:

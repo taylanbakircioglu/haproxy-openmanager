@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Request, Header, Depends
 from typing import List, Optional
 import logging
 import hashlib
+import re
 import time
 import json
 from datetime import datetime, timezone
@@ -16,6 +17,80 @@ from services.haproxy_config import generate_haproxy_config_for_cluster
 
 router = APIRouter(prefix="/api/ssl", tags=["SSL Certificates"])
 logger = logging.getLogger(__name__)
+
+
+# Bulgu #63 (round-22 audit) — handler-level enforcement of the
+# SSL certificate name path-traversal guard. Previously lived as a
+# Pydantic validator on `SSLCertificateUpdate.name` (Bulgu #21,
+# round-11). Operators with legacy certificate names containing
+# forbidden characters (e.g. `*.example.com`, `cert (1).pem`,
+# `wildcard ssl.pem`) were locked out of updating any other field
+# — the model validator fired before the route body even ran. The
+# create + update routes now invoke `_assert_safe_cert_name` with
+# explicit grandfathering on UPDATE.
+
+_SAFE_CERT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _assert_safe_cert_name(name: Optional[str]) -> None:
+    """Strict path-traversal guard for SSL certificate names.
+
+    Identical contract to the original Bulgu #21 validator:
+
+      * trimmed-non-empty, length <= 200
+      * only [A-Za-z0-9_.-]
+      * no ``..`` sequence
+      * does not start with ``.`` or ``-``
+
+    Raises ``HTTPException(400)`` so the caller can let FastAPI
+    surface the actionable message. Callers that want to skip the
+    check (e.g. UPDATE with unchanged name) simply omit the call.
+    """
+    if name is None:
+        return
+    stripped = name.strip()
+    if not stripped:
+        raise HTTPException(
+            status_code=400,
+            detail="SSL certificate name must not be empty",
+        )
+    if stripped != name:
+        raise HTTPException(
+            status_code=400,
+            detail="SSL certificate name must not contain leading/trailing whitespace",
+        )
+    if len(stripped) > 200:
+        raise HTTPException(
+            status_code=400,
+            detail="SSL certificate name must be 200 characters or fewer",
+        )
+    if not _SAFE_CERT_NAME_PATTERN.match(stripped):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"SSL certificate name={name!r} contains forbidden "
+                "characters — only letters, digits, underscore, "
+                "hyphen, and dot are allowed."
+            ),
+        )
+    if ".." in stripped:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f'SSL certificate name={name!r} must not contain '
+                f'".." (path traversal)'
+            ),
+        )
+    if stripped.startswith("."):
+        raise HTTPException(
+            status_code=400,
+            detail=f'SSL certificate name={name!r} must not start with "."',
+        )
+    if stripped.startswith("-"):
+        raise HTTPException(
+            status_code=400,
+            detail=f'SSL certificate name={name!r} must not start with "-"',
+        )
 
 async def validate_user_cluster_access(user_id: int, cluster_id: int, conn):
     """Validate that user has access to the specified cluster"""
@@ -90,7 +165,11 @@ async def validate_user_cluster_access(user_id: int, cluster_id: int, conn):
     return True
 
 @router.get("/certificates", response_model=List[dict], summary="Get SSL Certificates", response_description="List of SSL certificates")
-async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Optional[str] = None):
+async def get_ssl_certificates(
+    cluster_id: Optional[int] = None,
+    usage_type: Optional[str] = None,
+    authorization: str = Header(None),
+):
     """
     # Get SSL Certificates
     
@@ -120,10 +199,38 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
       }
     ]
     ```
+
+    R18 audit fix: enforce authentication on the LIST endpoint and
+    cluster-scoped authorization when `cluster_id` is provided. Pre-R18
+    this route was anonymously accessible — any client could enumerate
+    cert metadata across the whole installation, which broke the
+    multi-tenant guarantee in `validate_user_cluster_access`. The
+    detail / create / update / delete routes were already authenticated
+    individually; this fix closes the LIST gap.
     """
+    # R18 audit (round 4 fix): authenticate BEFORE opening any DB
+    # connection. Pre-fix the endpoint opened the pool first then
+    # checked auth, which produced confusing 500s on transient DB
+    # issues for unauthenticated callers (and worse: leaked the
+    # presence of the pool to anonymous probes).
+    current_user = await get_current_user_from_token(authorization)
+    # R18 audit (round 6 fix): single try/finally lifecycle for the
+    # connection. Pre-fix the function had nested try blocks that each
+    # called `close_database_connection(conn)` — releasing the same
+    # asyncpg handle twice if any exception bubbled past the inner
+    # release. Pattern now: one acquire, one release in finally,
+    # regardless of which branch raises or returns. `conn = None`
+    # pre-binding still required so the finally is safe when the
+    # acquire itself raises (DB pool down / pool typo).
+    conn = None
     try:
         conn = await get_database_connection()
-        
+        if current_user and cluster_id:
+            # Cluster-scoped enumeration must respect cluster access.
+            # Re-raises HTTPException(403/404) cleanly; finally below
+            # releases the connection.
+            await validate_user_cluster_access(current_user["id"], cluster_id, conn)
+
         # First check if ssl_certificates table exists
         try:
             table_exists = await conn.fetchval("""
@@ -134,7 +241,6 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
             """)
             
             if not table_exists:
-                await close_database_connection(conn)
                 logger.info("SSL certificates table does not exist yet - returning empty list")
                 return []
             
@@ -229,8 +335,12 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
                     ORDER BY created_at DESC
                 """, *params)
             
-            await close_database_connection(conn)
-            
+            # R18 audit (round 6 fix): defer the connection release to
+            # the outer `finally` — the post-query `for cert in
+            # certificates:` loop must not run on a released handle,
+            # but if it raises we don't want a double-release on the
+            # outer handler either.
+
             # Convert to list of dicts with new schema fields
             result = []
             for cert in certificates:
@@ -272,29 +382,35 @@ async def get_ssl_certificates(cluster_id: Optional[int] = None, usage_type: Opt
             
             return result
             
+        except HTTPException:
+            # Re-raise typed HTTP errors (e.g. cluster access 403/404)
+            # without the broad-except remap below. The outer finally
+            # still releases the connection.
+            raise
         except Exception as table_error:
             logger.error(f"SSL LIST ERROR: Query failed for cluster_id={cluster_id}, usage_type={usage_type}: {table_error}", exc_info=True)
-            try:
-                await close_database_connection(conn)
-            except:
-                pass
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to fetch SSL certificates. Please check server logs. Error: {str(table_error)}"
             )
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"SSL LIST ERROR: Connection/setup failed: {e}", exc_info=True)
-        try:
-            await close_database_connection(conn)
-        except:
-            pass
         raise HTTPException(
             status_code=500,
             detail=f"Failed to fetch SSL certificates: {str(e)}"
         )
+    finally:
+        # R18 audit (round 6 fix): single canonical release point.
+        # Idempotent because of the `conn is not None` guard — a no-op
+        # if `get_database_connection()` itself raised before assignment.
+        if conn is not None:
+            try:
+                await close_database_connection(conn)
+            except Exception:
+                pass
 
 @router.post("/certificates")
 async def create_ssl_certificate(certificate: SSLCertificateCreate, request: Request, authorization: str = Header(None)):
@@ -311,7 +427,13 @@ async def create_ssl_certificate(certificate: SSLCertificateCreate, request: Req
                 status_code=403,
                 detail="Insufficient permissions: ssl.create required"
             )
-        
+
+        # Bulgu #63 (round-22 audit) — strict path-traversal guard on
+        # CREATE. Mirrors the original Bulgu #21 validator; the
+        # equivalent check was moved out of the model so the UPDATE
+        # path can grandfather legacy names.
+        _assert_safe_cert_name(certificate.name)
+
         conn = await get_database_connection()
         
         # Validate cluster access for multi-cluster security
@@ -779,6 +901,17 @@ async def update_ssl_certificate(cert_id: int, certificate: SSLCertificateUpdate
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="SSL certificate not found")
         
+        # Bulgu #63 (round-22 audit) — grandfather the existing
+        # certificate name. Only enforce the path-traversal guard
+        # when the operator actually renames the cert. If they
+        # leave `name` at its current value (or omit it), let the
+        # update proceed regardless of whether the legacy name
+        # conforms to the post-Bulgu-#21 character set. Otherwise
+        # legacy uploads with `cert (1).pem` / `*.example.com` etc.
+        # would be permanently un-updatable from the manual SSL UI.
+        if certificate.name is not None and certificate.name != existing["name"]:
+            _assert_safe_cert_name(certificate.name)
+
         # Protect ACME-managed certificates from manual content edits
         if existing.get('source') == 'letsencrypt':
             content_fields_changed = any([
@@ -1165,13 +1298,51 @@ async def update_ssl_certificate(cert_id: int, certificate: SSLCertificateUpdate
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/certificates/{cert_id}")
-async def delete_ssl_certificate(cert_id: int, request: Request, authorization: str = Header(None)):
-    """Delete SSL certificate"""
+async def delete_ssl_certificate(
+    cert_id: int,
+    request: Request,
+    force: bool = False,
+    authorization: str = Header(None),
+):
+    """Delete SSL certificate.
+
+    Bulgu #74 (round-22 audit) — pre-fix this handler did a hard
+    `DELETE FROM ssl_certificates WHERE id=$1` without ANY
+    referential check. The `frontends` table carries the cert
+    reference in two places — `ssl_certificate_id` (legacy
+    single-cert column) and `ssl_certificate_ids` JSONB array
+    (multi-cert support) — and NEITHER has a database-level
+    foreign-key constraint, so the cert vanished and the
+    referencing rows kept the now-dangling integer. The next
+    config regen then either:
+      * silently dropped the bind line and the frontend went from
+        HTTPS to HTTP (silent security downgrade), OR
+      * rendered `bind :443 ssl crt /etc/ssl/haproxy/<gone>.pem`
+        which the agent's `haproxy -c` rejected at reload time,
+        breaking the entire cluster's config-apply pipeline.
+    Either failure mode was hard to attribute back to the cert
+    deletion long after the fact.
+
+    The new contract:
+      * **default**: 409 Conflict if any active frontend / backend
+        server still references the cert; the response body lists
+        the offending entities so the operator can detach the
+        cert from each one first.
+      * **`?force=true`**: NULL out the references (both legacy
+        column and JSONB array) BEFORE deleting the row,
+        emitting a clear audit-log warning per affected
+        frontend. The frontends are marked PENDING so the next
+        apply re-renders without the cert.
+    ACME-managed certs (`letsencrypt_order_id IS NOT NULL`) keep
+    their `ON DELETE SET NULL` FK on `letsencrypt_orders`, but we
+    also surface a warning so the operator knows the renewal
+    loop will re-issue if the order is still active.
+    """
     try:
         # Get current user for activity logging
         from auth_middleware import get_current_user_from_token, check_user_permission
         current_user = await get_current_user_from_token(authorization)
-        
+
         # Check permission for SSL delete
         has_permission = await check_user_permission(current_user["id"], "ssl", "delete")
         if not has_permission:
@@ -1179,19 +1350,104 @@ async def delete_ssl_certificate(cert_id: int, request: Request, authorization: 
                 status_code=403,
                 detail="Insufficient permissions: ssl.delete required"
             )
-        
+
         conn = await get_database_connection()
-        
+
         # Check if certificate exists and get cluster_id
         certificate = await conn.fetchrow("SELECT name, cluster_id FROM ssl_certificates WHERE id = $1", cert_id)
         if not certificate:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="SSL certificate not found")
-        
+
         cluster_id = certificate['cluster_id']
         cert_name = certificate['name']
-        logger.info(f"SSL certificate delete: cert_id={cert_id}, name={cert_name}, cluster_id={cluster_id}")
-        
+        logger.info(f"SSL certificate delete: cert_id={cert_id}, name={cert_name}, cluster_id={cluster_id}, force={force}")
+
+        # Bulgu #74 — referential check across both legacy and
+        # multi-cert columns + backend-server SSL references.
+        frontend_refs = await conn.fetch("""
+            SELECT id, name, cluster_id
+            FROM frontends
+            WHERE is_active = TRUE
+              AND (ssl_certificate_id = $1
+                   OR ssl_certificate_ids @> to_jsonb($1::int))
+            ORDER BY cluster_id, name
+        """, cert_id)
+        backend_server_refs = await conn.fetch("""
+            SELECT id, server_name, backend_name, cluster_id
+            FROM backend_servers
+            WHERE is_active = TRUE AND ssl_certificate_id = $1
+            ORDER BY cluster_id, backend_name, server_name
+        """, cert_id)
+
+        if (frontend_refs or backend_server_refs) and not force:
+            await close_database_connection(conn)
+            fe_list = [
+                {"id": r["id"], "name": r["name"], "cluster_id": r["cluster_id"]}
+                for r in frontend_refs
+            ]
+            be_list = [
+                {
+                    "id": r["id"], "server_name": r["server_name"],
+                    "backend_name": r["backend_name"],
+                    "cluster_id": r["cluster_id"],
+                }
+                for r in backend_server_refs
+            ]
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": (
+                        f"SSL certificate '{cert_name}' is still in use by "
+                        f"{len(fe_list)} frontend(s) and {len(be_list)} backend "
+                        f"server(s). Detach the certificate from each one first, "
+                        f"or call DELETE again with ?force=true to NULL the "
+                        f"references and proceed (this will mark every affected "
+                        f"entity as PENDING and silently drop the HTTPS bind "
+                        f"on `force` — only use force when you've verified "
+                        f"the certificate is no longer needed)."
+                    ),
+                    "frontends": fe_list,
+                    "backend_servers": be_list,
+                },
+            )
+
+        if force and (frontend_refs or backend_server_refs):
+            logger.warning(
+                f"SSL DELETE FORCE: cert_id={cert_id} name={cert_name!r} — "
+                f"nulling references in {len(frontend_refs)} frontend(s) "
+                f"and {len(backend_server_refs)} backend server(s)"
+            )
+            # Clear legacy single-cert column.
+            await conn.execute("""
+                UPDATE frontends
+                SET ssl_certificate_id = NULL,
+                    last_config_status = 'PENDING',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE ssl_certificate_id = $1
+            """, cert_id)
+            # Clear the multi-cert JSONB array entry. `-` operator
+            # on JSONB removes ALL occurrences of the integer.
+            await conn.execute("""
+                UPDATE frontends
+                SET ssl_certificate_ids = COALESCE(ssl_certificate_ids, '[]'::jsonb)
+                                            - $1::text,
+                    last_config_status = 'PENDING',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE ssl_certificate_ids @> to_jsonb($1::int)
+            """, str(cert_id))
+            # backend_servers.ssl_certificate_id has an
+            # `ON DELETE SET NULL` FK constraint, so the DELETE
+            # below will null it. We still bump
+            # `last_config_status` so the next apply re-renders.
+            for srv in backend_server_refs:
+                await conn.execute("""
+                    UPDATE backend_servers
+                    SET last_config_status = 'PENDING',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                """, srv['id'])
+
         # Delete certificate
         await conn.execute("DELETE FROM ssl_certificates WHERE id = $1", cert_id)
         

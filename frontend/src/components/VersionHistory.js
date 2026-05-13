@@ -8,6 +8,7 @@ import {
   ClockCircleOutlined, FileTextOutlined, UserOutlined
 } from '@ant-design/icons';
 import axios from 'axios';
+import { extractApiError } from '../utils/apiError';
 
 const { Text, Title } = Typography;
 
@@ -407,7 +408,7 @@ const VersionHistory = ({
       
     } catch (error) {
       console.error('Error getting restore preview:', error);
-      const errorMsg = error.response?.data?.detail || 'Failed to get restore preview';
+      const errorMsg = extractApiError(error, 'Failed to get restore preview');
       message.error(`Restore preview failed: ${errorMsg}`);
     } finally {
       setRestoreLoading(prev => ({ ...prev, [versionId]: false }));

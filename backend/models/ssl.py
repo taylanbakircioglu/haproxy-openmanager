@@ -20,7 +20,50 @@ class SSLCertificateCreate(BaseModel):
         if v not in ['frontend', 'server']:
             raise ValueError('usage_type must be either "frontend" or "server"')
         return v
-    
+
+    @field_validator('name')
+    @classmethod
+    def validate_name_no_path_traversal(cls, v):
+        """Bulgu #21 (round-11 audit): SSL certificate `name` is interpolated
+        into the on-disk certificate path:
+
+            cert_path = f"/etc/ssl/haproxy/{ssl_cert['name']}.pem"
+
+        and emitted into the rendered HAProxy config. The agent then
+        runs `mv "$temp_cert_file" "$cert_file_path"` as root, which
+        means a name like '../../tmp/evil' resolves to '/tmp/evil.pem'
+        and lets an operator with ssl.create permission overwrite
+        arbitrary `*.pem` files on the agent host. The trailing `.pem`
+        suffix mitigates common exploit paths (cron.d, profile.d,
+        authorized_keys) but is defense-only — the right fix is to
+        constrain `name` at the API boundary. Mirror SSLChoice's
+        constraints so the wizard and direct API give the same answer.
+        """
+        if v is None:
+            return v
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError('SSL certificate name must not be empty')
+        if stripped != v:
+            raise ValueError('SSL certificate name must not contain leading/trailing whitespace')
+        if len(stripped) > 200:
+            raise ValueError('SSL certificate name must be 200 characters or fewer')
+        import re as _re
+        if not _re.match(r'^[A-Za-z0-9_.-]+$', stripped):
+            raise ValueError(
+                f'SSL certificate name={v!r} contains forbidden characters '
+                '— only letters, digits, underscore, hyphen, and dot are '
+                'allowed (the name is used as a filename component under '
+                '/etc/ssl/haproxy/).'
+            )
+        if '..' in stripped:
+            raise ValueError(f'SSL certificate name={v!r} must not contain ".." (path traversal)')
+        if stripped.startswith('.'):
+            raise ValueError(f'SSL certificate name={v!r} must not start with "." (hidden filename)')
+        if stripped.startswith('-'):
+            raise ValueError(f'SSL certificate name={v!r} must not start with "-" (CLI flag confusion)')
+        return stripped
+
     @field_validator('certificate_content')
     @classmethod
     def validate_certificate(cls, v):
@@ -83,6 +126,27 @@ class SSLCertificateUpdate(BaseModel):
         if v is not None and v not in ['frontend', 'server']:
             raise ValueError('usage_type must be either "frontend" or "server"')
         return v
+
+    # Bulgu #63 (round-22 audit) — the path-traversal guard previously
+    # lived here as a strict Pydantic validator (Bulgu #21, round-11).
+    # On UPDATE the manual SSL UI re-sends the existing `name` along
+    # with the field the operator actually edited (usage_type /
+    # cluster_id / content). If the existing certificate name was
+    # imported BEFORE Bulgu #21 landed (or by a different upload path)
+    # and contained a now-rejected character — e.g. legacy uploads
+    # with `cert (1).pem`, `*.example.com`, `client cert.pem`, or
+    # `wildcard.example.com` if dot was not yet escaped — every PUT
+    # would 400 even though the operator was only changing usage
+    # type or attaching the cert to another cluster. That mirrors
+    # the Bulgu #62 lockout on frontends.
+    #
+    # The guard was moved into `routers/ssl.py::_assert_safe_cert_name`
+    # and is now invoked by the create + update routes:
+    #   * create: strict — rejects unsafe names outright (Bulgu #21
+    #     contract preserved for fresh inserts).
+    #   * update: skipped if `name` is unchanged from the DB row;
+    #     enforced strictly only when the operator actually renames
+    #     the certificate.
 
 class SSLCertificate(BaseModel):
     id: int

@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: haproxy-openmanager
+  name: internal-haproxy-openmanager
   labels:
-    name: haproxy-openmanager
+    name: internal-haproxy-openmanager
     app: haproxy-openmanager 

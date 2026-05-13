@@ -19,13 +19,14 @@ import axios from 'axios';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNavigate } from 'react-router-dom';
 import ValidationErrorModal from './ValidationErrorModal';
+import { extractApiError } from '../utils/apiError';
 
 const { Title, Text, Paragraph } = Typography;
 const { TabPane } = Tabs;
 
 const ApplyManagement = () => {
   const { token } = theme.useToken();
-  const { selectedCluster } = useCluster();
+  const { selectedCluster, loading: clustersLoading } = useCluster();
   const navigate = useNavigate();
   
   // State
@@ -644,7 +645,7 @@ const ApplyManagement = () => {
       if (error.response?.status === 401) {
         message.error('Authentication failed. Please login again.');
       } else {
-        message.error(`Failed to apply changes: ${error.response?.data?.message || error.response?.data?.detail || error.message}`);
+        message.error(`Failed to apply changes: ${extractApiError(error, error.message)}`);
       }
     } finally {
       setApplyLoading(false);
@@ -739,7 +740,7 @@ const ApplyManagement = () => {
       
     } catch (error) {
       console.error('Error rejecting changes:', error);
-      message.error('Failed to reject changes: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to reject changes: ' + (extractApiError(error, error.message)));
     } finally {
       setApplyLoading(false);
     }
@@ -781,7 +782,7 @@ const ApplyManagement = () => {
       fetchConfigVersions();
       
     } catch (error) {
-      const errorMsg = error.response?.data?.detail || error.message;
+      const errorMsg = extractApiError(error, error.message);
       message.error(`Failed to undo rejection: ${errorMsg}`);
     } finally {
       setApplyLoading(false);
@@ -828,9 +829,23 @@ const ApplyManagement = () => {
   };
 
   if (!selectedCluster) {
+    // Phase J audit fix #6 — neutral "Loading clusters…" while the
+    // ClusterContext is still fetching, otherwise the page reads as
+    // if the operator forgot to pick a cluster during the legitimate
+    // post-deploy / post-login fetch window.
+    if (clustersLoading) {
+      return (
+        <Card>
+          <Empty
+            description="Loading clusters…"
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+          />
+        </Card>
+      );
+    }
     return (
       <Card>
-        <Empty 
+        <Empty
           description="Please select a cluster to view pending changes"
           image={Empty.PRESENTED_IMAGE_SIMPLE}
         />
@@ -1370,15 +1385,55 @@ const ApplyManagement = () => {
                                 >
                                   View Changes
                                 </Button>
-                                <Button
-                                  type="link"
-                                  size="small"
-                                  icon={<UndoOutlined />}
-                                  onClick={() => handleUndoRejected(version)}
-                                  style={{ padding: 0, height: 'auto', fontSize: 11, color: '#1890ff' }}
-                                >
-                                  Undo
-                                </Button>
+                                {/* Bulgu #16 (round-6 audit): hide
+                                    the Undo button for destructive
+                                    bulk operations. The backend
+                                    rejects undo of bulk-site-create-*
+                                    / bulk-import-* / restore-* with
+                                    HTTP 409 because the underlying
+                                    entities were permanently deleted
+                                    on reject (the snapshot stores
+                                    new_values={} so there's nothing
+                                    to recreate from). Hiding the
+                                    button up front makes the
+                                    constraint self-documenting
+                                    instead of surfacing as a
+                                    confusing error post-click. */}
+                                {(() => {
+                                  const vn = version?.version_name || '';
+                                  const destructive = (
+                                    vn.startsWith('bulk-site-create-')
+                                    || vn.startsWith('bulk-import-')
+                                    || vn.startsWith('bulk-proxied-host-create-')
+                                    || vn.startsWith('restore-')
+                                  );
+                                  if (destructive) {
+                                    return (
+                                      <Tooltip title="Bulk-create / bulk-import / restore rejections are destructive — the underlying entities were permanently deleted. Re-create via the wizard / re-run the import to make a fresh PENDING version.">
+                                        <Button
+                                          type="link"
+                                          size="small"
+                                          icon={<UndoOutlined />}
+                                          disabled
+                                          style={{ padding: 0, height: 'auto', fontSize: 11 }}
+                                        >
+                                          Undo (n/a)
+                                        </Button>
+                                      </Tooltip>
+                                    );
+                                  }
+                                  return (
+                                    <Button
+                                      type="link"
+                                      size="small"
+                                      icon={<UndoOutlined />}
+                                      onClick={() => handleUndoRejected(version)}
+                                      style={{ padding: 0, height: 'auto', fontSize: 11, color: '#1890ff' }}
+                                    >
+                                      Undo
+                                    </Button>
+                                  );
+                                })()}
                               </Space>
                             </div>
                           </Timeline.Item>

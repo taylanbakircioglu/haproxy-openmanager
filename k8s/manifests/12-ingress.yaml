@@ -3,7 +3,7 @@ kind: Ingress
 apiVersion: networking.k8s.io/v1
 metadata:
   name: haproxy-openmanager-ingress
-  namespace: haproxy-openmanager
+  namespace: internal-haproxy-openmanager
   labels:
     app: haproxy-openmanager
     component: ingress
@@ -23,7 +23,7 @@ spec:
   tls:
     - hosts:
         - haproxy-openmanager.example.com
-      secretName: haproxy-openmanager-tls
+      secretName: wildcard-tls
   rules:
     - host: haproxy-openmanager.example.com
       http:
@@ -58,7 +58,7 @@ kind: Ingress
 apiVersion: networking.k8s.io/v1
 metadata:
   name: haproxy-openmanager-backend-direct
-  namespace: haproxy-openmanager
+  namespace: internal-haproxy-openmanager
   labels:
     app: haproxy-openmanager
     component: backend-ingress
@@ -71,10 +71,10 @@ metadata:
 spec:
   tls:
     - hosts:
-        - api.haproxy-openmanager.example.com
-      secretName: haproxy-openmanager-tls
+        - haproxy-openmanager-api.example.com
+      secretName: wildcard-tls
   rules:
-    - host: api.haproxy-openmanager.example.com
+    - host: haproxy-openmanager-api.example.com
       http:
         paths:
           # Direct backend API access  
@@ -107,7 +107,7 @@ kind: Ingress
 apiVersion: networking.k8s.io/v1
 metadata:
   name: haproxy-openmanager-frontend-direct
-  namespace: haproxy-openmanager
+  namespace: internal-haproxy-openmanager
   labels:
     app: haproxy-openmanager
     component: frontend-ingress
@@ -122,10 +122,10 @@ metadata:
 spec:
   tls:
     - hosts:
-        - frontend.haproxy-openmanager.example.com
-      secretName: haproxy-openmanager-tls
+        - haproxy-openmanager-frontend.example.com
+      secretName: wildcard-tls
   rules:
-    - host: frontend.haproxy-openmanager.example.com
+    - host: haproxy-openmanager-frontend.example.com
       http:
         paths:
           # Frontend React App direct access

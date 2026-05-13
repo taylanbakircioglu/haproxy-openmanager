@@ -48,52 +48,199 @@ class HAProxyConfigValidator:
         self.sections = {}
         self.current_section = None
         self.line_number = 0
+        # Phase K Phase D follow-up (Bulgu #12) — when the input is
+        # a PARTIAL config (wizard candidate fragment OR an in-place
+        # apply-time synthesis that DOES NOT include the global /
+        # defaults blocks because the agent merges them with its
+        # local copy on disk), the "Missing 'global' section" /
+        # "Consider adding 'defaults' section" diagnostics are pure
+        # false positives that confuse operators and inflate the
+        # warning count. We auto-detect partial fragments by
+        # looking for the wizard's own marker comment OR for the
+        # absence of any global/defaults section AT LEAST ONE
+        # frontend/backend section emitted.
+        self._is_partial_fragment = False
         
-        # Valid directives by section
+        # Phase K Phase D follow-up (Bulgu #12 / round 3): Valid
+        # directives by section. The legacy sets below were a small,
+        # hand-picked subset that surfaced spurious WARNINGs for many
+        # well-formed wizard / manual configs:
+        #   - `stick-table` / `stick` are valid in BOTH frontend AND
+        #     backend (HAProxy 1.6+). The wizard emits stick-table on
+        #     frontends with rate-limit WAF rules; the heuristic
+        #     flagged each emission as "may not be valid".
+        #   - `tcp-request` / `tcp-response` are valid in frontend AND
+        #     backend (used for L4 inspection, content acceptance,
+        #     custom track-sc rules).
+        #   - `cookie` is the canonical session-stickiness directive
+        #     in BACKEND. Pre-fix the validator flagged every wizard
+        #     backend with cookie-based stickiness as "may not be
+        #     valid".
+        # The post-fix sets are still NOT exhaustive (HAProxy has
+        # ~200 directives) but they cover the full surface area of
+        # what the wizard, manual Frontend/Backend management pages
+        # and config_templates can EVER emit, plus the most common
+        # operator-authored directives in raw-mode editors. Anything
+        # outside this set still emits a low-severity WARNING (never
+        # an ERROR), so a typo is still surfaced — we just stop
+        # crying wolf on valid configs.
+        # NOTE on lookup mechanics: `_validate_directive` splits the
+        # line by whitespace and checks `parts[0]` against the section
+        # set. So multi-word directive forms (e.g. `monitor fail`) DO
+        # NOT need to be listed — only the first token matters.
+        # Likewise `no option httplog` looks up `no` (a valid HAProxy
+        # negation prefix recognised in entity sections), which is
+        # included below.
         self.valid_directives = {
             'global': {
                 'daemon', 'master-worker', 'nbproc', 'nbthread', 'cpu-map',
                 'stats', 'user', 'group', 'chroot', 'pidfile', 'log', 'log-tag',
-                'maxconn', 'ulimit-n', 'spread-checks', 'tune.ssl.default-dh-param',
+                'maxconn', 'ulimit-n', 'spread-checks',
                 'ssl-default-bind-options', 'ssl-default-bind-ciphers', 'ca-base',
-                'crt-base', 'tune.bufsize', 'tune.maxrewrite', 'tune.rcvbuf.client',
-                'tune.rcvbuf.server', 'tune.sndbuf.client', 'tune.sndbuf.server'
+                'crt-base',
+                'tune.bufsize', 'tune.maxrewrite',
+                'tune.rcvbuf.client', 'tune.rcvbuf.server',
+                'tune.sndbuf.client', 'tune.sndbuf.server',
+                'tune.ssl.default-dh-param', 'tune.ssl.cachesize',
+                'tune.ssl.lifetime', 'tune.ssl.maxrecord',
+                'tune.fd.edge-triggered',
+                'description', 'numa-cpu-mapping', 'no-numa-cpu-mapping',
+                'thread-groups', 'stats-file', 'unix-bind',
+                'presetenv', 'setenv',
+                'ssl-server-verify', 'ssl-mode-async',
+                'h1-case-adjust', 'h1-case-adjust-file',
+                'hard-stop-after',
+                'wurfl-data-file', 'wurfl-information-list',
+                'wurfl-information-list-separator', 'wurfl-cache-size',
+                'wurfl-engine-mode',
+                'cluster-secret', 'expose-experimental-directives',
+                '51degrees-data-file',
+                'no-quic', 'limited-quic', 'mworker-max-reloads',
             },
             'defaults': {
                 'mode', 'balance', 'option', 'timeout', 'retries', 'maxconn',
-                'http-request', 'http-response', 'errorfile', 'default-server',
-                'log', 'compression'
+                'http-request', 'http-response', 'http-after-response',
+                'errorfile', 'errorloc', 'errorloc302', 'errorloc303',
+                'http-error',
+                'default-server', 'default_backend', 'dispatch',
+                'log', 'log-tag', 'log-format', 'log-format-sd',
+                'compression', 'http-check', 'http-reuse',
+                'cookie', 'monitor-uri',
+                'load-server-state-from-file',
+                'http-send-name-header',
+                'fullconn', 'unique-id-format', 'unique-id-header',
+                'tcp-request', 'tcp-response', 'persist',
+                'enabled', 'disabled', 'hash-type', 'capture',
+                'rate-limit', 'description',
             },
             'frontend': {
-                'bind', 'mode', 'option', 'timeout', 'maxconn', 'default_backend',
-                'use_backend', 'acl', 'http-request', 'http-response', 'redirect',
-                'capture', 'monitor-uri', 'log', 'compression', 'rate-limit'
+                'bind', 'mode', 'option', 'no', 'timeout', 'maxconn',
+                'default_backend', 'use_backend',
+                'acl', 'http-request', 'http-response', 'http-after-response',
+                'redirect', 'capture',
+                'monitor-uri', 'monitor',
+                'log', 'log-format', 'log-format-sd', 'log-tag',
+                'compression', 'rate-limit',
+                'stick-table', 'stick',
+                'tcp-request', 'tcp-response',
+                'errorfile', 'errorloc', 'errorloc302', 'errorloc303',
+                'http-error',
+                'description', 'id', 'filter',
+                'unique-id-format', 'unique-id-header', 'declare',
+                'http-reuse', 'maxidle', 'maxlife',
+                'enabled', 'disabled', 'http-send-name-header',
+                'http-buffer-request',
             },
             'backend': {
-                'mode', 'balance', 'option', 'timeout', 'server', 'http-request',
-                'http-response', 'stick-table', 'stick', 'hash-type', 'default-server',
-                'log', 'compression', 'http-check'
+                'mode', 'balance', 'option', 'no', 'timeout',
+                'server', 'default-server',
+                'http-request', 'http-response', 'http-after-response',
+                'stick-table', 'stick', 'hash-type',
+                'log', 'log-format', 'log-format-sd', 'log-tag',
+                'compression', 'http-check', 'http-reuse',
+                'cookie', 'appsession',
+                'tcp-request', 'tcp-response', 'tcp-check',
+                'retries', 'fullconn', 'dispatch',
+                'redirect', 'use-server', 'use_backend',
+                'acl', 'capture',
+                'errorfile', 'errorloc', 'errorloc302', 'errorloc303',
+                'http-error',
+                'description', 'id', 'filter',
+                'rate-limit', 'declare',
+                'email-alert', 'force-persist', 'ignore-persist',
+                'enabled', 'disabled', 'load-server-state-from-file',
+                'http-send-name-header', 'persist',
+                'transparent', 'source',
             },
             'listen': {
-                'bind', 'mode', 'balance', 'option', 'timeout', 'server', 'maxconn',
-                'http-request', 'http-response', 'acl', 'default-server', 'log'
-            }
+                'bind', 'mode', 'balance', 'option', 'no', 'timeout',
+                'server', 'default-server', 'maxconn',
+                'http-request', 'http-response', 'http-after-response',
+                'acl', 'log', 'log-format', 'log-format-sd',
+                'stick-table', 'stick', 'tcp-request', 'tcp-response',
+                'cookie', 'use_backend', 'capture', 'redirect',
+                'http-check', 'tcp-check',
+                'errorfile', 'errorloc', 'errorloc302', 'errorloc303',
+                'http-error',
+                'description', 'id', 'filter',
+                'monitor-uri', 'monitor',
+                'compression', 'retries', 'fullconn', 'hash-type',
+                'rate-limit',
+            },
         }
     
-    def validate_config(self, config_content: str) -> ConfigValidationReport:
-        """Validate complete HAProxy configuration"""
+    def validate_config(
+        self,
+        config_content: str,
+        partial_fragment: bool = False,
+    ) -> ConfigValidationReport:
+        """Validate complete HAProxy configuration.
+
+        Phase K Phase D follow-up (Bulgu #12) — `partial_fragment=True`
+        signals that the caller intentionally synthesised a partial
+        config that EXCLUDES `global` / `defaults` sections (the
+        agent merges them with its local copy on the HAProxy node).
+        With this flag the validator skips the "Missing 'global'
+        section" / "Consider adding 'defaults' section" diagnostics
+        that are pure false positives for the wizard's dry-run and
+        the wizard's apply-time pre-persist gate. When the flag is
+        unset (False, the default) AND the input clearly looks
+        partial (no global/defaults but at least one
+        frontend/backend), the validator auto-detects via the
+        wizard's marker comment so callers that forget to pass
+        the flag still don't trigger the warning.
+        """
         self.results = []
         self.sections = {}
         self.current_section = None
         self.line_number = 0
-        
+        # Caller-explicit flag wins; auto-detect via marker comment
+        # below for backwards compatibility with older callers.
+        self._is_partial_fragment = bool(partial_fragment)
+
         lines = config_content.split('\n')
-        
+
+        # Phase K Phase D (Bulgu #12) — auto-detect the wizard's own
+        # marker comment so callers that forget to pass
+        # `partial_fragment=True` still get the suppressed warnings.
+        # The marker is emitted by
+        # `routers/site_wizard.py::_build_candidate_fragment` and
+        # `services/haproxy_config.py` when assembling a cluster
+        # synthesis without the global/defaults preamble.
+        for raw_line in lines:
+            sline = raw_line.strip()
+            if (
+                'Wizard candidate fragment' in sline
+                or 'agent will preserve existing global' in sline.lower()
+            ):
+                self._is_partial_fragment = True
+                break
+
         # Parse and validate each line
         for line_num, line in enumerate(lines, 1):
             self.line_number = line_num
             self._validate_line(line.strip())
-        
+
         # Perform section-level validations
         self._validate_sections()
         
@@ -319,7 +466,21 @@ class HAProxyConfigValidator:
             )
         
         # Validate timeout value format
-        if not re.match(r'^\d+[smhd]?$', timeout_value):
+        #
+        # HAProxy accepts the unit suffixes: `us` (microseconds), `ms`
+        # (milliseconds), `s` (seconds), `m` (minutes), `h` (hours),
+        # `d` (days). A bare integer (no suffix) is also valid and is
+        # interpreted as milliseconds (HAProxy docs: "Time values").
+        #
+        # Phase K Phase D follow-up (Bulgu #10) — the pre-fix regex
+        # was `^\d+[smhd]?$`, which rejected the perfectly valid
+        # multi-character `us` and `ms` suffixes. Site Wizard's
+        # config synthesis emits `timeout connect 10000ms` /
+        # `timeout server 60000ms` / `timeout client 100ms` so the
+        # dry-run preview surfaced 10+ FALSE-POSITIVE errors on
+        # the wizard's own defaults, blocking Create even though
+        # the real HAProxy `-c` parse accepts the config.
+        if not re.match(r'^\d+(us|ms|s|m|h|d)?$', timeout_value):
             self._add_result(
                 ValidationLevel.ERROR,
                 f"Invalid timeout value '{timeout_value}'",
@@ -432,27 +593,35 @@ class HAProxyConfigValidator:
     
     def _validate_sections(self):
         """Validate section-level requirements"""
-        
-        # Check for required global settings
-        if 'global' not in self.sections:
-            self._add_result(
-                ValidationLevel.WARNING,
-                "Missing 'global' section - recommended for production",
-                suggestion="Add global section with basic settings"
-            )
-        
-        # Check for defaults section
-        if 'defaults' not in self.sections:
-            self._add_result(
-                ValidationLevel.SUGGESTION,
-                "Consider adding 'defaults' section for common settings",
-                suggestion="Add defaults section to reduce configuration duplication"
-            )
-        
-        # Check balance of frontends and backends
+
+        # Phase K Phase D (Bulgu #12): skip the "Missing 'global' /
+        # 'defaults'" diagnostics on partial-fragment inputs. The
+        # wizard / cluster-synthesis emit fragments where the agent
+        # MERGES the local global+defaults blocks at apply time —
+        # the heuristic is being shown only the entity blocks, so
+        # complaining about missing global is misleading.
+        if not self._is_partial_fragment:
+            if 'global' not in self.sections:
+                self._add_result(
+                    ValidationLevel.WARNING,
+                    "Missing 'global' section - recommended for production",
+                    suggestion="Add global section with basic settings"
+                )
+
+            if 'defaults' not in self.sections:
+                self._add_result(
+                    ValidationLevel.SUGGESTION,
+                    "Consider adding 'defaults' section for common settings",
+                    suggestion="Add defaults section to reduce configuration duplication"
+                )
+
+        # Check balance of frontends and backends (still useful for
+        # both complete configs AND partial fragments — a fragment
+        # that emits a frontend without its referenced backend is
+        # a real authoring bug).
         frontend_count = len(self.sections.get('frontend', []))
         backend_count = len(self.sections.get('backend', []))
-        
+
         if frontend_count > 0 and backend_count == 0:
             self._add_result(
                 ValidationLevel.WARNING,
@@ -559,10 +728,22 @@ class HAProxyConfigValidator:
         )
         self.results.append(result)
 
-def validate_haproxy_config(config_content: str) -> ConfigValidationReport:
-    """Main function to validate HAProxy configuration"""
+def validate_haproxy_config(
+    config_content: str,
+    partial_fragment: bool = False,
+) -> ConfigValidationReport:
+    """Main function to validate HAProxy configuration.
+
+    Phase K Phase D follow-up (Bulgu #12) — `partial_fragment` is
+    forwarded to the validator instance so callers that synthesise
+    a partial config (no global/defaults sections — agent merges
+    them locally) can silence the "Missing 'global' section"
+    false-positive WARNING. Defaults to False for backwards
+    compatibility with the manual config-import path that DOES
+    validate a complete on-disk config.
+    """
     validator = HAProxyConfigValidator()
-    return validator.validate_config(config_content)
+    return validator.validate_config(config_content, partial_fragment=partial_fragment)
 
 def get_validation_summary(report: ConfigValidationReport) -> Dict[str, Any]:
     """Get validation summary for API response"""

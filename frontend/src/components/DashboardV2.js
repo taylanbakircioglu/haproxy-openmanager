@@ -26,6 +26,7 @@ import CapacityLoadTab from './dashboard/tabs/CapacityLoadTab';
 import HealthMatrixTab from './dashboard/tabs/HealthMatrixTab';
 import FrontendsTab from './dashboard/tabs/FrontendsTab';
 import BackendsTab from './dashboard/tabs/BackendsTab';
+import { extractApiError } from '../utils/apiError';
 
 const { Title, Text } = Typography;
 
@@ -55,7 +56,7 @@ const CardSkeleton = ({ rows = 3 }) => (
 
 const DashboardV2 = () => {
   const { token } = theme.useToken();
-  const { selectedCluster } = useCluster();
+  const { selectedCluster, loading: clustersLoading } = useCluster();
   
   // State management
   const [loading, setLoading] = useState(true);
@@ -357,7 +358,7 @@ const DashboardV2 = () => {
       setStatsData(prevData => ({ ...prevData, ...response.data }));
     } catch (error) {
       console.error('Failed to fetch stats data:', error);
-      setError(error.response?.data?.detail || error.message);
+      setError(extractApiError(error, error.message));
     } finally {
       if (initialLoad) {
         setLoading(false);
@@ -911,8 +912,33 @@ const DashboardV2 = () => {
     );
   }
   
-  // Render no cluster selected state (after all hooks)
+  // Render no cluster selected state (after all hooks).
+  //
+  // Phase J audit fix #6 — Distinguish "still loading the cluster
+  // list" from "the operator hasn't picked a cluster". The first one
+  // is a transient state that resolves automatically (mount-time
+  // bootstrap, exponential-backoff retry on transient API failures);
+  // showing the static "No Cluster Selected" card during that window
+  // was the headline symptom of the cluster-listing-delay bug. Render
+  // a neutral loading affordance until the fetch settles, and only
+  // then surface the warning that asks the operator to pick a
+  // cluster.
   if (!selectedCluster) {
+    if (clustersLoading) {
+      return (
+        <div style={{ padding: 50, textAlign: 'center' }}>
+          <Card>
+            <Spin size="large" />
+            <Title level={3} type="secondary" style={{ marginTop: 24 }}>
+              Loading clusters…
+            </Title>
+            <Text type="secondary">
+              Fetching the cluster list. Dashboard metrics will load automatically once a cluster is available.
+            </Text>
+          </Card>
+        </div>
+      );
+    }
     return (
       <div style={{ padding: 50, textAlign: 'center' }}>
         <Card>

@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: backend
-  namespace: haproxy-openmanager
+  namespace: internal-haproxy-openmanager
   labels:
     app: haproxy-openmanager
     component: backend
@@ -36,7 +36,7 @@ spec:
             name: postgres-secret
       containers:
       - name: backend
-        image: taylanbakircioglu/haproxy-openmanager-backend:latest  # Public Docker Hub image
+        image: your-registry.example.com/your-org/haproxy-openmanager-backend:image-version  # Build and push your image to a registry
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
@@ -78,7 +78,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: backend
-  namespace: haproxy-openmanager
+  namespace: internal-haproxy-openmanager
   labels:
     app: haproxy-openmanager
     component: backend

@@ -36,6 +36,7 @@ import {
 } from '@ant-design/icons';
 import axios from 'axios';
 import { useAuth } from '../contexts/AuthContext';
+import { extractApiError } from '../utils/apiError';
 
 const { TabPane } = Tabs;
 const { Option } = Select;
@@ -510,7 +511,7 @@ const UserManagement = () => {
       setUserModalVisible(false);
       fetchUsers();
     } catch (error) {
-      message.error(error.response?.data?.detail || 'Operation failed');
+      message.error(extractApiError(error, 'Operation failed'));
     }
   };
 
@@ -520,7 +521,7 @@ const UserManagement = () => {
       message.success(`User '${user.username}' deleted successfully`);
       fetchUsers();
     } catch (error) {
-      message.error(error.response?.data?.detail || 'Failed to delete user');
+      message.error(extractApiError(error, 'Failed to delete user'));
     }
   };
 
@@ -536,7 +537,7 @@ const UserManagement = () => {
       message.success('Password changed successfully');
       setPasswordModalVisible(false);
     } catch (error) {
-      message.error(error.response?.data?.detail || 'Failed to change password');
+      message.error(extractApiError(error, 'Failed to change password'));
     }
   };
 
@@ -558,7 +559,7 @@ const UserManagement = () => {
       setRoleAssignmentModalVisible(false);
       fetchUsers();
     } catch (error) {
-      message.error(error.response?.data?.detail || 'Failed to assign roles');
+      message.error(extractApiError(error, 'Failed to assign roles'));
     }
   };
 
@@ -626,7 +627,7 @@ const UserManagement = () => {
       setCheckedPermissions([]);
       fetchRoles();
     } catch (error) {
-      message.error(error.response?.data?.detail || 'Operation failed');
+      message.error(extractApiError(error, 'Operation failed'));
     }
   };
 
@@ -636,7 +637,7 @@ const UserManagement = () => {
       message.success(`Role '${role.display_name}' deleted successfully`);
       fetchRoles();
     } catch (error) {
-      message.error(error.response?.data?.detail || 'Failed to delete role');
+      message.error(extractApiError(error, 'Failed to delete role'));
     }
   };
 
@@ -909,8 +910,18 @@ const UserManagement = () => {
         try {
           const detailsObj = typeof details === 'string' ? JSON.parse(details) : details;
           
-          // Extract meaningful information from details
-          const importantKeys = ['entity_name', 'path', 'method', 'entity_type', 'cluster_id', 'status_code'];
+          // Extract meaningful information from details.
+          // R18c audit fix (round 2 #4): include the new wizard
+          // audit fields so the truncated "Details" preview shows
+          // actionable context (wizard outcome / apply / acme
+          // errors) instead of falling back to raw alphabetical
+          // keys. Pre-fix the wizard's degraded outcomes were only
+          // visible by opening the JSON tooltip.
+          const importantKeys = [
+            'entity_name', 'path', 'method', 'entity_type', 'cluster_id', 'status_code',
+            'wizard_status', 'apply_error', 'acme_staging_error', 'version_name',
+            'ssl_mode',
+          ];
           const displayDetails = [];
           
           // Show important keys first
@@ -1197,7 +1208,15 @@ const UserManagement = () => {
             <Table
               columns={activityColumns}
               dataSource={filteredActivities}
-              rowKey="timestamp"
+              // R18c audit fix (round 2 #5): use a composite key
+              // that prefers the row id and falls back to a
+              // timestamp+action+resource_id triple. Pre-fix
+              // `rowKey="timestamp"` caused duplicate React keys
+              // when burst logging produced two activity rows in
+              // the same second (e.g. wizard create + ACME staging
+              // event), which Ant Design surfaces as a console
+              // warning and may silently drop selection state.
+              rowKey={(r) => r?.id ?? `${r?.timestamp}-${r?.action ?? ''}-${r?.resource_id ?? ''}`}
               loading={activitiesLoading}
               pagination={{ 
                 pageSize: 20,

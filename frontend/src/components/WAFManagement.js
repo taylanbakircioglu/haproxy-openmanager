@@ -18,6 +18,7 @@ import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import { useCluster } from '../contexts/ClusterContext';
 import { VersionHistory } from './VersionHistory';
+import { extractApiError } from '../utils/apiError';
 
 // Error Boundary Component
 class WAFErrorBoundary extends React.Component {
@@ -327,7 +328,7 @@ const WAFManagement = () => {
       // Apply filters immediately to maintain consistency
       setFilteredRules(applyStatusFilters(fetchedRules));
     } catch (error) {
-      message.error('Failed to fetch WAF rules: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to fetch WAF rules: ' + (extractApiError(error, error.message)));
     } finally {
       setLoading(false);
     }
@@ -550,7 +551,7 @@ const WAFManagement = () => {
           okType: 'default'
         });
       } else {
-        message.error(`Failed to apply changes: ${error.response?.data?.message || error.response?.data?.detail || error.message}`);
+        message.error(`Failed to apply changes: ${extractApiError(error, error.message)}`);
       }
     } finally {
       setApplyLoading(false);
@@ -642,7 +643,7 @@ const WAFManagement = () => {
       fetchRules();
       checkPendingChanges();
     } catch (error) {
-      message.error('Failed to delete rule: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to delete rule: ' + (extractApiError(error, error.message)));
     }
   };
 
@@ -655,7 +656,7 @@ const WAFManagement = () => {
       fetchRules();
       checkPendingChanges();
     } catch (error) {
-      message.error('Failed to toggle rule: ' + error.response?.data?.detail);
+      message.error(`Failed to toggle rule: ${extractApiError(error, '')}`);
     }
   };
 
@@ -703,7 +704,7 @@ const WAFManagement = () => {
       fetchRules();
       checkPendingChanges();
     } catch (error) {
-      message.error('Failed to save rule: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to save rule: ' + (extractApiError(error, error.message)));
     }
   };
 

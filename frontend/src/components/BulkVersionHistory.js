@@ -13,11 +13,12 @@ import MonacoEditor from '@monaco-editor/react';
 import axios from 'axios';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNavigate } from 'react-router-dom';
+import { extractApiError } from '../utils/apiError';
 
 const { Title, Text, Paragraph } = Typography;
 
 const BulkVersionHistory = () => {
-  const { selectedCluster } = useCluster();
+  const { selectedCluster, loading: clustersLoading } = useCluster();
   const navigate = useNavigate();
   
   // State
@@ -416,7 +417,7 @@ const BulkVersionHistory = () => {
       if (error.response?.status === 401) {
         message.error('Authentication failed. Please login again.');
       } else {
-        message.error(`Failed to get restore preview: ${error.response?.data?.message || error.response?.data?.detail || error.message}`);
+        message.error(`Failed to get restore preview: ${extractApiError(error, error.message)}`);
       }
     } finally {
       setRestoreLoading(false);
@@ -444,8 +445,19 @@ const BulkVersionHistory = () => {
 
   const formatVersionName = (versionName) => {
     // Parse version name to extract meaningful information
+    // R18c audit fix (round 2 #3): wizard-created versions follow
+    // the `bulk-site-create-{ts}` shape (legacy naming:
+    // `bulk-proxied-host-create-{ts}`, preserved here so historical
+    // APPLIED versions still get a friendly label). Pre-fix the
+    // operator saw the raw timestamped string with no "what is
+    // this?" hint — checked first so it doesn't fall into the
+    // generic `bulk-apply-` branch.
+    if (
+      versionName.includes('bulk-site-create-') ||
+      versionName.includes('bulk-proxied-host-create-')
+    ) return `New Site (wizard) - ${versionName}`;
     if (versionName.includes('frontend-')) return `Frontend Change - ${versionName}`;
-    if (versionName.includes('backend-')) return `Backend Change - ${versionName}`;  
+    if (versionName.includes('backend-')) return `Backend Change - ${versionName}`;
     if (versionName.includes('waf-')) return `WAF Change - ${versionName}`;
     if (versionName.includes('ssl-')) return `SSL Change - ${versionName}`;
     if (versionName.includes('bulk-apply-')) return `Bulk Apply - ${versionName}`;
@@ -524,7 +536,19 @@ const BulkVersionHistory = () => {
           >
             View Change
           </Button>
-          {!record.is_active && record.version_name.includes('apply-consolidated') && (
+          {/* R18c audit fix (round 2 #3): allow Restore for wizard
+              bulk versions too. Pre-fix only `apply-consolidated`
+              versions could be restored, so an operator who
+              applied a wizard PENDING and later wanted to roll
+              back to a previous applied state had no UI path to
+              do it from this page. The backend restore handler
+              already supports any non-active version. */}
+          {!record.is_active && (
+            record.version_name.includes('apply-consolidated') ||
+            record.version_name.includes('bulk-site-create-') ||
+            record.version_name.includes('bulk-proxied-host-create-') ||
+            record.version_name.includes('bulk-import-')
+          ) && (
             <Popconfirm
               title="Restore Configuration Version"
               description={`Are you sure you want to restore to version "${record.version_name}"?`}
@@ -549,9 +573,23 @@ const BulkVersionHistory = () => {
   ];
 
   if (!selectedCluster) {
+    // Phase J audit fix #6 — neutral "Loading…" while the cluster
+    // list is still being fetched, otherwise the page reads as if
+    // the operator forgot to pick a cluster during the legitimate
+    // post-deploy / post-login fetch window.
+    if (clustersLoading) {
+      return (
+        <Card>
+          <Empty
+            description="Loading clusters…"
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+          />
+        </Card>
+      );
+    }
     return (
       <Card>
-        <Empty 
+        <Empty
           description="Please select a cluster to view version history"
           image={Empty.PRESENTED_IMAGE_SIMPLE}
         />

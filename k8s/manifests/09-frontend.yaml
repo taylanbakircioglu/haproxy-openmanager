@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: frontend
-  namespace: haproxy-openmanager
+  namespace: internal-haproxy-openmanager
   labels:
     app: haproxy-openmanager
     component: frontend
@@ -22,7 +22,7 @@ spec:
       serviceAccountName: haproxy-openmanager-frontend
       containers:
       - name: frontend
-        image: taylanbakircioglu/haproxy-openmanager-frontend:latest  # Public Docker Hub image
+        image: your-registry.example.com/your-org/haproxy-openmanager-frontend:image-version # Build and push your image to a registry
         imagePullPolicy: Always
         ports:
         - containerPort: 3000
@@ -54,7 +54,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: frontend
-  namespace: haproxy-openmanager
+  namespace: internal-haproxy-openmanager
   labels:
     app: haproxy-openmanager
     component: frontend

@@ -53,9 +53,19 @@ const MATCH_TYPE_GROUPS = [
   { label: 'Advanced', options: MATCH_TYPES.filter(m => m.category === 'Advanced') },
 ];
 
+// Phase K Phase D follow-up (Bulgu #12 round 3) — the `-f <file>`
+// flag was removed from the visual builder because HAProxy OpenManager
+// does not provision pattern files onto the HAProxy node filesystem.
+// Allowing `-f` in the visual builder produced ACL rules that passed
+// every UI / Pydantic / heuristic check but ALWAYS failed HAProxy's
+// real `-c` parse at apply time with "failed to open pattern file".
+// Operators reported a multi-page wizard run ending at the Apply
+// Management red-badge for a footgun the UI made trivial to step on.
+// The Pydantic validators on the manual API + wizard reject `-f`
+// universally; the visual builder simply removes the option from the
+// dropdown so operators cannot author the unsupported state.
 const FLAGS = [
   { value: '-i', label: '-i  (case insensitive)' },
-  { value: '-f', label: '-f  (from file)' },
   { value: '-m beg', label: '-m beg  (begins with)' },
   { value: '-m end', label: '-m end  (ends with)' },
   { value: '-m sub', label: '-m sub  (contains)' },
@@ -65,15 +75,87 @@ const FLAGS = [
   { value: '-m found', label: '-m found  (exists)' },
 ];
 
+// Phase K Phase D follow-up (Bulgu #13) — `-m found` checks
+// whether the underlying sample fetch returns ANY value at all.
+// For sample fetches that ALWAYS return a value in a normal HTTP
+// request (`path`, `url`, `hdr(...)`, `method`, `src`, etc.) the
+// match is trivially true → the ACL is always true → routing
+// rules that gate on it become unconditional. This is almost
+// never what the operator means.
+//
+// The flag IS meaningful for fetches that may return null
+// (`srv_conn(<srv>)`, `nbsrv(<be>)`, `req.cook(<name>)`,
+// `urlp(<param>)` etc.). Those live under the "Advanced"
+// category in this builder, so we restrict `-m found` to that
+// category only — the dropdown for Path/URL/Header/Method/
+// Network/SSL omits it.
+const ALWAYS_PRESENT_CATEGORIES = new Set([
+  'Path', 'URL', 'Header', 'Method', 'Network', 'SSL',
+]);
+function flagsForCategory(category) {
+  if (!category || ALWAYS_PRESENT_CATEGORIES.has(category)) {
+    return FLAGS.filter((f) => f.value !== '-m found');
+  }
+  return FLAGS;
+}
+
 const FLAG_HINTS = {
-  Path: '-i, -f ...',
-  URL: '-i, -f ...',
+  Path: '-i ...',
+  URL: '-i ...',
   Header: '-i ...',
   Method: '-i ...',
-  Network: '-f ...',
+  Network: 'Optional',
   SSL: 'Optional',
   Advanced: 'Optional',
 };
+
+// Phase K Phase D follow-up (Bulgu #12 round 3) — detection regex for
+// `-f` references in raw-mode authored ACL rules. The Pydantic
+// validator rejects the same shape server-side; we mirror it
+// client-side so the operator sees an inline error before submit.
+const ACL_FILE_FLAG_PATTERN = /(?:^|\s)-f(?:\s|$)/;
+
+// Phase K Phase D follow-up (Bulgu #13) — detect contradictory ACL
+// conditions of the form `acl1 !acl1` (operator picked both the
+// positive AND the negated form of the same ACL from the Select
+// dropdown). HAProxy accepts the syntax but the rule's predicate is
+// `acl1 AND NOT acl1` → always FALSE → the rule is dead code and
+// the operator is silently routed to `default_backend` instead.
+//
+// Returns a Set of ACL names that appear in BOTH positive and
+// negated form in the token list. Empty set means the condition
+// is logically consistent (or at least not self-contradictory in
+// the obvious way).
+function detectContradictoryAclTokens(tokens) {
+  const positives = new Set();
+  const negatives = new Set();
+  for (const raw of tokens) {
+    if (!raw || typeof raw !== 'string') continue;
+    const t = raw.trim();
+    if (!t) continue;
+    // Accept tokens that are purely an ACL identifier or its
+    // negation. Anything else (e.g. anonymous `{ ssl_fc }`,
+    // `if`, `unless`) is ignored — we only flag the SAME ACL
+    // referenced twice in opposite polarity.
+    if (/^![A-Za-z_][\w.-]*$/.test(t)) {
+      negatives.add(t.slice(1));
+    } else if (/^[A-Za-z_][\w.-]*$/.test(t)) {
+      positives.add(t);
+    }
+  }
+  const conflicts = new Set();
+  positives.forEach((name) => {
+    if (negatives.has(name)) conflicts.add(name);
+  });
+  return conflicts;
+}
+
+const CONTRADICTORY_TOOLTIP =
+  'Condition contains the same ACL in both positive and negated ' +
+  'form (e.g. `acl1 !acl1`). HAProxy accepts the syntax but the ' +
+  'predicate `X AND NOT X` is always false, so the rule never ' +
+  'fires and traffic silently falls through to `default_backend`. ' +
+  'Remove one of the two tokens.';
 
 const REDIRECT_TYPES = [
   { value: 'scheme', label: 'Scheme', description: 'Change protocol (HTTP→HTTPS)' },
@@ -208,9 +290,46 @@ function serializeUseBackendRule(rule) {
 /**
  * Parse redirect rule string like "scheme https if !{ ssl_fc }"
  */
-function parseRedirectRule(ruleStr) {
-  if (!ruleStr || typeof ruleStr !== 'string') return null;
-  let str = ruleStr.trim();
+// Bulgu #70 (round-22 audit) — wizard-generated redirect rules are
+// persisted as DICTS in the `frontend.redirect_rules` JSONB column,
+// not as strings (see
+// `backend/routers/site_wizard.py::_build_redirect_rules` which
+// emits `{type:'scheme', scheme:'https', code:301, condition:...}`).
+// Pre-fix `parseRedirectRule` rejected anything that wasn't a
+// string with `typeof !== 'string' → return null`, then the caller
+// `.filter(Boolean)`-ed the result. Net effect: every time an
+// operator opened the FrontendManagement edit modal on a
+// wizard-created frontend with `https_redirect=true`, the
+// in-memory `redirectRules` list silently DROPPED the dict, and
+// hitting Save persisted an empty `redirect_rules: []` — wiping
+// the HTTPS redirect / ACME-challenge bypass that the wizard had
+// configured. The data loss was invisible (no toast, no warning)
+// and only surfaced when end-users hit the site on port 80 and
+// no longer got the 301.
+//
+// Normalize dicts here so they round-trip through the FE edit
+// flow as ordinary structured rules; the renderer at
+// `services/haproxy_config.py::_format_redirect_rule` accepts
+// either dict OR string, so serializing back to a string on
+// save is semantically equivalent.
+function parseRedirectRule(rule) {
+  if (rule == null) return null;
+  if (rule && typeof rule === 'object' && !Array.isArray(rule)) {
+    const rtype = String(rule.type || '').trim().toLowerCase();
+    let target = '';
+    if (rtype === 'scheme') target = String(rule.scheme || '').trim();
+    else if (rtype === 'location') target = String(rule.location || '').trim();
+    else if (rtype === 'prefix') target = String(rule.prefix || '').trim();
+    if (!rtype || !target) return null;
+    const code = rule.code != null && rule.code !== '' ? String(rule.code) : '';
+    let condition = String(rule.condition || '').trim();
+    if (condition && !/^\s*(if|unless)\b/i.test(condition)) {
+      condition = `if ${condition}`;
+    }
+    return { type: rtype, target, code, condition };
+  }
+  if (typeof rule !== 'string') return null;
+  let str = rule.trim();
   if (str.toLowerCase().startsWith('redirect ')) {
     str = str.substring(9).trim();
   }
@@ -218,7 +337,7 @@ function parseRedirectRule(ruleStr) {
 
   // Pattern: "type target [code NNN] [if|unless condition]"
   const typeMatch = str.match(/^(scheme|prefix|location)\s+/i);
-  if (!typeMatch) return { raw: ruleStr.trim() };
+  if (!typeMatch) return { raw: rule.trim() };
 
   const type = typeMatch[1].toLowerCase();
   let rest = str.substring(typeMatch[0].length).trim();
@@ -277,17 +396,45 @@ function ACLDefinitionCard({ rule, index, onChange, onDelete }) {
   };
   const isRaw = rule.raw !== undefined;
 
+  // Phase K Phase D follow-up (Bulgu #12 round 3) — surface `-f` flag
+  // usage inline. The Pydantic validator rejects the rule server-side,
+  // but operators benefit from seeing the error AS they type / when
+  // they re-open a draft that carries a `-f`-flagged rule (e.g. from
+  // a pre-fix draft). The error message matches the Pydantic error
+  // verbatim so support flows are consistent.
+  const rawHasFileFlag = isRaw && typeof rule.raw === 'string' && ACL_FILE_FLAG_PATTERN.test(rule.raw);
+  const structuredHasFileFlag =
+    !isRaw && Array.isArray(rule.flags) && rule.flags.includes('-f');
+  const hasFileFlag = rawHasFileFlag || structuredHasFileFlag;
+  const cardStyleWithError = hasFileFlag
+    ? { ...ruleCardStyle, border: `1px solid ${token.colorError}` }
+    : ruleCardStyle;
+  const FILE_FLAG_TOOLTIP =
+    "ACL pattern-file references (-f <file>) are not supported by "
+    + "HAProxy OpenManager: the product does not provision pattern "
+    + "files onto the HAProxy node filesystem, so the reference "
+    + "would fail at HAProxy reload time. Remove '-f' and use inline "
+    + "values instead.";
+
   if (isRaw) {
     return (
-      <Card size="small" style={ruleCardStyle}>
+      <Card size="small" style={cardStyleWithError}>
         <Row gutter={8} align="middle">
           <Col flex="auto">
-            <Input
-              value={rule.raw}
-              onChange={(e) => onChange(index, { raw: e.target.value })}
-              placeholder="Raw ACL rule (e.g. my_acl path_beg /api)"
-              prefix={<Tag color="default" style={{ marginRight: 4 }}>RAW</Tag>}
-            />
+            <Tooltip title={hasFileFlag ? FILE_FLAG_TOOLTIP : ''} open={hasFileFlag ? undefined : false}>
+              <Input
+                value={rule.raw}
+                onChange={(e) => onChange(index, { raw: e.target.value })}
+                placeholder="Raw ACL rule (e.g. my_acl path_beg /api)"
+                prefix={<Tag color="default" style={{ marginRight: 4 }}>RAW</Tag>}
+                status={hasFileFlag ? 'error' : undefined}
+              />
+            </Tooltip>
+            {hasFileFlag && (
+              <Text type="danger" style={{ fontSize: 11, display: 'block', marginTop: 2 }}>
+                {FILE_FLAG_TOOLTIP}
+              </Text>
+            )}
           </Col>
           <Col>
             <Tooltip title="Delete rule">
@@ -308,7 +455,7 @@ function ACLDefinitionCard({ rule, index, onChange, onDelete }) {
   const matchDef = MATCH_TYPES.find(m => m.value === rule.matchType);
 
   return (
-    <Card size="small" style={ruleCardStyle}>
+    <Card size="small" style={cardStyleWithError}>
       <Row gutter={8} align="middle" wrap={false}>
         <Col flex="140px">
           <Input
@@ -345,6 +492,11 @@ function ACLDefinitionCard({ rule, index, onChange, onDelete }) {
           </Select>
         </Col>
         <Col flex="100px">
+          {/* Phase K Phase D follow-up (Bulgu #12 round 3) — `-f` is
+              no longer surfaced as a selectable flag. Legacy rules
+              that already carry it remain visible as a tag (so the
+              operator can still REMOVE it) but cannot be re-added
+              once removed. */}
           <Select
             mode="multiple"
             value={rule.flags || []}
@@ -364,16 +516,20 @@ function ACLDefinitionCard({ rule, index, onChange, onDelete }) {
             maxTagTextLength={8}
             popupMatchSelectWidth={false}
             allowClear
+            status={structuredHasFileFlag ? 'error' : undefined}
           >
-            {FLAGS.map(f => (
+            {flagsForCategory(matchDef?.category).map(f => (
               <Option key={f.value} value={f.value}>{f.label}</Option>
             ))}
+            {/* Surface any legacy `-f` flag so the operator can see +
+                remove it. Marked as deprecated in the label. */}
+            {structuredHasFileFlag && (
+              <Option key="-f" value="-f">-f  (deprecated — remove)</Option>
+            )}
           </Select>
         </Col>
         <Col flex="auto">
           {(() => {
-            const hasFileFlag = (rule.flags || []).includes('-f');
-            const badFilePath = hasFileFlag && rule.value && !rule.value.startsWith('/');
             if (rule.matchType === 'ssl_fc') {
               return <Text type="secondary" style={{ fontSize: 12 }}>(no value needed)</Text>;
             }
@@ -388,17 +544,20 @@ function ACLDefinitionCard({ rule, index, onChange, onDelete }) {
               );
             }
             return (
-              <Tooltip title={badFilePath ? 'Flag -f requires an absolute file path (e.g. /etc/haproxy/patterns.txt)' : ''} open={badFilePath ? undefined : false}>
-                <Input
-                  value={rule.value}
-                  onChange={(e) => onChange(index, { ...rule, value: e.target.value })}
-                  placeholder={hasFileFlag ? '/path/to/patterns.txt' : (matchDef?.placeholder || 'Value')}
-                  size="small"
-                  status={badFilePath ? 'error' : undefined}
-                />
-              </Tooltip>
+              <Input
+                value={rule.value}
+                onChange={(e) => onChange(index, { ...rule, value: e.target.value })}
+                placeholder={matchDef?.placeholder || 'Value'}
+                size="small"
+                status={structuredHasFileFlag ? 'error' : undefined}
+              />
             );
           })()}
+          {structuredHasFileFlag && (
+            <Text type="danger" style={{ fontSize: 11, display: 'block', marginTop: 2 }}>
+              {FILE_FLAG_TOOLTIP}
+            </Text>
+          )}
         </Col>
         <Col flex="none">
           <Tooltip title="Delete rule">
@@ -478,22 +637,69 @@ function BackendRoutingCard({ rule, index, onChange, onDelete, backends, aclName
         </Col>
         <Col flex="auto">
           {aclNames.length > 0 ? (
-            <Select
-              mode="tags"
-              value={rule.condition ? rule.condition.split(/\s+/).filter(t => t && t !== 'if' && t !== 'unless') : []}
-              onChange={(vals) => onChange(index, { ...rule, condition: vals.join(' ') })}
-              placeholder="Select ACL conditions or type custom"
-              size="small"
-              style={{ width: '100%' }}
-              tokenSeparators={[' ']}
-            >
-              {aclNames.map(name => (
-                <Option key={name} value={name}>{name}</Option>
-              ))}
-              {aclNames.map(name => (
-                <Option key={`!${name}`} value={`!${name}`}>!{name} (negated)</Option>
-              ))}
-            </Select>
+            (() => {
+              const tokens = rule.condition
+                ? rule.condition.split(/\s+/).filter(t => t && t !== 'if' && t !== 'unless')
+                : [];
+              const conflicts = detectContradictoryAclTokens(tokens);
+              const hasConflict = conflicts.size > 0;
+              return (
+                <div>
+                  <Tooltip title={hasConflict ? CONTRADICTORY_TOOLTIP : ''} open={hasConflict ? undefined : false}>
+                    <Select
+                      mode="tags"
+                      value={tokens}
+                      onChange={(vals) => {
+                        // Phase K Phase D follow-up (Bulgu #13) —
+                        // when the operator picks both `X` and `!X`,
+                        // KEEP only the most-recently added token so
+                        // the rule stays consistent. The user gets a
+                        // tooltip + inline warning so they understand
+                        // what was removed.
+                        const conflicts2 = detectContradictoryAclTokens(vals);
+                        let cleaned = vals;
+                        if (conflicts2.size > 0) {
+                          // For each conflicting name, drop the
+                          // older of the two (positive or negated)
+                          // — Ant Design's `tags` mode appends new
+                          // selections at the end, so the LAST
+                          // occurrence is the freshest operator
+                          // intent.
+                          conflicts2.forEach((name) => {
+                            const posIdx = vals.lastIndexOf(name);
+                            const negIdx = vals.lastIndexOf(`!${name}`);
+                            const keepNeg = negIdx > posIdx;
+                            cleaned = cleaned.filter((t) => {
+                              if (keepNeg && t === name) return false;
+                              if (!keepNeg && t === `!${name}`) return false;
+                              return true;
+                            });
+                          });
+                        }
+                        onChange(index, { ...rule, condition: cleaned.join(' ') });
+                      }}
+                      placeholder="Select ACL conditions or type custom"
+                      size="small"
+                      style={{ width: '100%' }}
+                      tokenSeparators={[' ']}
+                      status={hasConflict ? 'error' : undefined}
+                    >
+                      {aclNames.map(name => (
+                        <Option key={name} value={name}>{name}</Option>
+                      ))}
+                      {aclNames.map(name => (
+                        <Option key={`!${name}`} value={`!${name}`}>!{name} (negated)</Option>
+                      ))}
+                    </Select>
+                  </Tooltip>
+                  {hasConflict && (
+                    <Text type="danger" style={{ fontSize: 11, display: 'block', marginTop: 2 }}>
+                      Contradictory condition (`X AND NOT X` always false). Conflicting ACL: <code>{[...conflicts].join(', ')}</code>
+                    </Text>
+                  )}
+                </div>
+              );
+            })()
           ) : (
             <Input
               value={rule.condition}
@@ -633,9 +839,17 @@ function RedirectRuleCard({ rule, index, onChange, onDelete }) {
  *   useBackendRules: string[] (array of use_backend rule strings)
  *   redirectRules: string[] (array of redirect rule strings)
  *   backends: { name: string }[] (available backends)
- *   onChange({ aclRules, useBackendRules, redirectRules }) 
+ *   onChange({ aclRules, useBackendRules, redirectRules })
+ *   disableRedirectRules?: boolean (Phase K Phase B — when the parent
+ *     form has `https_redirect=true`, the Redirect Rules section
+ *     becomes read-only with an explanatory tooltip. The data stays
+ *     in component state in case the parent toggles the switch off,
+ *     but no edits / additions / deletions can happen while the flag
+ *     is set. Mirrors the Pydantic
+ *     `FrontendStep.reject_redirect_conflict` validator UX-side so
+ *     operators cannot author the conflicting state at all.)
  */
-export default function ACLRuleBuilder({ aclRules = [], useBackendRules = [], redirectRules = [], backends = [], onChange }) {
+export default function ACLRuleBuilder({ aclRules = [], useBackendRules = [], redirectRules = [], backends = [], onChange, disableRedirectRules = false }) {
   // ─── State ──────────────────────────────────────
   const [aclDefs, setAclDefs] = useState([]);
   const [routingRules, setRoutingRules] = useState([]);
@@ -676,6 +890,57 @@ export default function ACLRuleBuilder({ aclRules = [], useBackendRules = [], re
       .filter(d => d.name && d.raw === undefined)
       .map(d => d.name);
   }, [aclDefs]);
+
+  // Phase K Phase D follow-up (Bulgu #12 round 3) — count rules that
+  // still carry the unsupported `-f <file>` flag. Surfaced as a
+  // section-level Alert so operators know the section as a whole
+  // has invalid rules even if individual cards / raw text would
+  // otherwise need scrolling to find them.
+  const fileFlagRuleCount = useMemo(() => {
+    let count = 0;
+    for (const d of aclDefs) {
+      if (d.raw !== undefined) {
+        if (typeof d.raw === 'string' && ACL_FILE_FLAG_PATTERN.test(d.raw)) count += 1;
+      } else if (Array.isArray(d.flags) && d.flags.includes('-f')) {
+        count += 1;
+      }
+    }
+    // ALSO scan the raw textarea content because in raw mode the
+    // parsed `aclDefs` may not reflect what the operator is mid-
+    // typing — we want the warning to track keystrokes.
+    if (rawModeAcl && typeof rawTextAcl === 'string') {
+      for (const line of rawTextAcl.split('\n')) {
+        if (ACL_FILE_FLAG_PATTERN.test(line)) count += 1;
+      }
+    }
+    return count;
+  }, [aclDefs, rawModeAcl, rawTextAcl]);
+
+  // Phase K Phase D follow-up (Bulgu #13) — count routing AND
+  // redirect rules whose `condition` contains the same ACL in
+  // both positive and negated form (e.g. `acl1 !acl1`). These
+  // are dead code: HAProxy accepts the syntax but the predicate
+  // is permanently false, so traffic silently falls through to
+  // `default_backend`. Surface as a section-level error to drive
+  // the operator to fix it BEFORE submit.
+  const contradictoryRuleCount = useMemo(() => {
+    let count = 0;
+    const tokenise = (str) =>
+      (typeof str === 'string' ? str : '')
+        .split(/\s+/)
+        .filter((t) => t && t !== 'if' && t !== 'unless');
+    for (const r of routingRules || []) {
+      if (r && typeof r.condition === 'string') {
+        if (detectContradictoryAclTokens(tokenise(r.condition)).size > 0) count += 1;
+      }
+    }
+    for (const r of redirectRules || []) {
+      if (r && typeof r.condition === 'string') {
+        if (detectContradictoryAclTokens(tokenise(r.condition)).size > 0) count += 1;
+      }
+    }
+    return count;
+  }, [routingRules, redirectRules]);
 
   // ─── Emit changes ─────────────────────────────
   const emitChange = useCallback((newAcls, newRouting, newRedirects) => {
@@ -888,6 +1153,38 @@ export default function ACLRuleBuilder({ aclRules = [], useBackendRules = [], re
           Define named conditions to match incoming requests by path, header, source IP, and more.
         </Text>
 
+        {/* Phase K Phase D follow-up (Bulgu #12 round 3) — section-
+            level warning when one or more rules still carry the
+            unsupported `-f <file>` pattern-file flag. Render as a
+            blocking-style Alert so the operator notices BEFORE
+            Submit. The Pydantic validator rejects the same shape
+            server-side; this is the up-front authoring guardrail. */}
+        {fileFlagRuleCount > 0 && (
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginBottom: 8 }}
+            message={`${fileFlagRuleCount} ACL rule${fileFlagRuleCount === 1 ? '' : 's'} use the unsupported \`-f <file>\` flag`}
+            description="HAProxy OpenManager does not provision pattern files onto the HAProxy node filesystem, so any `-f /path/...` reference would fail HAProxy reload at apply time with 'failed to open pattern file'. Remove the `-f` flag and switch to inline values (e.g. `src 10.0.0.0/24` instead of `src -f /etc/haproxy/admins.lst`)."
+          />
+        )}
+
+        {/* Phase K Phase D follow-up (Bulgu #13) — section-level
+            warning for routing/redirect rules whose condition is
+            self-contradictory (`X AND NOT X`). HAProxy accepts the
+            syntax but the rule never fires. Surfaced here so the
+            operator can correlate the inline per-card error with
+            an overview count. */}
+        {contradictoryRuleCount > 0 && (
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginBottom: 8 }}
+            message={`${contradictoryRuleCount} routing/redirect rule${contradictoryRuleCount === 1 ? '' : 's'} have a self-contradictory condition`}
+            description="One or more rules contain the same ACL in both positive AND negated form (e.g. `if acl1 !acl1`). HAProxy accepts the syntax but the predicate `X AND NOT X` is always false, so the rule is dead code — traffic silently falls through to `default_backend`. Remove one of the two tokens from each affected rule."
+          />
+        )}
+
         {rawModeAcl ? (
           <TextArea
             value={rawTextAcl}
@@ -989,7 +1286,14 @@ export default function ACLRuleBuilder({ aclRules = [], useBackendRules = [], re
       <Divider style={{ margin: '12px 0' }} />
 
       {/* ─── Redirect Rules ─────────────────── */}
-      <div>
+      <div
+        aria-disabled={disableRedirectRules || undefined}
+        style={
+          disableRedirectRules
+            ? { opacity: 0.55, pointerEvents: 'none' }
+            : undefined
+        }
+      >
         <SectionHeader
           title="HTTP Redirect Rules"
           icon={<LinkOutlined style={{ color: '#fa8c16' }} />}
@@ -1002,6 +1306,17 @@ export default function ACLRuleBuilder({ aclRules = [], useBackendRules = [], re
           Define HTTP redirect rules (HTTP to HTTPS, domain redirects, etc.). Applied before backend routing.
         </Text>
 
+        {disableRedirectRules && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 8, pointerEvents: 'auto' }}
+            role="status"
+            message="Redirect Rules are disabled because HTTP→HTTPS redirect is on"
+            description="The switch on the Frontend step already publishes a 301 redirect on port 80; manual redirect rules are mutually exclusive with it. Your existing rules are preserved — toggle the switch off to edit them again."
+          />
+        )}
+
         {rawModeRedirect ? (
           <TextArea
             value={rawTextRedirect}
@@ -1009,6 +1324,8 @@ export default function ACLRuleBuilder({ aclRules = [], useBackendRules = [], re
             rows={4}
             placeholder={`One rule per line. Format: type target [code NNN] [if condition]\n\nExamples:\nredirect scheme https if !{ ssl_fc }\nredirect prefix https://www.example.com code 301 if { hdr(host) -i example.com }\nredirect location https://newsite.com code 302`}
             style={{ fontFamily: 'monospace', fontSize: 13 }}
+            disabled={disableRedirectRules}
+            aria-disabled={disableRedirectRules || undefined}
           />
         ) : (
           <>
@@ -1029,15 +1346,25 @@ export default function ACLRuleBuilder({ aclRules = [], useBackendRules = [], re
                 />
               ))
             )}
-            <Button
-              type="dashed"
-              onClick={handleRedirectAdd}
-              block
-              icon={<PlusOutlined />}
-              style={{ marginTop: 4 }}
+            <Tooltip
+              title={
+                disableRedirectRules
+                  ? 'Disabled because HTTP→HTTPS redirect is on. Toggle the switch off above to add manual redirect rules.'
+                  : ''
+              }
             >
-              Add Redirect Rule
-            </Button>
+              <Button
+                type="dashed"
+                onClick={handleRedirectAdd}
+                block
+                icon={<PlusOutlined />}
+                style={{ marginTop: 4, pointerEvents: 'auto' }}
+                disabled={disableRedirectRules}
+                aria-disabled={disableRedirectRules || undefined}
+              >
+                Add Redirect Rule
+              </Button>
+            </Tooltip>
           </>
         )}
       </div>

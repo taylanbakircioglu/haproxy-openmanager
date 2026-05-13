@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Card, Table, Button, Tag, Space, Modal, Form, Input, Select, Steps,
-  message, Row, Col, Statistic, Alert, Tooltip, Switch, theme, Segmented
+  message, Row, Col, Statistic, Alert, Tooltip, Switch, theme, Segmented,
+  Tabs, Timeline, Spin, Empty
 } from 'antd';
 import {
   SafetyCertificateOutlined, PlusOutlined, ReloadOutlined,
@@ -9,7 +10,7 @@ import {
   SyncOutlined, CloseCircleOutlined,
   DeleteOutlined, EyeOutlined,
   CloudDownloadOutlined, UserOutlined, InfoCircleOutlined,
-  RocketOutlined
+  RocketOutlined, ExperimentOutlined
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { useCluster } from '../contexts/ClusterContext';
@@ -81,6 +82,17 @@ const ACMEAutomation = () => {
   const [accountDetailVisible, setAccountDetailVisible] = useState(false);
   const [orderFilter, setOrderFilter] = useState('active');
   const { token } = theme.useToken();
+
+  // v1.5.0 Issue #13: ACME Diagnostic Panel state
+  const [diagVisible, setDiagVisible] = useState(false);
+  const [diagOrderId, setDiagOrderId] = useState(null);
+  const [diagOrder, setDiagOrder] = useState(null);
+  const [diagChecks, setDiagChecks] = useState([]);
+  const [diagHumanizedError, setDiagHumanizedError] = useState(null);
+  const [diagEvents, setDiagEvents] = useState([]);
+  const [diagLoading, setDiagLoading] = useState(false);
+  const [diagRunningCheckId, setDiagRunningCheckId] = useState(null);
+  const diagPollRef = useRef(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -218,6 +230,108 @@ const ACMEAutomation = () => {
     }
   };
 
+  // v1.5.0 Issue #13: open diagnostics modal for an order
+  const handleDiagnose = async (orderId) => {
+    setDiagOrderId(orderId);
+    setDiagVisible(true);
+    setDiagLoading(true);
+    setDiagChecks([]);
+    setDiagHumanizedError(null);
+    setDiagEvents([]);
+    try {
+      const [orderRes, diagRes] = await Promise.allSettled([
+        axios.get(`/api/letsencrypt/orders/${orderId}`),
+        axios.post(`/api/letsencrypt/orders/${orderId}/diagnostics`),
+      ]);
+      if (orderRes.status === 'fulfilled') setDiagOrder(orderRes.value.data);
+      if (diagRes.status === 'fulfilled') {
+        setDiagChecks(diagRes.value.data?.checks || []);
+        setDiagHumanizedError(diagRes.value.data?.humanized_error || null);
+      } else if (diagRes.status === 'rejected') {
+        const detail = diagRes.reason?.response?.data?.detail || 'Diagnostics failed';
+        message.error(detail);
+      }
+      // Best-effort merged event log fetch (404 if migration not yet run)
+      try {
+        const evRes = await axios.get(`/api/letsencrypt/orders/${orderId}/events`);
+        setDiagEvents(evRes.data?.events || []);
+      } catch (_evErr) {
+        // ignore
+      }
+    } finally {
+      setDiagLoading(false);
+    }
+  };
+
+  const handleRerunCheck = async (checkId) => {
+    if (!diagOrderId) return;
+    setDiagRunningCheckId(checkId);
+    try {
+      const res = await axios.post(
+        `/api/letsencrypt/orders/${diagOrderId}/diagnostics/${checkId}/rerun`
+      );
+      const updated = res.data?.check;
+      if (updated) {
+        setDiagChecks((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+      }
+    } catch (err) {
+      message.error(err?.response?.data?.detail || 'Re-run failed');
+    } finally {
+      setDiagRunningCheckId(null);
+    }
+  };
+
+  // Auto-tail event log every 5s while modal open + order is in flight
+  useEffect(() => {
+    if (!diagVisible || !diagOrderId) {
+      if (diagPollRef.current) {
+        clearInterval(diagPollRef.current);
+        diagPollRef.current = null;
+      }
+      return undefined;
+    }
+    const inFlight =
+      diagOrder &&
+      (['pending', 'processing', 'ready', 'wizard_staged'].includes(diagOrder.status) ||
+        (diagOrder.status === 'valid' && !diagOrder.ssl_certificate_id));
+    if (!inFlight) return undefined;
+    diagPollRef.current = setInterval(async () => {
+      try {
+        const evRes = await axios.get(`/api/letsencrypt/orders/${diagOrderId}/events`);
+        setDiagEvents(evRes.data?.events || []);
+      } catch (_e) {
+        /* ignore */
+      }
+    }, 5000);
+    return () => {
+      if (diagPollRef.current) {
+        clearInterval(diagPollRef.current);
+        diagPollRef.current = null;
+      }
+    };
+  }, [diagVisible, diagOrderId, diagOrder]);
+
+  const closeDiagModal = () => {
+    setDiagVisible(false);
+    setDiagOrderId(null);
+    setDiagOrder(null);
+    setDiagChecks([]);
+    setDiagHumanizedError(null);
+    setDiagEvents([]);
+    if (diagPollRef.current) {
+      clearInterval(diagPollRef.current);
+      diagPollRef.current = null;
+    }
+  };
+
+  const checkStatusToTag = (status) => {
+    if (status === 'ok') return <Tag color="success" icon={<CheckCircleOutlined />}>OK</Tag>;
+    if (status === 'warn') return <Tag color="warning" icon={<ExclamationCircleOutlined />}>WARN</Tag>;
+    if (status === 'fail') return <Tag color="error" icon={<CloseCircleOutlined />}>FAIL</Tag>;
+    if (status === 'skipped') return <Tag>SKIPPED</Tag>;
+    return <Tag>{(status || '').toUpperCase()}</Tag>;
+  };
+
   const handleImportCAChain = async () => {
     Modal.confirm({
       title: 'Import Let\'s Encrypt CA Chain',
@@ -305,10 +419,17 @@ const ACMEAutomation = () => {
   };
 
   const statusTag = (status, record) => {
+    // v1.5.0: clicking the status tag opens diagnostics for table rows.
+    const clickable = record && record.id;
+    const onClick = clickable ? () => handleDiagnose(record.id) : undefined;
+    const cursor = clickable ? { cursor: 'pointer' } : undefined;
+
     // Issue #12 / Commit 4a: highlight "valid but not downloaded" stuck orders prominently.
     if (record && record.status === 'valid' && !record.ssl_certificate_id) {
       return (
-        <Tag color="warning" icon={<ExclamationCircleOutlined />}>PENDING DOWNLOAD</Tag>
+        <Tag color="warning" icon={<ExclamationCircleOutlined />} style={cursor} onClick={onClick}>
+          PENDING DOWNLOAD
+        </Tag>
       );
     }
     const map = {
@@ -318,9 +439,14 @@ const ACMEAutomation = () => {
       valid: { color: 'success', icon: <CheckCircleOutlined /> },
       invalid: { color: 'error', icon: <CloseCircleOutlined /> },
       cancelled: { color: 'default', icon: <CloseCircleOutlined /> },
+      wizard_staged: { color: 'cyan', icon: <ClockCircleOutlined /> },
     };
     const cfg = map[status] || { color: 'default', icon: null };
-    return <Tag color={cfg.color} icon={cfg.icon}>{(status || 'unknown').toUpperCase()}</Tag>;
+    return (
+      <Tag color={cfg.color} icon={cfg.icon} style={cursor} onClick={onClick}>
+        {(status || 'unknown').toUpperCase()}
+      </Tag>
+    );
   };
 
   const orderColumns = [
@@ -355,6 +481,13 @@ const ACMEAutomation = () => {
           <Space>
             <Tooltip title="View Details">
               <Button icon={<EyeOutlined />} size="small" onClick={() => handleViewOrder(record.id)} />
+            </Tooltip>
+            <Tooltip title="Diagnose (pre-flight checks + event log)">
+              <Button
+                icon={<ExperimentOutlined />}
+                size="small"
+                onClick={() => handleDiagnose(record.id)}
+              />
             </Tooltip>
             {showRetry && (
               <Tooltip title="Retry / Finalize">
@@ -945,6 +1078,142 @@ const ACMEAutomation = () => {
             </a>).
           </div>
         </Form>
+      </Modal>
+
+      {/* v1.5.0 Issue #13: ACME Diagnostic Panel modal */}
+      <Modal
+        title={diagOrderId ? `Diagnostics — Order #${diagOrderId}` : 'Diagnostics'}
+        open={diagVisible}
+        onCancel={closeDiagModal}
+        width={920}
+        footer={[
+          <Button key="close" onClick={closeDiagModal}>Close</Button>,
+        ]}
+      >
+        {diagLoading ? (
+          <div style={{ textAlign: 'center', padding: 40 }}><Spin /></div>
+        ) : (
+          <Tabs
+            items={[
+              {
+                key: 'checks',
+                label: 'Pre-flight Checks',
+                children: (
+                  <div>
+                    {diagChecks.length === 0 ? (
+                      <Empty description="No diagnostic checks available" />
+                    ) : (
+                      <Table
+                        size="small"
+                        rowKey="id"
+                        pagination={false}
+                        dataSource={diagChecks}
+                        columns={[
+                          { title: 'Check', dataIndex: 'label', key: 'label' },
+                          {
+                            title: 'Status', dataIndex: 'status', key: 'status', width: 110,
+                            render: (s) => checkStatusToTag(s),
+                          },
+                          { title: 'Message', dataIndex: 'message', key: 'message' },
+                          {
+                            title: 'Duration', dataIndex: 'duration_ms', key: 'duration_ms', width: 100,
+                            render: (d) => (d != null ? `${d} ms` : '-'),
+                          },
+                          {
+                            title: 'Re-run', key: 'rerun', width: 90,
+                            render: (_, record) => (
+                              <Button
+                                size="small"
+                                icon={<ReloadOutlined />}
+                                loading={diagRunningCheckId === record.id}
+                                onClick={() => handleRerunCheck(record.id)}
+                              />
+                            ),
+                          },
+                        ]}
+                        expandable={{
+                          rowExpandable: (r) => r.details && Object.keys(r.details).length > 0,
+                          expandedRowRender: (r) => (
+                            <pre style={{ fontSize: 11, margin: 0, whiteSpace: 'pre-wrap' }}>
+                              {JSON.stringify(r.details, null, 2)}
+                            </pre>
+                          ),
+                        }}
+                      />
+                    )}
+                  </div>
+                ),
+              },
+              {
+                key: 'events',
+                label: `Event Log (${diagEvents.length})`,
+                children: (
+                  diagEvents.length === 0 ? (
+                    <Empty description="No events recorded for this order" />
+                  ) : (
+                    <Timeline
+                      items={diagEvents.map((ev) => ({
+                        color:
+                          (ev.severity || '').toUpperCase() === 'ERROR' ? 'red' :
+                          (ev.severity || '').toUpperCase() === 'WARN' ? 'orange' : 'blue',
+                        children: (
+                          <div>
+                            <div style={{ fontSize: 12, color: '#888' }}>{ev.created_at} · {ev.source}</div>
+                            <div><strong>{ev.event_type}</strong></div>
+                            {ev.message && <div>{ev.message}</div>}
+                          </div>
+                        ),
+                      }))}
+                    />
+                  )
+                ),
+              },
+              {
+                key: 'raw',
+                label: 'Raw Error',
+                children: (
+                  <div>
+                    {diagHumanizedError ? (
+                      <Alert
+                        type={
+                          diagOrder?.status === 'invalid' ? 'error' :
+                          diagOrder?.status === 'valid' ? 'success' : 'info'
+                        }
+                        showIcon
+                        message={diagHumanizedError.title}
+                        description={
+                          <div>
+                            {diagHumanizedError.message && <p>{diagHumanizedError.message}</p>}
+                            {diagHumanizedError.hint && (
+                              <p style={{ color: '#666' }}><em>{diagHumanizedError.hint}</em></p>
+                            )}
+                            {diagHumanizedError.subproblems?.length > 0 && (
+                              <ul>
+                                {diagHumanizedError.subproblems.map((sp, i) => (
+                                  <li key={i}>
+                                    <code>{sp.identifier}</code>: {sp.detail || sp.type}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        }
+                      />
+                    ) : (
+                      <Empty description="No error detail" />
+                    )}
+                    {diagOrder?.error_detail && (
+                      <details style={{ marginTop: 12 }}>
+                        <summary>Raw error_detail</summary>
+                        {renderErrorDetail(diagOrder.error_detail)}
+                      </details>
+                    )}
+                  </div>
+                ),
+              },
+            ]}
+          />
+        )}
       </Modal>
     </div>
   );

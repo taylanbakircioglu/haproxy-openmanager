@@ -550,13 +550,21 @@ async def update_waf_rule(rule_id: int, waf_rule_data: dict, request: Request, a
                 status_code=403,
                 detail="Insufficient permissions: waf.update required"
             )
-        
+
         conn = await get_database_connection()
 
         existing_rule = await conn.fetchrow("SELECT * FROM waf_rules WHERE id = $1", rule_id)
         if not existing_rule:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="WAF rule not found")
+
+        # Bulgu #79 — WAF rules carry an optional cluster_id;
+        # validate that the operator can touch this cluster
+        # before mutating the row. WAF rules with cluster_id IS
+        # NULL are "global" and gated only by `waf.update`.
+        rule_cluster_id = existing_rule.get('cluster_id') if hasattr(existing_rule, 'get') else existing_rule['cluster_id']
+        if rule_cluster_id:
+            await validate_user_cluster_access(current_user['id'], rule_cluster_id, conn)
 
         # Prepare the config dictionary for the update
         import json
@@ -754,12 +762,18 @@ async def toggle_waf_rule_status(
                 )
         
         conn = await get_database_connection()
-        
+
         rule = await conn.fetchrow("SELECT * FROM waf_rules WHERE id = $1", rule_id)
         if not rule:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="WAF rule not found")
-        
+
+        # Bulgu #79 — validate cluster access for cluster-scoped
+        # WAF rules (global rules pass unconditionally).
+        rule_cluster_id = rule['cluster_id'] if 'cluster_id' in rule.keys() else None
+        if rule_cluster_id:
+            await validate_user_cluster_access(current_user['id'], rule_cluster_id, conn)
+
         # Determine new status based on action
         if action == "delete":
             new_status = False

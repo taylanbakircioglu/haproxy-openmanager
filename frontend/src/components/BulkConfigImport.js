@@ -180,7 +180,7 @@ const FieldChange = ({ label, oldValue, newValue, span = 2, isMultiline = false 
 
 const BulkConfigImport = () => {
   const { token } = theme.useToken();
-  const { selectedCluster } = useContext(ClusterContext);
+  const { selectedCluster, loading: clustersLoading } = useContext(ClusterContext);
   const [configContent, setConfigContent] = useState('');
   const [loading, setLoading] = useState(false);
   const [parseResult, setParseResult] = useState(null);
@@ -709,13 +709,28 @@ backend web-backend
               />
             )}
 
+            {/* Phase J audit fix #6 — neutral "Loading clusters…"
+                affordance during the in-flight cluster fetch (mount,
+                exponential-backoff retry); only flip to the warning
+                once the fetch settles and we know the operator
+                actually has to pick. */}
             {!selectedCluster && (
-              <Alert
-                message="Please select a cluster from the cluster selector above"
-                type="warning"
-                showIcon
-                style={{ marginBottom: 16 }}
-              />
+              clustersLoading ? (
+                <Alert
+                  message="Loading clusters…"
+                  description="Fetching the cluster list. The cluster selector at the top of the page will populate automatically."
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                />
+              ) : (
+                <Alert
+                  message="Please select a cluster from the cluster selector above"
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                />
+              )
             )}
           </div>
 

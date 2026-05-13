@@ -11,6 +11,7 @@ import {
 } from '@ant-design/icons';
 import axios from 'axios';
 import { useCluster } from '../contexts/ClusterContext';
+import { extractApiError } from '../utils/apiError';
 
 const { Title, Text, Paragraph } = Typography;
 const { Option } = Select;
@@ -64,7 +65,7 @@ const Security = () => {
       message.success('Agent API token created successfully!');
     } catch (error) {
       console.error('Failed to create agent token:', error);
-      message.error(error.response?.data?.detail || 'Failed to create agent token');
+      message.error(extractApiError(error, 'Failed to create agent token'));
     }
   };
 
@@ -80,7 +81,7 @@ const Security = () => {
       message.success(response.data.message || `API token '${tokenName}' revoked successfully`);
     } catch (error) {
       console.error('Failed to revoke agent token:', error);
-      message.error(error.response?.data?.detail || 'Failed to revoke agent token');
+      message.error(extractApiError(error, 'Failed to revoke agent token'));
     }
   };
 

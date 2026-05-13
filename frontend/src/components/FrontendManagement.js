@@ -16,6 +16,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useCluster } from '../contexts/ClusterContext';
 import { VersionHistory } from './VersionHistory';
 import ACLRuleBuilder from './ACLRuleBuilder';
+import { extractApiError } from '../utils/apiError';
 
 // Error Boundary Component
 class FrontendErrorBoundary extends React.Component {
@@ -60,7 +61,7 @@ const { TextArea } = Input;
 
 const FrontendManagement = () => {
   const { token } = theme.useToken();
-  const { selectedCluster } = useCluster();
+  const { selectedCluster, loading: clustersLoading } = useCluster();
   const navigate = useNavigate();
   const location = useLocation();
   const [frontends, setFrontends] = useState([]);
@@ -370,7 +371,7 @@ const FrontendManagement = () => {
       setSslCertificates(certs);
     } catch (error) {
       console.error('SSL FETCH: Failed to fetch SSL certificates:', error);
-      const detail = error.response?.data?.detail || error.message;
+      const detail = extractApiError(error, error.message);
       if (error.response?.status === 500) {
         message.error(`Failed to load SSL certificates: ${detail}`);
       }
@@ -567,7 +568,7 @@ const FrontendManagement = () => {
           okType: 'default'
         });
       } else {
-        message.error(`Failed to apply changes: ${error.response?.data?.message || error.response?.data?.detail || error.message}`);
+        message.error(`Failed to apply changes: ${extractApiError(error, error.message)}`);
       }
     } finally {
       setApplyLoading(false);
@@ -754,7 +755,7 @@ const FrontendManagement = () => {
           fetchFrontends();
           checkPendingChanges();
         } catch (error) {
-          const errorMsg = error.response?.data?.detail || error.message;
+          const errorMsg = extractApiError(error, error.message);
           message.error(
             <div>
               <div><strong>Failed to delete frontend</strong></div>
@@ -826,7 +827,7 @@ const FrontendManagement = () => {
             successCount++;
           } catch (error) {
             errorCount++;
-            const errorMsg = error.response?.data?.detail || error.message;
+            const errorMsg = extractApiError(error, error.message);
             errors.push(`${frontend.name}: ${errorMsg}`);
           }
         }
@@ -859,6 +860,168 @@ const FrontendManagement = () => {
     if (!selectedCluster) {
       message.warning('Please select a HAProxy cluster first');
       return;
+    }
+
+    // Phase K Phase D follow-up (Bulgu #12 round 3) — hard-gate any
+    // ACL / use_backend / redirect rule that carries the unsupported
+    // HAProxy `-f <file>` pattern-file flag. The Pydantic validator
+    // on the backend (`models/frontend.py::validate_acl_rules`)
+    // rejects the same shape; blocking here surfaces the error
+    // immediately at the manual frontend form and matches the wizard
+    // gate so operators see consistent behaviour between the two
+    // entry points.
+    const FILE_FLAG_RE = /(?:^|\s)-f(?:\s|$)/;
+    const aclRulesAll = [
+      ...(aclBuilderData.aclRules || []),
+      ...(aclBuilderData.useBackendRules || []),
+      ...(aclBuilderData.redirectRules || []).map(
+        (r) => (typeof r === 'string' ? r : ''),
+      ),
+    ];
+    if (aclRulesAll.some((r) => typeof r === 'string' && FILE_FLAG_RE.test(r))) {
+      message.error(
+        'One or more ACL / routing / redirect rules use the unsupported HAProxy ' +
+        '`-f <file>` pattern-file flag. HAProxy OpenManager does not provision ' +
+        'pattern files onto the HAProxy node filesystem, so the reference would ' +
+        'fail at reload time. Remove the `-f` flag and use inline values instead.'
+      );
+      return;
+    }
+
+    // Phase K Phase D follow-up (Bulgu #13) — gate for
+    // self-contradictory routing / redirect conditions (`X !X`).
+    // HAProxy accepts the syntax but the rule never fires →
+    // silent fallback to `default_backend`.
+    //
+    // Bulgu #62 (round-22 audit) — grandfather rules that are
+    // UNCHANGED from the existing DB row when editing. A
+    // contradictory rule the operator did not type (legacy data
+    // created by a pre-Bulgu-#13 wizard build or a direct API
+    // caller) must NOT block an unrelated edit (port, max conn,
+    // default_backend). New or modified contradictions still
+    // hard-block. The same logic runs server-side in
+    // `routers/frontend.py::_enforce_routing_rule_contradictions`.
+    const CONTRA_TOKEN_RE = /^!?[A-Za-z_][\w.-]*$/;
+    const extractContradictionText = (rule) => {
+      if (typeof rule === 'string') return rule;
+      if (rule && typeof rule === 'object') {
+        return typeof rule.condition === 'string'
+          ? rule.condition
+          : (typeof rule.if === 'string' ? rule.if : '');
+      }
+      return '';
+    };
+    const hasContradiction = (str) => {
+      if (typeof str !== 'string' || !str) return false;
+      const pos = new Set();
+      const neg = new Set();
+      for (const raw of str.split(/\s+/)) {
+        if (!raw || raw === 'if' || raw === 'unless') continue;
+        if (!CONTRA_TOKEN_RE.test(raw)) continue;
+        if (raw.startsWith('!')) {
+          neg.add(raw.slice(1));
+        } else {
+          pos.add(raw);
+        }
+      }
+      for (const n of pos) if (neg.has(n)) return true;
+      return false;
+    };
+    // Bulgu #62 follow-up (round-22 hot-fix) — the ACLRuleBuilder
+    // parses the DB rule string into a structured `{backend,
+    // operator, condition}` object and then serializes it BACK to
+    // a string for submission. The serialiser drops the
+    // `use_backend ` / `redirect ` prefix that the DB rule may
+    // carry, collapses repeated whitespace, and may round-trip
+    // case differences. A naive byte-for-byte signature
+    // comparison therefore says "this is a NEW rule" even when
+    // the operator hasn't touched the card, and the grandfathering
+    // path turns into a hard block.
+    //
+    // `normalizeRuleString` reproduces the same trim / collapse /
+    // strip-prefix steps so both sides of the comparison go
+    // through the same shape. The signature that lands in
+    // `grandfatheredSet` is the NORMALISED form, and the
+    // signature we look up later is also normalised — they match
+    // for rules the operator hasn't edited regardless of which
+    // shape the DB happens to store.
+    const normalizeRuleString = (s) => {
+      if (typeof s !== 'string') return '';
+      let t = s.trim().replace(/\s+/g, ' ');
+      const lower = t.toLowerCase();
+      if (lower.startsWith('use_backend ')) {
+        t = t.substring('use_backend '.length).trim();
+      } else if (lower.startsWith('redirect ')) {
+        t = t.substring('redirect '.length).trim();
+      }
+      return t;
+    };
+    const ruleSignature = (rule) => {
+      if (typeof rule === 'string') {
+        const t = normalizeRuleString(rule);
+        return t ? `str::${t}` : null;
+      }
+      if (rule && typeof rule === 'object') {
+        try {
+          const keys = Object.keys(rule).sort();
+          const o = {};
+          for (const k of keys) o[k] = rule[k];
+          return 'dict::' + JSON.stringify(o);
+        } catch (_e) {
+          return null;
+        }
+      }
+      return null;
+    };
+    const grandfatheredSet = new Set();
+    if (editingFrontend) {
+      const dbUseBackend = Array.isArray(editingFrontend.use_backend_rules)
+        ? editingFrontend.use_backend_rules : [];
+      const dbRedirect = Array.isArray(editingFrontend.redirect_rules)
+        ? editingFrontend.redirect_rules : [];
+      for (const r of [...dbUseBackend, ...dbRedirect]) {
+        const sig = ruleSignature(r);
+        if (sig) grandfatheredSet.add(sig);
+      }
+    }
+    const blockingContradictions = [];
+    const grandfatheredContradictions = [];
+    for (const r of (aclBuilderData.useBackendRules || [])) {
+      if (!hasContradiction(extractContradictionText(r))) continue;
+      const sig = ruleSignature(r);
+      if (sig && grandfatheredSet.has(sig)) {
+        grandfatheredContradictions.push(r);
+      } else {
+        blockingContradictions.push(r);
+      }
+    }
+    for (const r of (aclBuilderData.redirectRules || [])) {
+      if (!hasContradiction(extractContradictionText(r))) continue;
+      const sig = ruleSignature(r);
+      if (sig && grandfatheredSet.has(sig)) {
+        grandfatheredContradictions.push(r);
+      } else {
+        blockingContradictions.push(r);
+      }
+    }
+    if (blockingContradictions.length > 0) {
+      message.error(
+        'One or more routing / redirect rules contain the same ACL in both ' +
+        'positive AND negated form (e.g. `if acl1 !acl1`). HAProxy accepts this ' +
+        'syntax but `X AND NOT X` is always false, so the rule never fires and ' +
+        'traffic silently falls through to `default_backend`. Remove one of the ' +
+        'two tokens before saving.'
+      );
+      return;
+    }
+    if (grandfatheredContradictions.length > 0) {
+      message.warning(
+        `This frontend has ${grandfatheredContradictions.length} legacy ` +
+        `routing/redirect rule(s) with a self-contradictory \`X !X\` ` +
+        `condition. The rule(s) never fire — fix them at your convenience. ` +
+        `Your current edit will still be saved.`,
+        6,
+      );
     }
 
     setSubmitting(true);
@@ -948,7 +1111,7 @@ const FrontendManagement = () => {
       fetchSSLCertificates(); // Refresh SSL certificates after frontend update
       checkPendingChanges();
     } catch (error) {
-      const errorMsg = error.response?.data?.detail || error.message;
+      const errorMsg = extractApiError(error, error.message);
       message.error(
         <div>
           <div><strong>Failed to save frontend</strong></div>
@@ -1271,8 +1434,38 @@ const FrontendManagement = () => {
     },
   ];
 
-  // Show empty state when no cluster is selected
+  // Show empty state when no cluster is selected.
+  //
+  // Phase J audit fix #6 — neutral "Loading clusters…" while the
+  // ClusterContext fetch is still in flight (mount, exponential-
+  // backoff retry); only flip to the "Go to Cluster Management" CTA
+  // once the fetch settles and we know the operator actually has to
+  // pick.
   if (!selectedCluster) {
+    if (clustersLoading) {
+      return (
+        <div>
+          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+            <Col span={12}>
+              <h2 style={{ margin: 0 }}>
+                <GlobalOutlined style={{ marginRight: 8, color: '#1890ff' }} />
+                Frontend Management
+              </h2>
+            </Col>
+          </Row>
+
+          <Card style={{ textAlign: 'center', padding: '60px 20px' }}>
+            <Spin size="large" />
+            <Title level={3} style={{ color: '#595959', marginTop: '24px', marginBottom: '8px' }}>
+              Loading clusters…
+            </Title>
+            <Text style={{ color: '#8c8c8c', fontSize: '16px' }}>
+              Fetching the cluster list. Frontend inventory will load automatically once a cluster is selected.
+            </Text>
+          </Card>
+        </div>
+      );
+    }
     return (
       <div>
         <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
@@ -1465,7 +1658,12 @@ const FrontendManagement = () => {
           initialValues={{
             bind_address: '*',
             mode: 'http',
-            ssl_verify: 'optional',
+            // R18b audit fix: align UI default with the backend model.
+            // FrontendConfig.ssl_verify now defaults to None (= no
+            // verify directive emitted). Hard-coding "optional" here
+            // forced every newly-created frontend to start with mTLS
+            // optional regardless of operator intent.
+            ssl_verify: undefined,
             compression: false,
             log_separate: false,
             capture_request_headers: [],
@@ -1678,9 +1876,17 @@ const FrontendManagement = () => {
                   <Form.Item
                     name="ssl_verify"
                     label="Client Certificate Verification"
-                    extra="Level of client certificate verification"
+                    extra="Level of client certificate verification (leave blank to omit the verify directive entirely)"
                   >
-                            <Select defaultValue="optional">
+                            {/* R18b audit fix (A.2): drop `defaultValue`
+                                — a controlled `Form.Item` (`name=...`)
+                                must derive its initial value from the
+                                Form's `initialValues` / `setFieldsValue`,
+                                not the inner control. Pre-fix the
+                                hardcoded "optional" leaked back into
+                                the save payload whenever the row's
+                                stored value was NULL. */}
+                            <Select allowClear placeholder="(omit verify directive)">
                               <Option value="none">None - No client certificate required</Option>
                               <Option value="optional">Optional - Accept connections with or without client cert</Option>
                               <Option value="required">Required - Client certificate mandatory</Option>

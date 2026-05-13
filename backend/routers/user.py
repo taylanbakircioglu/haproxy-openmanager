@@ -17,7 +17,22 @@ async def get_users(authorization: str = Header(None)):
     try:
         # Verify authentication
         current_user = await get_current_user_from_token(authorization)
-        
+
+        # R18c audit fix (round 5 #1 — KRITIK info leak): the only
+        # caller in the UI today is the admin User Management page;
+        # the endpoint exposes username, email, phone, full_name,
+        # is_admin, roles[], cluster_ids and timestamps for every
+        # active operator on the platform. Pre-fix any
+        # authenticated user (cluster reader, ssl reader, etc.)
+        # could enumerate the full operator roster, including
+        # admin emails for phishing and is_admin flags for target
+        # selection. Restrict to admins.
+        if not current_user.get("is_admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="Listing all users requires administrator privileges."
+            )
+
         conn = await get_database_connection()
         
         # Get users with their roles (only active users)
@@ -88,7 +103,20 @@ async def get_roles(authorization: str = Header(None)):
     try:
         # Verify authentication
         current_user = await get_current_user_from_token(authorization)
-        
+
+        # R18c audit fix (round 5 #2 — KRITIK info leak): the role
+        # listing exposes the FULL `permissions` blob and
+        # `cluster_ids` for every role. Pre-fix any authenticated
+        # user could read the platform's RBAC layout — invaluable
+        # reconnaissance for an attacker planning a privilege
+        # escalation. Mutations on this endpoint are admin-only;
+        # the read path now matches.
+        if not current_user.get("is_admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="Listing roles requires administrator privileges."
+            )
+
         conn = await get_database_connection()
         
         # Check if roles table exists and get roles
@@ -475,9 +503,28 @@ async def change_user_password(
 async def delete_server_global(server_id: int, request: Request, authorization: str = Header(None)):
     """Delete a server by ID - global endpoint for UI compatibility"""
     try:
-        from auth_middleware import get_current_user_from_token
+        from auth_middleware import get_current_user_from_token, check_user_permission
         current_user = await get_current_user_from_token(authorization)
-        
+
+        # Risk-audit follow-up to Bulgu-#77: the legacy
+        # `delete_server` on `routers/backend.py` was upgraded to
+        # gate on `backends.update`, but BackendServers.js calls
+        # the compatibility alias `DELETE /api/servers/{id}` that
+        # routes here — so the FE delete path was still missing
+        # the per-action RBAC check. A read-only operator with
+        # `backends.read` and pool access could delete servers.
+        # Mirror the gate so both endpoints enforce the same
+        # contract.
+        has_permission = await check_user_permission(
+            current_user["id"], "backends", "update",
+            current_user=current_user,
+        )
+        if not has_permission:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have permission to delete servers",
+            )
+
         # Get request body for cluster_id validation
         request_body = await request.json() if hasattr(request, 'json') else {}
         expected_cluster_id = request_body.get('cluster_id')
@@ -895,7 +942,34 @@ async def get_user_activity(
     """Get user activity logs"""
     try:
         current_user = await get_current_user_from_token(authorization)
-        
+
+        # R18c audit fix (round 4 #21 — KRITIK info leak): pre-fix
+        # any authenticated user could:
+        #   1. Omit `user_id` and fetch the FULL activity log of
+        #      every operator on the platform — including admin
+        #      apply_changes, ACME orders, and (after R18b round 6)
+        #      wizard `apply_error` / `acme_staging_error` blobs.
+        #   2. Pass an arbitrary `user_id` and read another
+        #      operator's activity stream.
+        # The wizard's richer audit row makes this leak more
+        # consequential than before because the JSONB now carries
+        # operationally sensitive failure details. Restrict the
+        # endpoint to admins (full access) or to a user querying
+        # their own rows. Non-admin requests for someone else's
+        # activity → 403.
+        is_admin = bool(current_user.get("is_admin"))
+        own_id = current_user.get("id")
+        if not is_admin:
+            if user_id is None:
+                # Default to the caller's own rows for non-admins;
+                # the previous unfiltered listing is admin-only.
+                user_id = own_id
+            elif user_id != own_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only administrators can view another user's activity log."
+                )
+
         conn = await get_database_connection()
         
         # Build query with optional user filter

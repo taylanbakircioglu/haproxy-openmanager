@@ -15,7 +15,7 @@ The deployment script automatically grants this permission, but if needed manual
 
 ```bash
 # Grant anyuid SCC to HAProxy service account
-oc adm policy add-scc-to-user anyuid system:serviceaccount:haproxy-openmanager:haproxy-openmanager-haproxy
+oc adm policy add-scc-to-user anyuid system:serviceaccount:internal-haproxy-openmanager:haproxy-openmanager-haproxy
 
 # Verify SCC assignment
 oc describe scc anyuid | grep Users
@@ -132,27 +132,27 @@ kubectl delete -f 00-namespace.yaml
 
 ### Check Pod Status
 ```bash
-kubectl get pods -n haproxy-openmanager -w
+kubectl get pods -n internal-haproxy-openmanager -w
 ```
 
 ### Check All Resources
 ```bash
-kubectl get all -n haproxy-openmanager
+kubectl get all -n internal-haproxy-openmanager
 ```
 
 ### View Logs
 ```bash
 # Backend logs
-kubectl logs -f deployment/backend -n haproxy-openmanager
+kubectl logs -f deployment/backend -n internal-haproxy-openmanager
 
 # Frontend logs
-kubectl logs -f deployment/frontend -n haproxy-openmanager
+kubectl logs -f deployment/frontend -n internal-haproxy-openmanager
 
 # PostgreSQL logs
-kubectl logs -f deployment/postgres -n haproxy-openmanager
+kubectl logs -f deployment/postgres -n internal-haproxy-openmanager
 
 # HAProxy logs
-kubectl logs -f deployment/haproxy-instance -n haproxy-openmanager
+kubectl logs -f deployment/haproxy-instance -n internal-haproxy-openmanager
 ```
 
 ## 🌐 Accessing the Application
@@ -161,21 +161,21 @@ kubectl logs -f deployment/haproxy-instance -n haproxy-openmanager
 After deployment, the script will show the route URLs:
 ```bash
 # Frontend URL (main application)
-https://haproxy-openmanager.example.com
+https://haproxy-openmanager.apps.your-cluster.example.com
 
 # Backend API URL
-https://haproxy-openmanager.example.com/api
+https://haproxy-openmanager.apps.your-cluster.example.com/api
 ```
 
 ### Kubernetes (with Port Forward)
 If no Ingress is configured:
 ```bash
 # Frontend access
-kubectl port-forward -n haproxy-openmanager service/nginx 8080:80
+kubectl port-forward -n internal-haproxy-openmanager service/nginx 8080:80
 # Then access: http://localhost:8080
 
 # Backend API access
-kubectl port-forward -n haproxy-openmanager service/backend 8000:8000
+kubectl port-forward -n internal-haproxy-openmanager service/backend 8000:8000
 # Then access: http://localhost:8000
 ```
 
@@ -201,25 +201,25 @@ kubectl port-forward -n haproxy-openmanager service/backend 8000:8000
 
 1. **Pods in Pending State**
    ```bash
-   kubectl describe pod <pod-name> -n haproxy-openmanager
+   kubectl describe pod <pod-name> -n internal-haproxy-openmanager
    ```
    Check for resource constraints or PVC issues.
 
 2. **Backend Health Check Failures**
    ```bash
-   kubectl logs deployment/backend -n haproxy-openmanager
+   kubectl logs deployment/backend -n internal-haproxy-openmanager
    ```
    Usually database or Redis connection issues.
 
 3. **Database Connection Issues**
    ```bash
-   kubectl exec -it deployment/postgres -n haproxy-openmanager -- psql -U haproxy_user -d haproxy_openmanager
+   kubectl exec -it deployment/postgres -n internal-haproxy-openmanager -- psql -U haproxy_user -d haproxy_openmanager
    ```
 
 4. **Frontend Not Loading**
    ```bash
-   kubectl logs deployment/nginx -n haproxy-openmanager
-   kubectl logs deployment/frontend -n haproxy-openmanager
+   kubectl logs deployment/nginx -n internal-haproxy-openmanager
+   kubectl logs deployment/frontend -n internal-haproxy-openmanager
    ```
 
 ### Resource Requirements

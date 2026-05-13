@@ -1,11 +1,11 @@
 """
 Entity Snapshot Module for HAProxy OpenManager
 
-Bu modül, entity değişikliklerinin snapshot'ını alır ve reject edildiğinde
-geri yüklenmesini sağlar.
+This module captures snapshots of entity changes so they can be
+restored on reject of a config_version.
 
 Usage:
-    # UPDATE için snapshot al
+    # Capture an UPDATE snapshot.
     old_entity = await conn.fetchrow("SELECT * FROM frontends WHERE id = 5")
     snapshot_metadata = await save_entity_snapshot(
         conn=conn,
@@ -15,24 +15,26 @@ Usage:
         new_values={"bind_port": 443},
         operation="UPDATE"
     )
-    
-    # Config version'a ekle
+
+    # Persist the snapshot on the config version.
     await conn.execute(
         "INSERT INTO config_versions (..., metadata) VALUES (..., $1)",
         json.dumps(snapshot_metadata)
     )
-    
-    # Reject edildiğinde rollback yap
+
+    # Roll back when the config version is rejected.
     await rollback_entity_from_snapshot(conn, snapshot_metadata["entity_snapshot"])
 
 Supported Operations:
-    - UPDATE: Var olan entity'nin field'larını eski değerlere döndür
-    - CREATE: Yeni oluşturulan entity'yi sil (bulk import için)
-    - UPDATE_RESTORE: Restore işlemi sırasında yapılan UPDATE'i geri al
+    - UPDATE: restore the entity's fields to their pre-change values
+    - CREATE: delete the newly-created entity (used by bulk import / wizard)
+    - UPDATE_RESTORE: undo an UPDATE performed during a restore flow
+    - DELETE: re-create a soft-deleted entity (currently unused — soft
+      delete is preferred)
 
 Feature Flag:
     ENTITY_SNAPSHOT_ENABLED=true|false
-    Default: false (güvenli başlangıç)
+    Default: false — safe-by-default until the operator opts in.
 
 Author: Taylan Bakırcıoğlu
 Date: 2025-01-13
@@ -235,8 +237,27 @@ async def rollback_entity_from_snapshot(
     logger.info(f"ROLLBACK DEBUG: entity_type={entity_type}, entity_id={entity_id}, operation={operation}")
     logger.info(f"ROLLBACK DEBUG: old_values exists={old_values is not None}, old_values length={len(old_values) if old_values else 0}")
     
-    if not all([entity_type, entity_id, operation, old_values]):
-        logger.warning(f"ROLLBACK: Invalid snapshot data, skipping rollback (missing: {[k for k in ['entity_type', 'entity_id', 'operation', 'old_values'] if not entity_snapshot.get(k)]})")
+    # R18 audit fix: the historical guard `not all([..., old_values])`
+    # treated `old_values={}` as missing because `{}` is falsy in Python.
+    # The wizard's bulk_snapshots always emit `"old_values": {}` for
+    # CREATE entries (there's nothing to restore on rollback — the
+    # rollback path is a DELETE) — so EVERY wizard CREATE snapshot
+    # silently bypassed the rollback shim. Rejecting a wizard PENDING
+    # version then visibly removed the config_versions row but left the
+    # wizard-created backends/servers/frontends/SSL certs orphaned in
+    # the DB. Fix: only require old_values for UPDATE/DELETE; for
+    # CREATE the field is intentionally empty.
+    if not all([entity_type, entity_id, operation]):
+        logger.warning(
+            "ROLLBACK: Invalid snapshot data, skipping rollback (missing: "
+            f"{[k for k in ['entity_type', 'entity_id', 'operation'] if not entity_snapshot.get(k)]})"
+        )
+        return False
+    if operation in ("UPDATE", "UPDATE_RESTORE", "DELETE") and not old_values:
+        logger.warning(
+            f"ROLLBACK: {operation} snapshot for {entity_type} {entity_id} "
+            "is missing old_values — cannot restore prior state"
+        )
         return False
     
     try:
@@ -602,7 +623,20 @@ async def _rollback_create(
             await conn.execute("DELETE FROM backend_servers WHERE id = $1", entity_id)
             logger.info(f"ROLLBACK CREATE: Deleted server {entity_id}")
             return True
-            
+
+        elif entity_type == "letsencrypt_order":
+            # v1.5.0 Feature B: wizard-staged ACME orders attached to a
+            # bulk-site-create-* version (legacy: bulk-proxied-host-create-*).
+            # Cascade also removes acme_challenges (ON DELETE CASCADE).
+            await conn.execute(
+                "DELETE FROM letsencrypt_orders WHERE id = $1", entity_id
+            )
+            logger.info(
+                f"ROLLBACK CREATE: Deleted letsencrypt_order {entity_id} "
+                "(+ cascade acme_challenges)"
+            )
+            return True
+
         else:
             logger.warning(f"ROLLBACK CREATE: Unsupported entity type '{entity_type}'")
             return False

@@ -4,7 +4,7 @@ kind: Route
 apiVersion: route.openshift.io/v1
 metadata:
   name: haproxy-openmanager
-  namespace: haproxy-openmanager
+  namespace: internal-haproxy-openmanager
   labels:
     app: haproxy-openmanager
     component: nginx

@@ -8,7 +8,7 @@ import redis
 import asyncio
 from datetime import datetime, timedelta
 
-_version_info = {"version": "1.4.0", "releaseName": "ACME Stability & Enterprise Audit", "releaseDate": "2026-05-06"}
+_version_info = {"version": "1.5.0", "releaseName": "ACME Diagnostics & Site Wizard", "releaseDate": "2026-05-08"}
 for _vpath in ["/app/version.json", os.path.join(os.path.dirname(__file__), "..", "version.json")]:
     try:
         with open(_vpath) as _vf:
@@ -38,6 +38,8 @@ from routers.maintenance import router as maintenance_router
 from routers.dashboard_stats import router as dashboard_stats_router
 from routers.settings import router as settings_router
 from routers.letsencrypt import router as letsencrypt_router
+from routers.acme_diagnostics import router as acme_diagnostics_router
+from routers.site_wizard import router as site_wizard_router
 
 # Production logging configuration
 from utils.logging_config import setup_production_logging
@@ -278,6 +280,14 @@ async def complete_pending_acme_orders():
                 await asyncio.sleep(60)
                 continue
 
+            # v1.5.0 (M30): daily-watermarked TTL prune for acme_order_events
+            # (90d) and wizard_drafts (30d). Best-effort, never raises.
+            try:
+                from utils.activity_log import prune_acme_events_and_drafts_if_due
+                await prune_acme_events_and_drafts_if_due()
+            except Exception as prune_err:
+                logger.debug(f"v1.5.0 daily prune skipped: {prune_err}")
+
             from routers.letsencrypt import _complete_certificate
             from services.acme_service import acme_service as acme_svc
             
@@ -309,10 +319,21 @@ async def complete_pending_acme_orders():
             finally:
                 await close_database_connection(conn_claim)
             
+            # v1.5.0 (Bulgu #2 fix): wizard_staged orders MUST be processed
+            # even when no pending/processing orders exist — otherwise a freshly
+            # created wizard order (no concurrent ACME activity) would never
+            # leave wizard_staged status and never reach the LE API call.
+            # Run the wizard pipeline FIRST so the early-continue below cannot
+            # starve it.
+            try:
+                await _process_wizard_staged_orders(acme_svc)
+            except Exception as ws_err:
+                logger.error(f"[ACME-WIZARD] Wizard-staged processing failed: {ws_err}")
+
             if not claimed_ids:
                 await asyncio.sleep(60)
                 continue
-            
+
             logger.info(f"[ACME-COMPLETE] Claimed {len(claimed_ids)} order(s) for completion: {claimed_ids}")
             
             for oid in claimed_ids:
@@ -335,9 +356,238 @@ async def complete_pending_acme_orders():
                 except Exception as poll_err:
                     logger.error(f"[ACME-COMPLETE] Failed to complete order {oid}: {poll_err}")
 
+            # NOTE: v1.5.0 wizard-staged processing now runs BEFORE the
+            # claimed_ids early-continue above (Bulgu #2 fix), so it executes
+            # every cycle regardless of pending/processing volume.
+
         except Exception as e:
             logger.error(f"[ACME-COMPLETE] Error in completion task: {e}")
         await asyncio.sleep(60)
+
+
+async def _process_wizard_staged_orders(acme_svc):
+    """v1.5.0 Feature B (Issue #14): drive wizard_staged ACME orders forward.
+
+    Round 11 fix: NO `created_at > NOW() - INTERVAL` filter — that would prevent
+    older staged orders from ever reaching the in-loop 24h timeout check. We
+    instead enforce the 24h timeout explicitly via wizard_staged_until.
+    """
+    from utils.activity_log import record_event
+    from services.letsencrypt_service import (
+        create_order_via_api,
+        promote_staged_order_to_pending,
+    )
+
+    conn = await get_database_connection()
+    try:
+        async with conn.transaction():
+            rows = await conn.fetch(
+                """
+                SELECT id, account_id, domains, cluster_ids,
+                       pending_apply_version_name, wizard_staged_until, order_url
+                FROM letsencrypt_orders
+                WHERE status = 'wizard_staged'
+                  AND (updated_at IS NULL OR updated_at < NOW() - INTERVAL '30 seconds')
+                ORDER BY created_at
+                LIMIT 50
+                FOR UPDATE SKIP LOCKED
+                """
+            )
+            if not rows:
+                return
+            await conn.execute(
+                "UPDATE letsencrypt_orders SET updated_at = NOW() WHERE id = ANY($1::int[])",
+                [r["id"] for r in rows],
+            )
+    finally:
+        await close_database_connection(conn)
+
+    for row in rows:
+        order_id = row["id"]
+        account_id = row["account_id"]
+        version_name = row["pending_apply_version_name"]
+
+        # Parse JSONB payloads defensively (asyncpg may return list or str)
+        try:
+            domains = (
+                row["domains"] if isinstance(row["domains"], list)
+                else __import__("json").loads(row["domains"] or "[]")
+            )
+        except Exception:
+            domains = []
+        try:
+            cluster_ids = (
+                row["cluster_ids"] if isinstance(row["cluster_ids"], list)
+                else __import__("json").loads(row["cluster_ids"] or "[]")
+            )
+        except Exception:
+            cluster_ids = []
+
+        try:
+            # 1) 24h timeout abandonment (M25)
+            if row["wizard_staged_until"] is not None:
+                # PostgreSQL returns timezone-aware datetime; compare via NOW() in SQL
+                conn = await get_database_connection()
+                try:
+                    expired = await conn.fetchval(
+                        "SELECT $1 < NOW()", row["wizard_staged_until"]
+                    )
+                    if expired:
+                        await conn.execute(
+                            """
+                            UPDATE letsencrypt_orders
+                            SET status='invalid',
+                                error_detail = 'wizard staged timeout (>24h with no agent confirm)',
+                                updated_at = NOW()
+                            WHERE id = $1
+                            """,
+                            order_id,
+                        )
+                        await record_event(
+                            order_id,
+                            "wizard_staged_timeout",
+                            severity="ERROR",
+                            message="Wizard-staged ACME order abandoned after 24h",
+                            conn=conn,
+                        )
+                        logger.warning(
+                            f"[ACME-WIZARD] Order {order_id} abandoned (wizard_staged_until elapsed)"
+                        )
+                        continue
+                finally:
+                    await close_database_connection(conn)
+
+            # 2) Agent-confirm gating: at least one agent in any of the
+            #    target clusters must have applied_config_version equal to the
+            #    gating version name. Skip+retry next cycle if not yet.
+            if not version_name or not cluster_ids:
+                logger.debug(
+                    f"[ACME-WIZARD] Order {order_id} missing version_name/cluster_ids, skipping"
+                )
+                continue
+
+            conn = await get_database_connection()
+            try:
+                confirmed_count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM agents a
+                    JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
+                    WHERE hc.id = ANY($1::int[])
+                      AND a.applied_config_version = $2
+                    """,
+                    cluster_ids,
+                    version_name,
+                )
+            finally:
+                await close_database_connection(conn)
+
+            if not confirmed_count:
+                logger.info(
+                    f"[ACME-WIZARD] Order {order_id} waiting on agent confirm (version={version_name})"
+                )
+                continue
+
+            # 3) R58/M37 idempotency: if order_url is already set we somehow
+            #    succeeded the LE call but failed status update — re-try
+            #    completion later via the normal pending/processing pipeline.
+            if row["order_url"]:
+                conn = await get_database_connection()
+                try:
+                    await conn.execute(
+                        "UPDATE letsencrypt_orders SET status='pending', updated_at=NOW() WHERE id=$1",
+                        order_id,
+                    )
+                finally:
+                    await close_database_connection(conn)
+                continue
+
+            # 4) Promote: call the LE API for real
+            try:
+                api_result = await create_order_via_api(
+                    acme_svc,
+                    account_id=account_id,
+                    domains=domains,
+                    cluster_ids=cluster_ids,
+                )
+            except Exception as api_err:
+                # Failure -> stay wizard_staged, will retry next pass
+                logger.warning(
+                    f"[ACME-WIZARD] Order {order_id} LE API call failed (will retry): {api_err}"
+                )
+                conn = await get_database_connection()
+                try:
+                    await record_event(
+                        order_id,
+                        "wizard_le_api_retry",
+                        severity="WARN",
+                        message=str(api_err)[:500],
+                        conn=conn,
+                    )
+                finally:
+                    await close_database_connection(conn)
+                continue
+
+            # The thin wrapper currently delegates to AcmeService.create_order
+            # which INSERTs a NEW row. We translate that into an UPDATE of the
+            # staged row by copying the new row's order_url + finalize_url
+            # then deleting the duplicate.
+            new_order_id = api_result.get("id")
+            order_url = api_result.get("order_url")
+            conn = await get_database_connection()
+            try:
+                async with conn.transaction():
+                    if new_order_id and new_order_id != order_id:
+                        new_row = await conn.fetchrow(
+                            """
+                            SELECT order_url, finalize_url, status, expires_at
+                            FROM letsencrypt_orders WHERE id = $1
+                            """,
+                            new_order_id,
+                        )
+                        if new_row:
+                            await promote_staged_order_to_pending(
+                                conn,
+                                order_id=order_id,
+                                order_url=new_row["order_url"] or "",
+                                finalize_url=new_row["finalize_url"] or "",
+                                status=new_row["status"] or "pending",
+                                expires_at=new_row["expires_at"],
+                            )
+                            # Move challenges from the duplicate to the staged row
+                            await conn.execute(
+                                "UPDATE acme_challenges SET order_id = $1 WHERE order_id = $2",
+                                order_id,
+                                new_order_id,
+                            )
+                            await conn.execute(
+                                "DELETE FROM letsencrypt_orders WHERE id = $1",
+                                new_order_id,
+                            )
+                    elif order_url:
+                        await promote_staged_order_to_pending(
+                            conn,
+                            order_id=order_id,
+                            order_url=order_url,
+                            finalize_url=api_result.get("finalize_url") or "",
+                            status="pending",
+                            expires_at=None,
+                        )
+                await record_event(
+                    order_id,
+                    "wizard_promoted",
+                    severity="INFO",
+                    message=f"Wizard-staged order promoted to pending after agent confirm",
+                    details={"version_name": version_name},
+                    conn=conn,
+                )
+                logger.info(
+                    f"[ACME-WIZARD] Order {order_id} promoted to pending (LE order created)"
+                )
+            finally:
+                await close_database_connection(conn)
+        except Exception as outer:
+            logger.error(f"[ACME-WIZARD] Order {order_id} processing error: {outer}")
 
 
 async def check_letsencrypt_renewals():
@@ -582,6 +832,45 @@ app.include_router(security_router)
 app.include_router(configuration_router)
 app.include_router(settings_router)
 app.include_router(letsencrypt_router)
+app.include_router(acme_diagnostics_router)  # v1.5.0 Issue #13: ACME Diagnostic Panel
+app.include_router(site_wizard_router)  # v1.5.0 Issue #14: New Site Setup Wizard
+
+
+# Legacy URL alias: /api/proxied-hosts/* → 308 redirect to /api/sites/*.
+# The Site Wizard endpoints were renamed from `/api/proxied-hosts/...`
+# to `/api/sites/...` in this release. The 308 (Permanent Redirect)
+# preserves the original method + body — POST/PUT/DELETE all continue
+# to work — so any external integrator still pointing at the old slug
+# keeps working through the redirect during the transition window.
+# `include_in_schema=False` keeps the legacy paths out of OpenAPI so
+# new consumers only see the canonical `/api/sites/*` URLs.
+from fastapi import Request as _LegacyAliasRequest
+from fastapi.responses import RedirectResponse as _LegacyAliasRedirect
+
+
+@app.api_route(
+    "/api/proxied-hosts",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+    include_in_schema=False,
+    name="legacy_proxied_hosts_root_alias",
+)
+async def _legacy_proxied_hosts_root_alias(request: _LegacyAliasRequest):
+    qs = request.url.query
+    target = "/api/sites" + (("?" + qs) if qs else "")
+    return _LegacyAliasRedirect(url=target, status_code=308)
+
+
+@app.api_route(
+    "/api/proxied-hosts/{rest:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+    include_in_schema=False,
+    name="legacy_proxied_hosts_subpath_alias",
+)
+async def _legacy_proxied_hosts_subpath_alias(rest: str, request: _LegacyAliasRequest):
+    qs = request.url.query
+    target = f"/api/sites/{rest}" + (("?" + qs) if qs else "")
+    return _LegacyAliasRedirect(url=target, status_code=308)
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -702,7 +991,40 @@ async def startup_event():
 async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("HAProxy OpenManager API shutting down...")
-    
+
+    # R18c audit fix (round 3 #5): drain pending fire-and-forget
+    # background tasks BEFORE closing the DB pool. The audit
+    # logger middleware (`activity_logger.py`) and the wizard
+    # router (`site_wizard.py`, R18b round 7) both use
+    # `asyncio.create_task(...)` to write `user_activity_logs`
+    # rows without blocking the response. Pre-fix the shutdown
+    # event closed the DB pool immediately, so any in-flight
+    # background task that was about to fetchval/execute hit
+    # "pool is closed" and the audit row was lost — the operator
+    # later opened the activity table and could not see why the
+    # cluster's last action happened. Wait up to 5 seconds for
+    # pending tasks scheduled on this loop to finish before
+    # tearing the pool down. Bounded so a stuck task can't block
+    # graceful shutdown indefinitely.
+    try:
+        loop = asyncio.get_event_loop()
+        # All non-current tasks (FastAPI's request-handler tasks
+        # are already done by the time on_shutdown fires; what's
+        # left are the create_task background workers).
+        pending = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task() and not t.done()]
+        if pending:
+            logger.info(f"Draining {len(pending)} pending background task(s) before pool close...")
+            await asyncio.wait(pending, timeout=5.0)
+            still_pending = [t for t in pending if not t.done()]
+            if still_pending:
+                logger.warning(
+                    f"{len(still_pending)} background task(s) did not "
+                    "complete within 5s — proceeding with pool close. "
+                    "These rows may not be persisted."
+                )
+    except Exception as drain_err:
+        logger.warning(f"Background-task drain skipped: {drain_err}")
+
     # Close database connection pool gracefully
     try:
         logger.info("Closing database connection pool...")

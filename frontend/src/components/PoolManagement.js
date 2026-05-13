@@ -41,6 +41,7 @@ import {
 } from '@ant-design/icons';
 import axios from 'axios';
 import AuthContext from '../contexts/AuthContext';
+import { extractApiError } from '../utils/apiError';
 
 const { Option } = Select;
 const { Text, Title, Paragraph } = Typography;
@@ -98,7 +99,7 @@ const PoolManagement = () => {
       console.error('PoolManagement - Failed to fetch pools:', error);
       console.error('PoolManagement - Error response:', error.response?.data);
       console.error('PoolManagement - Error status:', error.response?.status);
-      message.error('Failed to fetch pools: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to fetch pools: ' + (extractApiError(error, error.message)));
     } finally {
       setLoading(false);
     }
@@ -155,7 +156,7 @@ const PoolManagement = () => {
       setPoolAgents(response.data.agents || []);
     } catch (error) {
       console.error('Failed to fetch pool agents:', error);
-      message.error('Failed to fetch pool agents: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to fetch pool agents: ' + (extractApiError(error, error.message)));
     } finally {
       setAgentsLoading(false);
     }
@@ -190,7 +191,7 @@ const PoolManagement = () => {
       poolForm.resetFields();
       fetchPools();
     } catch (error) {
-      const errorMessage = error.response?.data?.detail || error.message;
+      const errorMessage = extractApiError(error, error.message);
       message.error(`Failed to ${editingPool ? 'update' : 'create'} pool: ${errorMessage}`);
     }
   };
@@ -211,7 +212,7 @@ const PoolManagement = () => {
       message.success(`Pool "${poolName}" deleted successfully`);
       fetchPools();
     } catch (error) {
-      const errorMessage = error.response?.data?.detail || error.message;
+      const errorMessage = extractApiError(error, error.message);
       message.error(`Failed to delete pool "${poolName}": ${errorMessage}`);
     }
   };

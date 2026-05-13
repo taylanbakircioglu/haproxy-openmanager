@@ -18,6 +18,7 @@ import {
 } from '@ant-design/icons';
 import axios from 'axios';
 import { useAuth } from '../contexts/AuthContext';
+import { extractApiError } from '../utils/apiError';
 import './Login.css';
 
 const { Title, Text } = Typography;
@@ -62,7 +63,7 @@ const Login = () => {
       }
       
     } catch (error) {
-      const errorMessage = error.response?.data?.detail || 'Login failed. Please try again.';
+      const errorMessage = extractApiError(error, 'Login failed. Please try again.');
       setError(errorMessage);
       message.error(errorMessage);
     } finally {

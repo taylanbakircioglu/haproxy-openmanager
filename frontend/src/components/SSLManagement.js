@@ -20,6 +20,7 @@ import { useSearchParams } from 'react-router-dom';
 import { useCluster } from '../contexts/ClusterContext';
 import { useProgress } from '../contexts/ProgressContext';
 import { formatEntityForSync } from '../utils/agentSync';
+import { extractApiError } from '../utils/apiError';
 import ACMEAutomation from './ACMEAutomation';
 
 const { Title, Text } = Typography;
@@ -30,7 +31,7 @@ const SSLManagement = () => {
   const [searchParams] = useSearchParams();
   const defaultTab = searchParams.get('tab') || 'certificates';
   const { token } = theme.useToken();
-  const { selectedCluster, clusters } = useCluster();
+  const { selectedCluster, clusters, loading: clustersLoading } = useCluster();
   const [certificates, setCertificates] = useState([]);
   const [filteredCertificates, setFilteredCertificates] = useState([]);
   const [searchText, setSearchText] = useState('');
@@ -292,44 +293,136 @@ const SSLManagement = () => {
     }
   };
 
+  // Bulgu #74 (round-22 audit) — the backend now returns HTTP 409
+  // with a structured body listing in-use frontends / backend
+  // servers when an operator tries to delete a cert that's still
+  // referenced. Surface that as a confirm dialog with two options:
+  //   * Cancel — operator detaches the cert from each frontend
+  //     manually (safer).
+  //   * Force-delete — re-issue the request with `?force=true`,
+  //     which NULLs the references and proceeds. The backend
+  //     marks every affected frontend / backend server as PENDING
+  //     so the next Apply re-renders without the cert.
+  // Pre-fix the 409 was caught by the generic catch block and
+  // displayed as a one-line toast with no breakdown of WHICH
+  // entities held the reference — operators had to guess.
+  const deleteCertificateRequest = async (certificateId, opts = {}) => {
+    const qs = opts.force ? '?force=true' : '';
+    const response = await axios.delete(`/api/ssl/certificates/${certificateId}${qs}`);
+    const syncResults = response.data.sync_results || [];
+    const totalNodes = syncResults.length;
+    const successCount = syncResults.filter(result => result.success).length;
+    if (syncResults.length > 0) {
+      if (successCount === totalNodes) {
+        message.success(
+          <div>
+            <div><strong>SSL certificate deleted{opts.force ? ' (force)' : ''}</strong></div>
+            <div style={{ marginTop: 4, fontSize: '12px' }}>
+              Pending config version created for {successCount} cluster(s). Go to Apply Changes to deploy.
+            </div>
+          </div>,
+          6
+        );
+      } else {
+        message.warning(
+          <div>
+            <div><strong>SSL certificate deleted with warnings</strong></div>
+            <div style={{ marginTop: 4, fontSize: '12px' }}>
+              {successCount}/{totalNodes} cluster(s) have pending versions. Some may need manual cleanup.
+            </div>
+          </div>,
+          8
+        );
+      }
+    } else {
+      message.success('SSL certificate deleted successfully');
+    }
+    fetchCertificates();
+  };
+
   const handleDelete = async (certificateId) => {
     try {
-      const response = await axios.delete(`/api/ssl/certificates/${certificateId}`);
-      
-      // Handle cluster sync results
-      const syncResults = response.data.sync_results || [];
-      const totalNodes = syncResults.length;
-      const successCount = syncResults.filter(result => result.success).length;
-      
-      if (syncResults.length > 0) {
-        if (successCount === totalNodes) {
-          message.success(
-            <div>
-              <div><strong>SSL certificate deleted successfully</strong></div>
-              <div style={{ marginTop: 4, fontSize: '12px' }}>
-                Pending config version created for {successCount} cluster(s). Go to Apply Changes to deploy.
-              </div>
-            </div>,
-            6
-          );
-        } else {
-          message.warning(
-            <div>
-              <div><strong>SSL certificate deleted with warnings</strong></div>
-              <div style={{ marginTop: 4, fontSize: '12px' }}>
-                {successCount}/{totalNodes} cluster(s) have pending versions. Some may need manual cleanup.
-              </div>
-            </div>,
-            8
-          );
-        }
-      } else {
-        message.success('SSL certificate deleted successfully');
-      }
-      
-      fetchCertificates();
+      await deleteCertificateRequest(certificateId);
     } catch (error) {
-      message.error('Failed to delete certificate: ' + error.response?.data?.detail);
+      // Bulgu #74 — branch on 409 to render the in-use breakdown.
+      // The backend wraps the structured detail through
+      // `GlobalExceptionHandler.create_error_response` which puts
+      // the raw HTTPException.detail under `data.error.message`
+      // (yes, the field name says "message" but for the in-use
+      // case it's a dict). Fall back to the legacy `data.detail`
+      // shape so direct-API callers that bypass the envelope
+      // still get the same UX.
+      const status = error?.response?.status;
+      const env = error?.response?.data?.error;
+      const usageData =
+        (env && typeof env.message === 'object' && env.message)
+          ? env.message
+          : (typeof error?.response?.data?.detail === 'object'
+              ? error.response.data.detail
+              : null);
+      const fes = Array.isArray(usageData?.frontends) ? usageData.frontends : [];
+      const bes = Array.isArray(usageData?.backend_servers) ? usageData.backend_servers : [];
+
+      if (status === 409 && (fes.length > 0 || bes.length > 0)) {
+        Modal.confirm({
+          title: 'Certificate is still in use',
+          width: 600,
+          okText: 'Force delete (NULL references)',
+          okType: 'danger',
+          cancelText: 'Cancel & detach manually',
+          content: (
+            <div>
+              <p>This certificate is currently bound to:</p>
+              {fes.length > 0 && (
+                <>
+                  <p style={{ marginBottom: 4, fontWeight: 600 }}>
+                    Frontends ({fes.length}):
+                  </p>
+                  <ul style={{ marginTop: 0, paddingLeft: 20 }}>
+                    {fes.slice(0, 10).map((f) => (
+                      <li key={`fe-${f.id}`}>
+                        {f.name} (cluster {f.cluster_id ?? '—'})
+                      </li>
+                    ))}
+                    {fes.length > 10 && <li>… and {fes.length - 10} more</li>}
+                  </ul>
+                </>
+              )}
+              {bes.length > 0 && (
+                <>
+                  <p style={{ marginBottom: 4, fontWeight: 600 }}>
+                    Backend servers ({bes.length}):
+                  </p>
+                  <ul style={{ marginTop: 0, paddingLeft: 20 }}>
+                    {bes.slice(0, 10).map((b) => (
+                      <li key={`be-${b.id}`}>
+                        {b.backend_name}/{b.server_name} (cluster {b.cluster_id ?? '—'})
+                      </li>
+                    ))}
+                    {bes.length > 10 && <li>… and {bes.length - 10} more</li>}
+                  </ul>
+                </>
+              )}
+              <p style={{ marginTop: 12, color: '#ff4d4f' }}>
+                <strong>Force-delete will silently drop the HTTPS bind on every
+                listed frontend</strong> and mark each one as PENDING. Only
+                proceed if you have already prepared a replacement (or
+                accept the security downgrade to plain HTTP).
+              </p>
+            </div>
+          ),
+          onOk: async () => {
+            try {
+              await deleteCertificateRequest(certificateId, { force: true });
+            } catch (forceErr) {
+              message.error(extractApiError(forceErr, 'Force delete failed'));
+            }
+          },
+        });
+        return;
+      }
+
+      message.error(extractApiError(error, 'Failed to delete certificate'));
     }
   };
 
@@ -440,7 +533,7 @@ const SSLManagement = () => {
         message.error('You do not have permission to perform this action.');
       } else {
         // Generic error
-        message.error(`Failed to ${isEditing ? 'update' : 'add'} certificate: ${error.response?.data?.detail || error.message}`);
+        message.error(`Failed to ${isEditing ? 'update' : 'add'} certificate: ${extractApiError(error, error.message)}`);
       }
     }
   };
@@ -797,14 +890,33 @@ const SSLManagement = () => {
         </Col>
       </Row>
 
+      {/* Phase J audit fix #6 — While the ClusterContext is still
+          fetching the cluster list (initial mount, exponential-backoff
+          retry, etc.), `selectedCluster` is null but the operator is
+          NOT actually missing a cluster — the data just hasn't arrived
+          yet. Showing "No Cluster Selected" during that window was the
+          single most visible symptom of the original bug ("clusters
+          aren't listing, no entities show up, I have to wait"). Show a
+          neutral "Loading clusters..." affordance during the fetch and
+          only flip to the warning alert once the fetch has settled. */}
       {!selectedCluster && (
-        <Alert
-          message="No Cluster Selected"
-          description="Please select a cluster from the top navigation to manage SSL certificates."
-          type="warning"
-          showIcon
-          style={{ marginBottom: 16 }}
-        />
+        clustersLoading ? (
+          <Alert
+            message="Loading clusters…"
+            description="Fetching the cluster list. This usually takes a few seconds after a deploy."
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+          />
+        ) : (
+          <Alert
+            message="No Cluster Selected"
+            description="Please select a cluster from the top navigation to manage SSL certificates."
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+          />
+        )
       )}
 
       <Row gutter={16} style={{ marginBottom: 16 }}>

@@ -489,9 +489,19 @@ async def generate_install_script(req_data: AgentScriptRequest, request: Request
         
         # Use the specific cluster_id sent from frontend instead of searching by pool_id
         cluster_id = req_data.cluster_id
-        
+
         # Validate that the cluster exists and belongs to the specified pool
         conn = await get_database_connection()
+
+        # Bulgu #82 (round-22 audit) — pre-fix any operator with
+        # `agents.create` permission could generate an install
+        # script for ANY cluster, regardless of pool/cluster
+        # scope. Skip the access check during agent
+        # auto-upgrade (no `current_user`; agent uses its own
+        # API key and already proved it owns this cluster's
+        # config-apply pipeline).
+        if current_user and cluster_id:
+            await validate_user_cluster_access(current_user['id'], cluster_id, conn)
         
         # CRITICAL: Check if this is an agent upgrade FIRST
         # Skip strict validation for upgrades - agent may have old/fallback config
@@ -927,13 +937,28 @@ async def agent_heartbeat(agent_id: int, heartbeat_data: AgentHeartbeat):
 async def agent_config_applied_notification(agent_name: str, notification_data: dict, x_api_key: Optional[str] = Header(None)):
     """Receive instant notification when agent applies configuration - for real-time UI sync"""
     try:
-        # Validate agent API key for security
+        # Bulgu #75 (round-22 audit) — pre-fix the guard read:
+        #
+        #     if x_api_key and not agent_auth:
+        #         raise HTTPException(401, "Invalid API key")
+        #
+        # which accepted requests with NO `x_api_key` header at
+        # all (the `and` short-circuits). An unauthenticated
+        # attacker could therefore POST fabricated
+        # `config-applied`, `config-validation-failed`,
+        # `config-sync` and `upgrade-complete` notifications,
+        # poisoning the control-plane's view of agent state and —
+        # for `config-sync` — overwriting entity rows in the DB
+        # to match attacker-supplied HAProxy fragments. The new
+        # guard requires a present-AND-valid agent API key.
         from auth_middleware import validate_agent_api_key
         agent_auth = await validate_agent_api_key(x_api_key)
-        
-        if x_api_key and not agent_auth:
-            logger.warning(f"Invalid API key provided by agent '{agent_name}' for config-applied")
-            raise HTTPException(status_code=401, detail="Invalid API key")
+        if not agent_auth:
+            logger.warning(
+                f"Rejected config-applied call for agent {agent_name!r}: "
+                f"missing or invalid x-api-key"
+            )
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
         # GLOBAL TOKEN: Token can be used by multiple agents across different pools/clusters
         
         conn = await get_database_connection()
@@ -1018,13 +1043,15 @@ async def agent_config_applied_notification(agent_name: str, notification_data: 
 async def agent_config_validation_failed(agent_name: str, notification_data: dict, x_api_key: Optional[str] = Header(None)):
     """Receive notification when agent's HAProxy config validation fails - for UI error display"""
     try:
-        # Validate agent API key for security
+        # Bulgu #75 (round-22 audit) — see config-applied above.
         from auth_middleware import validate_agent_api_key
         agent_auth = await validate_agent_api_key(x_api_key)
-        
-        if x_api_key and not agent_auth:
-            logger.warning(f"Invalid API key provided by agent '{agent_name}' for validation-failed")
-            raise HTTPException(status_code=401, detail="Invalid API key")
+        if not agent_auth:
+            logger.warning(
+                f"Rejected validation-failed call for agent {agent_name!r}: "
+                f"missing or invalid x-api-key"
+            )
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
         # GLOBAL TOKEN: Token can be used by multiple agents across different pools/clusters
         
         conn = await get_database_connection()
@@ -1111,13 +1138,19 @@ async def agent_config_validation_failed(agent_name: str, notification_data: dic
 async def agent_config_sync(agent_name: str, sync_data: dict, x_api_key: Optional[str] = Header(None)):
     """Receive agent's current config content and sync database entities accordingly"""
     try:
-        # Validate agent API key for security
+        # Bulgu #75 (round-22 audit) — see config-applied above.
+        # config-sync is the highest-impact agent webhook: it
+        # mutates the entity rows in the DB based on the agent's
+        # reported HAProxy fragments. Accepting no-API-key
+        # requests here let an attacker rewrite arbitrary rows.
         from auth_middleware import validate_agent_api_key
         agent_auth = await validate_agent_api_key(x_api_key)
-        
-        if x_api_key and not agent_auth:
-            logger.warning(f"Invalid API key provided by agent '{agent_name}' for config-sync")
-            raise HTTPException(status_code=401, detail="Invalid API key")
+        if not agent_auth:
+            logger.warning(
+                f"Rejected config-sync call for agent {agent_name!r}: "
+                f"missing or invalid x-api-key"
+            )
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
         # GLOBAL TOKEN: Token can be used by multiple agents across different pools/clusters
         
         conn = await get_database_connection()
@@ -2277,13 +2310,15 @@ async def get_agent_upgrade_status(agent_name: str, x_api_key: Optional[str] = H
 async def agent_upgrade_complete(agent_name: str, completion_data: dict, x_api_key: Optional[str] = Header(None)):
     """Receive notification when agent completes or fails upgrade"""
     try:
-        # Validate agent API key for security
+        # Bulgu #75 (round-22 audit) — see config-applied above.
         from auth_middleware import validate_agent_api_key
         agent_auth = await validate_agent_api_key(x_api_key)
-        
-        if x_api_key and not agent_auth:
-            logger.warning(f"Invalid API key provided by agent '{agent_name}' for upgrade complete")
-            raise HTTPException(status_code=401, detail="Invalid API key")
+        if not agent_auth:
+            logger.warning(
+                f"Rejected upgrade-complete call for agent {agent_name!r}: "
+                f"missing or invalid x-api-key"
+            )
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
         # GLOBAL TOKEN: Token can be used by multiple agents across different pools/clusters
         
         conn = await get_database_connection()

@@ -7,10 +7,126 @@ from datetime import datetime, timezone
 from models import HAProxyClusterCreate, HAProxyClusterUpdate
 from database.connection import get_database_connection, close_database_connection
 from utils.activity_log import log_user_activity
+
+
+# Bulgu #79 (round-22 audit) — cluster.py pre-fix had ZERO calls
+# to `validate_user_cluster_access`. Every cluster-scoped
+# mutation (`apply-changes`, `delete cluster`, `update cluster`,
+# `restore config version`, `reject pending changes`, etc.)
+# only checked permission ROLE (e.g. `apply.execute`) but never
+# verified the operator actually has access to THIS particular
+# cluster id. With permission roles granted globally, an
+# operator scoped to cluster 1 (via `user_pool_access`) could
+# call `POST /api/clusters/2/apply-changes` and apply cluster 2's
+# pending changes, blow away cluster 2's `user_pool_access`
+# scoping, etc. The helper duplicated across other routers
+# (`backend.py`, `frontend.py`, `ssl.py`, `waf.py`, `agent.py`)
+# is re-defined here to keep the module self-contained — a
+# future refactor can hoist it into a shared `auth_middleware`
+# module but the duplication is harmless and pin-tested.
+async def validate_user_cluster_access(user_id: int, cluster_id: int, conn):
+    """Validate that user has access to the specified cluster.
+
+    Admins bypass the check. Non-admins must have an active
+    (non-expired) row in `user_pool_access` for the cluster's
+    pool. Falls back to allow on legacy schemas missing the
+    table / column for backwards compatibility.
+    """
+    cluster_exists = await conn.fetchval(
+        "SELECT id FROM haproxy_clusters WHERE id = $1", cluster_id
+    )
+    if not cluster_exists:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+
+    is_admin = await conn.fetchval(
+        "SELECT is_admin FROM users WHERE id = $1", user_id
+    )
+    if is_admin:
+        return True
+
+    table_exists = await conn.fetchval("""
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'user_pool_access'
+        )
+    """)
+    if not table_exists:
+        logger.warning(
+            "user_pool_access table not found, allowing cluster access "
+            "by fallback (legacy schema)"
+        )
+        return True
+
+    # Risk audit fix (post-Bulgu-#79): the original helper in
+    # routers/backend.py filters on `upa.is_active = TRUE` in
+    # addition to the expires_at window. Without it,
+    # soft-deleted access rows (`is_active = FALSE`) would still
+    # match — defeating the soft-delete contract. Also check
+    # whether the `expires_at` column exists so we keep the same
+    # backwards-compat shape as the existing helpers and don't
+    # introduce a column-missing 500 on legacy DBs that were
+    # working with the other routers' validators.
+    expires_at_exists = await conn.fetchval("""
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'user_pool_access' AND column_name = 'expires_at'
+        )
+    """)
+    if expires_at_exists:
+        has_access = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM user_pool_access upa
+                JOIN haproxy_clusters hc ON hc.pool_id = upa.pool_id
+                WHERE upa.user_id = $1
+                  AND hc.id = $2
+                  AND upa.is_active = TRUE
+                  AND (upa.expires_at IS NULL OR upa.expires_at > CURRENT_TIMESTAMP)
+            )
+        """, user_id, cluster_id)
+    else:
+        # Legacy schema without expires_at — match the same
+        # fallback the routers/backend.py helper uses so the
+        # two validators agree byte-for-byte on legacy DBs.
+        has_access = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM user_pool_access upa
+                JOIN haproxy_clusters hc ON hc.pool_id = upa.pool_id
+                WHERE upa.user_id = $1
+                  AND hc.id = $2
+                  AND upa.is_active = TRUE
+            )
+        """, user_id, cluster_id)
+
+    if not has_access:
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have access to this cluster. Please contact your administrator."
+        )
+    return True
 # Rate limiting import temporarily disabled
 
 router = APIRouter(prefix="/api/clusters", tags=["clusters"])
 logger = logging.getLogger(__name__)
+
+
+class _ConcurrentlyDrained(Exception):
+    """Sentinel raised inside ``apply_pending_changes`` when the
+    advisory-lock-protected re-fetch shows that another caller
+    has already drained the PENDING config-version list.
+
+    Risk-audit follow-up to Bulgu-#80. The earlier two-transaction
+    split between lock-and-recheck (TX1) and lock-and-apply (TX2)
+    left a brief gap where another caller could squeeze in, drain
+    PENDING rows, and commit before TX2 grabbed the lock. We now
+    collapse both phases into a single locked transaction and use
+    this sentinel to bail out cleanly when the re-fetch returns
+    empty. The class is module-level (not nested in the function
+    body) so Python can resolve it during ``except`` lookup even
+    when an OTHER exception is raised before the function reaches
+    the class-definition statement.
+    """
 
 def _extract_entities_from_config(config_content: str) -> dict:
     """Extract entity names from HAProxy config content for sync purposes"""
@@ -265,18 +381,21 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
                 status_code=403,
                 detail="Insufficient permissions: clusters.update required"
             )
-        
+
         conn = await get_database_connection()
-        
+
         # Check if cluster exists and get current values
         existing_cluster = await conn.fetchrow("""
-            SELECT name, description, connection_type, is_active, stats_socket_path, 
-                   haproxy_config_path, haproxy_bin_path, pool_id, acme_enabled 
+            SELECT name, description, connection_type, is_active, stats_socket_path,
+                   haproxy_config_path, haproxy_bin_path, pool_id, acme_enabled
             FROM haproxy_clusters WHERE id = $1
         """, cluster_id)
         if not existing_cluster:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="Cluster not found")
+
+        # Bulgu #79 — validate cluster access (admins bypass).
+        await validate_user_cluster_access(current_user['id'], cluster_id, conn)
         
         # Build dynamic update query - only update fields that are provided (not None)
         update_fields = []
@@ -398,7 +517,7 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
 
 
 @router.get("/{cluster_id}", summary="Get Cluster by ID", response_description="Cluster details")
-async def get_cluster(cluster_id: int):
+async def get_cluster(cluster_id: int, authorization: str = Header(None)):
     """
     # Get Specific HAProxy Cluster
     
@@ -436,6 +555,14 @@ async def get_cluster(cluster_id: int):
     - **500**: Server error
     """
     try:
+        # R18c audit fix (round 6 final convergence): authenticate
+        # the caller before fetching cluster topology by ID. Pre-fix
+        # this sibling of GET /api/clusters was anonymous, so an
+        # attacker could iterate cluster IDs to enumerate the same
+        # info (stats socket, paths, ACME flags, pool identity) the
+        # list endpoint just locked down. Closes the asymmetry.
+        from auth_middleware import get_current_user_from_token
+        await get_current_user_from_token(authorization)
         conn = await get_database_connection()
         
         cluster = await conn.fetchrow("""
@@ -475,7 +602,7 @@ async def get_cluster(cluster_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("", summary="Get All Clusters", response_description="List of all clusters")
-async def get_clusters():
+async def get_clusters(authorization: str = Header(None)):
     """
     # Get All HAProxy Clusters
     
@@ -536,6 +663,17 @@ async def get_clusters():
     - **500**: Server error
     """
     try:
+        # R18c audit fix (round 6 #3 — KRITIK info leak): require an
+        # authenticated caller. Pre-fix the endpoint accepted
+        # anonymous GETs and returned cluster topology including
+        # internal HAProxy paths (stats socket, config path, bin
+        # path), pool ids, ACME flags, and agent counts. This is
+        # both reconnaissance for an attacker and the spine of the
+        # cluster-scoped RBAC the rest of the platform builds on,
+        # so guarding it at the read layer is essential after R18c
+        # round 5's roster + role guards.
+        from auth_middleware import get_current_user_from_token
+        await get_current_user_from_token(authorization)
         conn = await get_database_connection()
         
         clusters = await conn.fetch("""
@@ -1265,9 +1403,16 @@ async def apply_pending_changes(
                 status_code=403,
                 detail="Insufficient permissions: apply.execute required"
             )
-        
+
         conn = await get_database_connection()
-        
+
+        # Bulgu #79 — validate the operator actually has access
+        # to THIS cluster. Pre-fix the `apply.execute` permission
+        # was granted globally, so any operator with the role
+        # could apply changes to ANY cluster, including clusters
+        # in pools they were never granted access to.
+        await validate_user_cluster_access(current_user['id'], cluster_id, conn)
+
         # Apply all pending changes without validation - validation issues will be handled by HAProxy itself
         # Users will handle configuration completeness through the centralized Apply Management page
         
@@ -1367,7 +1512,96 @@ async def apply_pending_changes(
                 "changes": [{"version_name": v["version_name"], "created_at": v["created_at"].isoformat().replace('+00:00', 'Z')} for v in pending_versions]
             }
         
+        # Bulgu #80 (round-22 audit) — serialise concurrent
+        # apply-changes against the SAME cluster. Pre-fix the
+        # entire apply pipeline was unprotected: two operators
+        # clicking Apply at the same instant (or one operator
+        # double-clicking from two tabs / an API client retrying
+        # on timeout) both raced through the "fetch pending
+        # versions → render consolidated config → INSERT APPLIED
+        # version → mark pending APPLIED → notify agents"
+        # pipeline. The DB ended up with two
+        # `APPLIED`/`is_active=TRUE` consolidated rows for the
+        # same cluster, both agent notifications fired, and the
+        # agent that pulled second silently overwrote whatever
+        # the first one had loaded — including the case where
+        # the two consolidated configs disagreed on which
+        # pending versions made it in.
+        #
+        # `pg_advisory_xact_lock` is the same primitive
+        # `site_wizard.py::create_site` already uses for
+        # per-cluster serialisation (Bulgu #54). The lock is
+        # automatically released on COMMIT or ROLLBACK, so we
+        # don't need an explicit `unlock` path. We use a unique
+        # namespace constant (`18181820`) so the lock space is
+        # disjoint from the wizard's draft-cap and create-site
+        # lock spaces. Concurrent callers BLOCK until the
+        # holder finishes; they then re-check the pending list
+        # and bail out cleanly when it's drained.
+        #
+        # The lock must live inside an explicit transaction
+        # (xact_lock semantics require it), so we open the
+        # apply transaction immediately around the lock + the
+        # pending-list re-fetch. The post-lock re-fetch is
+        # critical: the racing caller's first read happened
+        # BEFORE the lock was held; the rows may have been
+        # consolidated by the holder in the meantime.
+        APPLY_LOCK_NS = 18181820
+
+        # Risk-audit refinement (post-Bulgu-#80): the earlier
+        # implementation split the lock acquisition and the
+        # apply pipeline into TWO advisory-locked transactions
+        # with a brief gap between them. Because
+        # `pg_advisory_xact_lock` releases automatically on
+        # COMMIT, a concurrent caller could squeeze in during
+        # that gap, drain all PENDING versions, and the second
+        # transaction would proceed to ship a fresh config
+        # generated from the (now-already-applied) database
+        # state — producing a duplicate consolidated APPLIED
+        # version and a redundant agent notification. We
+        # collapse to ONE locked transaction: acquire the
+        # lock, RE-FETCH `pending_versions` under the lock
+        # (the outer fetch at line ~1402 is now stale-as-of
+        # pre-lock), filter previously-detected orphans, and
+        # bail via a sentinel exception if the list drained.
+        # Rollback on the sentinel keeps the no-op idempotent
+        # because no APPLY state has been written yet at that
+        # point. All operations that actually mutate state run
+        # AFTER this re-fetch inside the same locked TX.
         async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock($1, $2)",
+                APPLY_LOCK_NS,
+                cluster_id,
+            )
+
+            pending_versions_locked = await conn.fetch("""
+                SELECT id, version_name, created_at, config_content, checksum, metadata
+                FROM config_versions
+                WHERE cluster_id = $1 AND status = 'PENDING'
+                ORDER BY created_at ASC
+            """, cluster_id)
+            pending_versions_locked = [
+                v for v in pending_versions_locked
+                if v['id'] not in orphan_version_ids
+            ]
+            if not pending_versions_locked:
+                # Concurrent caller already drained — bail
+                # via the sentinel exception. The `async
+                # with conn.transaction():` rolls back on
+                # the propagating exception, releasing the
+                # advisory lock cleanly. The outer
+                # `except _ConcurrentlyDrained:` (defined
+                # before the generic catch-all) returns the
+                # standard "nothing to apply" response.
+                raise _ConcurrentlyDrained()
+            # Overwrite the pre-lock snapshot so every
+            # downstream consumer (restore detection,
+            # consolidated-version metadata, agent
+            # notification payloads) operates on the
+            # authoritative locked view.
+            pending_versions = pending_versions_locked
+
             # CRITICAL: SSL scope-aware apply (MUST be inside transaction for atomicity)
             # SSL update'lerde tek Apply tıklaması ile scope'daki tüm cluster'lara yayılır
             # Global SSL: Tüm cluster'lar, Cluster-specific SSL: İlgili cluster'lar
@@ -2093,7 +2327,26 @@ defaults
             response_data["message"] += f" (+ {sum(1 for r in global_apply_results if r['success'])} other clusters with global SSL)"
         
         return response_data
-        
+
+    except _ConcurrentlyDrained:
+        # Risk-audit follow-up to Bulgu-#80: a concurrent
+        # apply caller drained the PENDING list while we
+        # were blocked on the advisory lock. Return the same
+        # idempotent "nothing to do" shape the early-return
+        # at line ~1473 produces so the FE/CLI handle both
+        # paths identically. Connection is closed here
+        # because the route handler's normal completion path
+        # doesn't run.
+        try:
+            await close_database_connection(conn)
+        except Exception:
+            pass
+        return {
+            "message": "No pending changes to apply (consumed by concurrent apply)",
+            "applied_count": 0,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error applying pending changes: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2470,8 +2723,62 @@ defaults
             return lines[start_idx:end_idx]
 
         version_name = current_version['version_name']
-        prev_lines_full = previous_version['config_content'].split('\n') if previous_version else []
-        curr_lines_full = current_version['config_content'].split('\n')
+
+        # Bulgu #15 (post-Round-4 audit): apply a renderer-equivalent
+        # normalization to BOTH sides of the diff before splitting
+        # into lines. This neutralises renderer evolution between
+        # the time the previous version was rendered (older renderer)
+        # and the current version (newer renderer) so the diff
+        # surfaces ONLY operator-intent changes.
+        #
+        # Concrete scenario the user hit:
+        #   * Operator opens the wizard, only edits the new
+        #     site's frontend port + a single backend-server IP,
+        #     creates two NEW entities (fe-site2 + be-site2).
+        #   * Expected diff: only `+` lines for the two new
+        #     blocks.
+        #   * Actual diff pre-fix: every existing frontend in the
+        #     cluster showed `-` lines for redundant
+        #     `http-request track-sc0 src` calls (now deduped by
+        #     the new renderer), and the unmodified `be-site`
+        #     backend showed a `-` line stripping `cookie srv1`
+        #     from its server (now guarded by the renderer when
+        #     the parent backend has no `cookie_name`).
+        #
+        # Normalising both sides through the same canonical pass
+        # cancels out the renderer-only differences before the
+        # textual diff is computed. The function is idempotent so
+        # configs that were already rendered with the new
+        # renderer pass through unchanged.
+        try:
+            from services.haproxy_config import (
+                _normalize_haproxy_config_text_for_diff,
+            )
+            prev_raw = (
+                previous_version['config_content']
+                if previous_version and previous_version['config_content']
+                else ''
+            )
+            curr_raw = current_version['config_content'] or ''
+            prev_norm = _normalize_haproxy_config_text_for_diff(prev_raw)
+            curr_norm = _normalize_haproxy_config_text_for_diff(curr_raw)
+        except Exception as _norm_err:
+            # Defensive: never let a normalization bug break the
+            # diff endpoint. Fall back to the raw stored text on
+            # any error path.
+            logger.warning(
+                f"DIFF NORMALIZE: falling back to raw config text "
+                f"due to normalization error: {_norm_err}"
+            )
+            prev_norm = (
+                previous_version['config_content']
+                if previous_version and previous_version['config_content']
+                else ''
+            )
+            curr_norm = current_version['config_content'] or ''
+
+        prev_lines_full = prev_norm.split('\n') if prev_norm else []
+        curr_lines_full = curr_norm.split('\n')
 
         scoped_prev = prev_lines_full
         scoped_curr = curr_lines_full
@@ -2490,6 +2797,10 @@ defaults
         else:
             # Scope diffs for entity types to avoid showing whole file additions
 
+            # Bulgu #15: feed `extract_block` from the NORMALIZED
+            # text on both sides, mirroring the full-diff branch
+            # above, so entity-scoped diffs also surface only
+            # operator-intent changes.
             conn2 = await get_database_connection()
             try:
                 if m_backend:
@@ -2497,15 +2808,15 @@ defaults
                     be_row = await conn2.fetchrow("SELECT name FROM backends WHERE id = $1", be_id)
                     if be_row and be_row['name']:
                         name = be_row['name']
-                        scoped_prev = extract_block(previous_version['config_content'] if previous_version else '', 'backend', name)
-                        scoped_curr = extract_block(current_version['config_content'], 'backend', name)
+                        scoped_prev = extract_block(prev_norm, 'backend', name)
+                        scoped_curr = extract_block(curr_norm, 'backend', name)
                 elif m_frontend:
                     fe_id = int(m_frontend.group(1))
                     fe_row = await conn2.fetchrow("SELECT name FROM frontends WHERE id = $1", fe_id)
                     if fe_row and fe_row['name']:
                         name = fe_row['name']
-                        scoped_prev = extract_block(previous_version['config_content'] if previous_version else '', 'frontend', name)
-                        scoped_curr = extract_block(current_version['config_content'], 'frontend', name)
+                        scoped_prev = extract_block(prev_norm, 'frontend', name)
+                        scoped_curr = extract_block(curr_norm, 'frontend', name)
                 elif m_waf:
                     # For WAF rules, show full diff as WAF rules are mixed throughout config
                     scoped_prev = prev_lines_full
@@ -2522,8 +2833,8 @@ defaults
                     )
                     if sv_row and sv_row['backend_name']:
                         be_name = sv_row['backend_name']
-                        scoped_prev = extract_block(previous_version['config_content'] if previous_version else '', 'backend', be_name)
-                        scoped_curr = extract_block(current_version['config_content'], 'backend', be_name)
+                        scoped_prev = extract_block(prev_norm, 'backend', be_name)
+                        scoped_curr = extract_block(curr_norm, 'backend', be_name)
             finally:
                 await close_database_connection(conn2)
 
@@ -3112,17 +3423,20 @@ async def confirm_restore_config_version(
         
         current_user = await get_current_user_from_token(authorization)
         conn = await get_database_connection()
-        
+
+        # Bulgu #79 — validate cluster access (admins bypass).
+        await validate_user_cluster_access(current_user['id'], cluster_id, conn)
+
         # Get version to restore
         version_to_restore = await conn.fetchrow(
             "SELECT * FROM config_versions WHERE id = $1 AND cluster_id = $2",
             version_id, cluster_id
         )
-        
+
         if not version_to_restore:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="Configuration version not found")
-        
+
         if not version_to_restore['config_content']:
             await close_database_connection(conn)
             raise HTTPException(status_code=400, detail="Version has no config content")
@@ -3841,23 +4155,77 @@ async def undo_reject_config_version(
     try:
         from auth_middleware import get_current_user_from_token
         current_user = await get_current_user_from_token(authorization)
-        
+
         conn = await get_database_connection()
-        
+
+        # Bulgu #79 — validate cluster access (admins bypass).
+        await validate_user_cluster_access(current_user['id'], cluster_id, conn)
+
         # Check if version exists and is REJECTED
         version_to_undo = await conn.fetchrow(
             "SELECT * FROM config_versions WHERE id = $1 AND cluster_id = $2",
             version_id, cluster_id
         )
-        
+
         if not version_to_undo:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="Configuration version not found")
-        
+
         if version_to_undo['status'] != 'REJECTED':
             await close_database_connection(conn)
             raise HTTPException(status_code=400, detail="Only REJECTED versions can be undone")
-        
+
+        # Bulgu #16 (round-6 audit) — defensive guard against
+        # undo of bulk-site-create-* / bulk-import-* / restore-*
+        # rejections.
+        #
+        # Why this guard exists: the reject path for these
+        # destructive bulk operations calls
+        # `rollback_entity_from_snapshot` for every entity in
+        # `metadata.bulk_snapshots`. For CREATE-op snapshots that
+        # routes to `_rollback_create` which HARD-DELETEs the rows
+        # (frontends / backends / backend_servers / letsencrypt_orders
+        # / ssl_certificates). The wizard's `_entity_snapshot`
+        # helper stores `new_values={}` so we have no preserved
+        # state to recreate from.
+        #
+        # The pre-fix undo silently flipped the version status
+        # back to PENDING and matched zero rows on the entity-
+        # status UPDATE. The next agent pull would render config
+        # WITHOUT the wizard's frontends/backends (they no longer
+        # exist), the apply would succeed cosmetically, and the
+        # operator would be confused why their "undone" site is
+        # nowhere to be found.
+        #
+        # Explicit 409 here forces the operator to re-create via
+        # the wizard — the only path that produces a recoverable
+        # state. The UI can hide / disable the Undo button for
+        # bulk versions in REJECTED state to make this guard
+        # self-documenting.
+        version_name = version_to_undo['version_name'] or ''
+        DESTRUCTIVE_PREFIXES = (
+            'bulk-site-create-',
+            'bulk-import-',
+            'bulk-proxied-host-create-',  # legacy naming, pre-1.5.0
+            'restore-',
+        )
+        if version_name.startswith(DESTRUCTIVE_PREFIXES):
+            await close_database_connection(conn)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Cannot undo rejection of '{version_name}'. This "
+                    "version represents a destructive bulk operation: on "
+                    "reject the underlying entities (frontends, backends, "
+                    "servers, certs) were permanently deleted and the "
+                    "snapshot does not carry enough state to recreate "
+                    "them. Re-create the site via the wizard / re-run the "
+                    "bulk import instead — that path also produces a "
+                    "clean PENDING version that you can audit on Apply "
+                    "Management."
+                ),
+            )
+
         async with conn.transaction():
             # Mark the version as PENDING again
             await conn.execute("""
@@ -4252,14 +4620,17 @@ async def delete_cluster(cluster_id: int, authorization: str = Header(None)):
                 status_code=403,
                 detail="Insufficient permissions: clusters.delete required"
             )
-        
+
         conn = await get_database_connection()
-        
+
         # Check if cluster exists
         cluster = await conn.fetchrow("SELECT name FROM haproxy_clusters WHERE id = $1", cluster_id)
         if not cluster:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="Cluster not found")
+
+        # Bulgu #79 — validate cluster access (admins bypass).
+        await validate_user_cluster_access(current_user['id'], cluster_id, conn)
         
         # Check for dependencies before deletion
         dependencies = []
@@ -4306,7 +4677,44 @@ async def delete_cluster(cluster_id: int, authorization: str = Header(None)):
         async with conn.transaction():
             # Delete config versions first (they reference cluster)
             await conn.execute("DELETE FROM config_versions WHERE cluster_id = $1", cluster_id)
-            
+
+            # R18 audit fix (round 3 #8): wizard_drafts.payload carries
+            # the chosen cluster_id as JSONB. Without explicit cleanup,
+            # deleting a cluster left every operator's saved Site Drafts
+            # pointing at a non-existent cluster — Resume failed at the
+            # cluster Select (404) until the 30-day TTL pruned them.
+            # Drafts are user-scoped (no FK), so we have to scan the
+            # JSONB payload. The (payload->>'cluster_id') JSON path is
+            # text; cast to int and compare against the deleted cluster.
+            # Phase I: dual-filter — purge BOTH legacy
+            # `wizard_type='proxied_host'` and post-rebrand
+            # `wizard_type='site'` drafts that pointed at this
+            # now-deleted cluster, otherwise pre-rename drafts would
+            # linger as orphans until their 30-day TTL fires.
+            try:
+                deleted_drafts = await conn.execute(
+                    """
+                    DELETE FROM wizard_drafts
+                    WHERE wizard_type IN ('site', 'proxied_host')
+                      AND (payload->>'cluster_id') ~ '^[0-9]+$'
+                      AND ((payload->>'cluster_id')::int) = $1
+                    """,
+                    cluster_id,
+                )
+                if deleted_drafts and 'DELETE 0' not in str(deleted_drafts):
+                    logger.info(
+                        f"CLUSTER DELETE CASCADE: pruned wizard_drafts referencing "
+                        f"cluster_id={cluster_id} ({deleted_drafts})"
+                    )
+            except Exception as draft_e:
+                # Non-fatal — the cluster delete should still proceed
+                # even if the drafts table is missing or the JSONB path
+                # fails (very old DB schemas).
+                logger.warning(
+                    f"CLUSTER DELETE CASCADE: failed to prune wizard_drafts "
+                    f"for cluster_id={cluster_id}: {draft_e}"
+                )
+
             # Delete cluster
             await conn.execute("DELETE FROM haproxy_clusters WHERE id = $1", cluster_id)
         
@@ -4481,18 +4889,21 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
     try:
         from auth_middleware import get_current_user_from_token
         current_user = await get_current_user_from_token(authorization)
-        
+
         conn = await get_database_connection()
-        
+
         # Check if cluster exists
         cluster = await conn.fetchrow("SELECT id, name FROM haproxy_clusters WHERE id = $1", cluster_id)
         if not cluster:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail=f"Cluster {cluster_id} not found")
-        
+
+        # Bulgu #79 — validate cluster access (admins bypass).
+        await validate_user_cluster_access(current_user['id'], cluster_id, conn)
+
         # Get all pending config versions for this cluster (CRITICAL: Include metadata for rollback!)
         pending_versions = await conn.fetch("""
-            SELECT id, version_name, metadata FROM config_versions 
+            SELECT id, version_name, metadata FROM config_versions
             WHERE cluster_id = $1 AND status = 'PENDING'
         """, cluster_id)
         
@@ -4653,9 +5064,31 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                 # Check for bulk snapshots (bulk import, restore)
                 bulk_snapshots = metadata.get('bulk_snapshots', [])
                 if bulk_snapshots:
-                    # Bulk entity rollback
-                    logger.info(f"REJECT ROLLBACK: Processing bulk snapshot with {len(bulk_snapshots)} entities")
-                    for snapshot_wrapper in bulk_snapshots:
+                    # R18c audit fix (round 1 #6): walk bulk snapshots
+                    # in REVERSE creation order. The wizard appends in
+                    # the order backend → servers → ssl_certificate
+                    # → HTTP frontend → HTTPS frontend (which
+                    # references the cert via `ssl_certificate_id` /
+                    # `ssl_certificate_ids`). Pre-fix the rollback
+                    # walked forward and tried to DELETE the cert
+                    # BEFORE the frontend that referenced it. With
+                    # deployments that have an FK on
+                    # `frontends.ssl_certificate_id` (added in
+                    # ensure_frontends_ssl_columns over time), the
+                    # cert delete fired a FK violation and the
+                    # rollback aborted, leaving the wizard's HTTPS
+                    # frontend stranded as a CREATE without a
+                    # rollback peer. Reversing the iteration restores
+                    # the natural delete order (children before
+                    # parents) so a strict FK schema rolls back
+                    # cleanly. For deployments without the FK the
+                    # change is a behaviour-preserving no-op.
+                    snapshot_iter = list(reversed(bulk_snapshots))
+                    logger.info(
+                        f"REJECT ROLLBACK: Processing bulk snapshot with "
+                        f"{len(bulk_snapshots)} entities (reverse-order)"
+                    )
+                    for snapshot_wrapper in snapshot_iter:
                         entity_snap = snapshot_wrapper.get('entity_snapshot')
                         if entity_snap:
                             # SSL entity rollback in bulk: Always rollback (Auto-Reject handles cross-cluster)
@@ -4712,13 +5145,33 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
             be_ids = []
             srv_ids = []
             ssl_ids = []
-            bulk_import_entity_ids = {"frontends": [], "backends": [], "servers": []}
+            bulk_import_entity_ids = {
+                "frontends": [],
+                "backends": [],
+                "servers": [],
+                "letsencrypt_orders": [],
+                # R18 audit fix: wizard upload-mode hosts create a NEW
+                # ssl_certificates row and add a snapshot for it. Pre-R18
+                # this list omitted ssl_certificate, so reject left an
+                # orphan SSL row + PEM material on disk while the
+                # frontend/backend got cleaned up. Symmetrical handling
+                # is required for atomic wizard rollback.
+                "ssl_certificates": [],
+            }
             import re
             for v in pending_versions:
                 # CRITICAL FIX: Detect bulk import versions (bulk-import-*, restore-*)
+                # v1.5.0: also covers wizard-created versions:
+                #   * bulk-site-create-*           — current naming (post-rename)
+                #   * bulk-proxied-host-create-*   — legacy naming (pre-rename),
+                #                                    kept so historical APPLIED
+                #                                    versions still reject cleanly
+                # M4/L11.
                 is_bulk_version = (
-                    v['version_name'].startswith('bulk-import-') or 
-                    v['version_name'].startswith('restore-')
+                    v['version_name'].startswith('bulk-import-') or
+                    v['version_name'].startswith('restore-') or
+                    v['version_name'].startswith('bulk-site-create-') or
+                    v['version_name'].startswith('bulk-proxied-host-create-')
                 )
                 
                 if is_bulk_version:
@@ -4746,6 +5199,20 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                                     bulk_import_entity_ids["backends"].append(entity_id)
                                 elif entity_type == "server":
                                     bulk_import_entity_ids["servers"].append(entity_id)
+                                elif entity_type == "letsencrypt_order":
+                                    # v1.5.0: wizard's staged ACME order for the new
+                                    # site. Reject path must clean it up so the user
+                                    # is not left with a dangling wizard_staged
+                                    # order pointing at a frontend that no longer
+                                    # exists. (R43/M27)
+                                    bulk_import_entity_ids["letsencrypt_orders"].append(entity_id)
+                                elif entity_type == "ssl_certificate":
+                                    # R18 audit fix: track for force-delete
+                                    # parity with frontends/backends/servers.
+                                    # Without this the wizard's upload-mode
+                                    # cert row is left orphaned after a
+                                    # rejected wizard PENDING version.
+                                    bulk_import_entity_ids["ssl_certificates"].append(entity_id)
                 else:
                     # Normal entity-specific version (frontend-5-update, backend-3-create, etc.)
                     m1 = re.search(r'^frontend-(\d+)-', v['version_name'])
@@ -4823,7 +5290,13 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                         rejected_count += total_auto_rejected
             
             # CRITICAL FIX: Verify bulk import entities were properly rolled back (deleted)
-            if bulk_import_entity_ids["frontends"] or bulk_import_entity_ids["backends"] or bulk_import_entity_ids["servers"]:
+            if (
+                bulk_import_entity_ids["frontends"]
+                or bulk_import_entity_ids["backends"]
+                or bulk_import_entity_ids["servers"]
+                or bulk_import_entity_ids["letsencrypt_orders"]
+                or bulk_import_entity_ids["ssl_certificates"]
+            ):
                 # Check if bulk import entities still exist (rollback failed)
                 remaining_fe = await conn.fetchval("""
                     SELECT COUNT(*) FROM frontends 
@@ -4839,15 +5312,38 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                     SELECT COUNT(*) FROM backend_servers 
                     WHERE id = ANY($1) AND cluster_id = $2
                 """, bulk_import_entity_ids["servers"], cluster_id) if bulk_import_entity_ids["servers"] else 0
-                
-                total_remaining = remaining_fe + remaining_be + remaining_srv
+
+                # v1.5.0 wizard staged ACME orders are NOT cluster-scoped via cluster_id
+                # column (cluster_ids JSONB). Their pre_apply_snapshot does the
+                # rollback only via metadata. So we treat any matching id-by-id
+                # row that still exists as "remaining" and force delete.
+                remaining_acme = await conn.fetchval("""
+                    SELECT COUNT(*) FROM letsencrypt_orders
+                    WHERE id = ANY($1)
+                """, bulk_import_entity_ids["letsencrypt_orders"]) if bulk_import_entity_ids["letsencrypt_orders"] else 0
+
+                # R18 audit fix: ssl_certificates rows created by the
+                # wizard's upload-mode flow. These are global (not
+                # cluster-scoped via the cluster_id column directly —
+                # the join lives in ssl_certificate_clusters), so we
+                # match by id only.
+                remaining_ssl = await conn.fetchval("""
+                    SELECT COUNT(*) FROM ssl_certificates
+                    WHERE id = ANY($1)
+                """, bulk_import_entity_ids["ssl_certificates"]) if bulk_import_entity_ids["ssl_certificates"] else 0
+
+                total_remaining = (
+                    remaining_fe + remaining_be + remaining_srv
+                    + remaining_acme + remaining_ssl
+                )
                 
                 if total_remaining > 0:
                     # CRITICAL: Bulk import entities were NOT deleted by rollback!
                     # This is a data corruption - entities should have been deleted
                     logger.error(
                         f"REJECT ROLLBACK FAILED: {total_remaining} bulk import entities still exist "
-                        f"(fe={remaining_fe}, be={remaining_be}, srv={remaining_srv}). "
+                        f"(fe={remaining_fe}, be={remaining_be}, srv={remaining_srv}, "
+                        f"acme={remaining_acme}). "
                         f"Expected 0 after rollback DELETE. This indicates rollback failure."
                     )
                     
@@ -4873,9 +5369,42 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                             WHERE id = ANY($1) AND cluster_id = $2
                         """, bulk_import_entity_ids["servers"], cluster_id)
                         logger.warning(f"REJECT CLEANUP: Force deleted {deleted_srv} orphan servers from failed bulk import")
+
+                    # v1.5.0 (R43/M27): wizard-staged ACME orders. Cascade
+                    # also removes acme_challenges (ON DELETE CASCADE).
+                    if bulk_import_entity_ids["letsencrypt_orders"]:
+                        deleted_acme = await conn.execute("""
+                            DELETE FROM letsencrypt_orders
+                            WHERE id = ANY($1)
+                        """, bulk_import_entity_ids["letsencrypt_orders"])
+                        logger.warning(
+                            f"REJECT CLEANUP: Force deleted {deleted_acme} wizard-staged "
+                            f"letsencrypt_orders from failed bulk import"
+                        )
+
+                    # R18 audit fix: wizard upload-mode ssl_certificates
+                    # rows. ON DELETE CASCADE on ssl_certificate_clusters
+                    # cleans the junction; auto_renew=FALSE was already
+                    # applied above for safety.
+                    if bulk_import_entity_ids["ssl_certificates"]:
+                        deleted_ssl = await conn.execute("""
+                            DELETE FROM ssl_certificates
+                            WHERE id = ANY($1)
+                        """, bulk_import_entity_ids["ssl_certificates"])
+                        logger.warning(
+                            f"REJECT CLEANUP: Force deleted {deleted_ssl} wizard "
+                            f"ssl_certificates from failed bulk import"
+                        )
                 else:
+                    total_tracked = (
+                        len(bulk_import_entity_ids["frontends"])
+                        + len(bulk_import_entity_ids["backends"])
+                        + len(bulk_import_entity_ids["servers"])
+                        + len(bulk_import_entity_ids["letsencrypt_orders"])
+                        + len(bulk_import_entity_ids["ssl_certificates"])
+                    )
                     logger.info(
-                        f"REJECT ROLLBACK SUCCESS: All {len(bulk_import_entity_ids['frontends']) + len(bulk_import_entity_ids['backends']) + len(bulk_import_entity_ids['servers'])} "
+                        f"REJECT ROLLBACK SUCCESS: All {total_tracked} "
                         f"bulk import entities were properly deleted"
                     )
                     
@@ -4901,7 +5430,10 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
                 # ADDITIONAL SAFETY: Check if we just rejected bulk import versions
                 # If yes, DO NOT run final cleanup (bulk entities should already be deleted)
                 has_bulk_versions = any(
-                    v['version_name'].startswith('bulk-import-') or v['version_name'].startswith('restore-')
+                    v['version_name'].startswith('bulk-import-')
+                    or v['version_name'].startswith('restore-')
+                    or v['version_name'].startswith('bulk-site-create-')  # v1.5.0 (current naming)
+                    or v['version_name'].startswith('bulk-proxied-host-create-')  # v1.5.0 legacy
                     for v in pending_versions
                 )
                 

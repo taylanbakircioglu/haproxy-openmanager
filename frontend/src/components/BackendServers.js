@@ -16,6 +16,7 @@ import axios from 'axios';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useCluster } from '../contexts/ClusterContext';
 import { VersionHistory } from './VersionHistory';
+import { extractApiError } from '../utils/apiError';
 
 // Error Boundary Component
 class BackendErrorBoundary extends React.Component {
@@ -59,7 +60,7 @@ const { Text, Title } = Typography;
 
 const BackendServers = () => {
   const { token } = theme.useToken();
-  const { selectedCluster } = useCluster();
+  const { selectedCluster, loading: clustersLoading } = useCluster();
   const navigate = useNavigate();
   const location = useLocation();
   const [backends, setBackends] = useState([]);
@@ -492,7 +493,7 @@ const BackendServers = () => {
           okType: 'primary'
         });
       } else {
-        message.error(`Failed to apply changes: ${error.response?.data?.message || error.response?.data?.detail || error.message}`);
+        message.error(`Failed to apply changes: ${extractApiError(error, error.message)}`);
       }
     } finally {
       setApplyLoading(false);
@@ -642,7 +643,7 @@ const BackendServers = () => {
           fetchBackends();
           checkPendingChanges();
         } catch (error) {
-          const errorMsg = error.response?.data?.detail || error.message;
+          const errorMsg = extractApiError(error, error.message);
           message.error(
             <div>
               <div><strong>Failed to delete backend</strong></div>
@@ -693,7 +694,7 @@ const BackendServers = () => {
           } catch (error) {
             errorCount++;
             const backend = backends.find(b => b.id === backendId);
-            const errorMsg = error.response?.data?.detail || error.message;
+            const errorMsg = extractApiError(error, error.message);
             errors.push(`${backend?.name || backendId}: ${errorMsg}`);
           }
         }
@@ -817,7 +818,7 @@ const BackendServers = () => {
           fetchBackends();
     checkPendingChanges();
     } catch (error) {
-      const errorMsg = error.response?.data?.detail || error.message;
+      const errorMsg = extractApiError(error, error.message);
       message.error(
         <div>
           <div><strong>Failed to save backend</strong></div>
@@ -916,7 +917,7 @@ const BackendServers = () => {
       
       fetchBackends();
     } catch (error) {
-      const errorMsg = error.response?.data?.detail || error.message;
+      const errorMsg = extractApiError(error, error.message);
       message.error(
         <div>
           <div><strong>Failed to delete server</strong></div>
@@ -937,10 +938,35 @@ const BackendServers = () => {
 
     setSubmittingServer(true);
     try {
-      // Don't include cluster_id - backend endpoint gets it from the backend record
+      // R18c audit fix (round 2 #2 — KRITIK data integrity): when
+      // the operator toggles `ssl_enabled` from true to false, the
+      // SSL Form.Items are unmounted from the modal and Ant Design
+      // does NOT include their values in `values` on submit. The
+      // backend PUT only updates fields PRESENT in the payload, so
+      // the existing DB row keeps its stale ssl_certificate_id /
+      // ssl_verify / ssl_sni / etc. — HAProxy then renders a
+      // server line with `ssl-no-verify` style flags but with the
+      // old certificate path, producing inconsistent (and often
+      // broken) backend connections. Force the SSL fields to
+      // explicit null when ssl_enabled is false so the PUT clears
+      // them in the DB.
       const requestData = {
-        ...values
+        ...values,
       };
+      if (!requestData.ssl_enabled) {
+        for (const f of [
+          'ssl_certificate_id',
+          'ssl_verify',
+          'ssl_sni',
+          'ssl_min_ver',
+          'ssl_max_ver',
+          'ssl_ciphers',
+        ]) {
+          if (!(f in requestData) || requestData[f] === undefined) {
+            requestData[f] = null;
+          }
+        }
+      }
 
       let response;
       if (editingServer) {
@@ -1035,7 +1061,7 @@ const BackendServers = () => {
       fetchBackends();
       checkPendingChanges();
     } catch (error) {
-      const errorMsg = error.response?.data?.detail || error.message;
+      const errorMsg = extractApiError(error, error.message);
       message.error(
         <div>
           <div><strong>Failed to save server</strong></div>
@@ -1061,7 +1087,7 @@ const BackendServers = () => {
       checkPendingChanges(); // Check for pending changes after toggle
     } catch (error) {
       console.error('🔄 FRONTEND DEBUG: API error:', error);
-      const errorMsg = error.response?.data?.detail || error.message;
+      const errorMsg = extractApiError(error, error.message);
       message.error('Failed to toggle server: ' + errorMsg);
     }
   };
@@ -1460,7 +1486,38 @@ const BackendServers = () => {
   };
 
   // Show empty state when no cluster is selected
+  //
+  // Phase J audit fix #6 — distinguish "still loading" from "operator
+  // hasn't picked a cluster". During the in-flight fetch (mount,
+  // exponential-backoff retry) `selectedCluster` is null but the
+  // operator is NOT actually missing a cluster — the data just hasn't
+  // arrived yet. Render a neutral "Loading clusters…" affordance
+  // until the fetch settles, only then surface the empty-state CTA.
   if (!selectedCluster) {
+    if (clustersLoading) {
+      return (
+        <div>
+          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+            <Col span={12}>
+              <Title level={2} style={{ margin: 0 }}>
+                <CloudServerOutlined style={{ marginRight: 8, color: '#1890ff' }} />
+                Backend & Server Management
+              </Title>
+            </Col>
+          </Row>
+
+          <Card style={{ textAlign: 'center', padding: '60px 20px' }}>
+            <Spin size="large" />
+            <Title level={3} style={{ color: '#595959', marginTop: '24px', marginBottom: '8px' }}>
+              Loading clusters…
+            </Title>
+            <Text style={{ color: '#8c8c8c', fontSize: '16px' }}>
+              Fetching the cluster list. Backend inventory will load automatically once a cluster is selected.
+            </Text>
+          </Card>
+        </div>
+      );
+    }
     return (
       <div>
         <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>

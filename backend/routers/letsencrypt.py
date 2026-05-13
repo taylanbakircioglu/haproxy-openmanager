@@ -61,10 +61,19 @@ class CertificateRequest(BaseModel):
 
 @router.get("/accounts")
 async def list_accounts(authorization: str = Header(None)):
+    """v1.5.0 R12: list of LE accounts is now READ-ONLY for any
+    authenticated user. Account *creation* / deletion remains admin-only.
+
+    The wizard ('New Site' / ACME mode) needs this list so the
+    user can pick which LE account to bill against when more than one is
+    configured. Previously the wizard silently dropped the selector
+    because non-admin users got 403 here (Promise.allSettled swallowed
+    the failure).
+    """
     from auth_middleware import get_current_user_from_token
-    current_user = await get_current_user_from_token(authorization)
-    if not current_user.get('is_admin', False):
-        raise HTTPException(status_code=403, detail="Admin access required")
+    # Authentication still required — get_current_user_from_token raises
+    # 401 if the token is missing/invalid.
+    await get_current_user_from_token(authorization)
     conn = await get_database_connection()
     try:
         rows = await conn.fetch(
@@ -705,11 +714,31 @@ async def _complete_certificate(order_id: int) -> dict:
         except Exception as parse_err:
             logger.warning(f"Could not parse ACME certificate metadata: {parse_err}")
 
-        existing_cert = await conn.fetchrow("""
-            SELECT id FROM ssl_certificates
-            WHERE primary_domain = $1 AND source = 'letsencrypt' AND is_active = TRUE
-            ORDER BY created_at DESC LIMIT 1
-        """, primary_domain)
+        # v1.5.0 (Bulgu #4 fix): a wizard-staged order ALWAYS expects a fresh
+        # cert + post-completion actions to fire. If `post_completion_actions`
+        # is non-empty we must NOT match against a manually-issued cert that
+        # happens to share the same primary_domain — that would silently
+        # swallow the HTTPS frontend creation and leave the wizard host
+        # broken.
+        pca_raw_for_match = order.get("post_completion_actions")
+        try:
+            _pca_check = (
+                json.loads(pca_raw_for_match)
+                if isinstance(pca_raw_for_match, str) and pca_raw_for_match.strip()
+                else (pca_raw_for_match or [])
+            )
+        except Exception:
+            _pca_check = []
+        is_wizard_order = bool(_pca_check)
+
+        if is_wizard_order:
+            existing_cert = None
+        else:
+            existing_cert = await conn.fetchrow("""
+                SELECT id FROM ssl_certificates
+                WHERE primary_domain = $1 AND source = 'letsencrypt' AND is_active = TRUE
+                ORDER BY created_at DESC LIMIT 1
+            """, primary_domain)
 
         is_renewal = existing_cert is not None
 
@@ -825,6 +854,47 @@ async def _complete_certificate(order_id: int) -> dict:
         if is_renewal and clusters_succeeded:
             await _auto_apply_renewal(cert_id, clusters_succeeded)
 
+        # ====================================================================
+        # v1.5.0 Feature B (Issue #14): post_completion_actions JSONB support.
+        #
+        # The wizard staged this order with a deferred HTTPS-frontend create
+        # request. Now that the cert is downloaded we execute it.
+        #
+        # M2 guard: NEVER run on renewal — renewing a wizard-issued cert
+        # must not re-create the HTTPS frontend.
+        # M3 cancellation race: re-fetch the order's status before exec.
+        # M21/R35 collision re-check: re-validate bind_port collision.
+        # M24 conn reuse: pass our existing transaction conn into record_event.
+        # M26/R42 atomicity: wrap each action in its own conn.transaction().
+        # ====================================================================
+        post_completion_outcomes: list = []
+        if not is_renewal:
+            try:
+                pca_raw = order.get("post_completion_actions")
+                if isinstance(pca_raw, str) and pca_raw.strip():
+                    pca = json.loads(pca_raw)
+                elif isinstance(pca_raw, list):
+                    pca = pca_raw
+                else:
+                    pca = []
+            except Exception:
+                pca = []
+
+            if pca:
+                # M3: re-check status to detect a cancellation race
+                fresh = await conn.fetchrow(
+                    "SELECT status FROM letsencrypt_orders WHERE id = $1", order_id
+                )
+                if fresh and fresh["status"] == "valid":
+                    post_completion_outcomes = await _execute_post_completion_actions(
+                        conn, order_id, pca, cert_id
+                    )
+                else:
+                    logger.info(
+                        f"[ACME] Skipping post_completion_actions for order {order_id}: "
+                        f"status changed to {fresh and fresh['status']}"
+                    )
+
         msg = "Certificate renewed and applied" if is_renewal else "Certificate issued (pending Apply)"
         if cluster_errors:
             msg += f" ({len(cluster_errors)} cluster(s) failed: see cluster_errors)"
@@ -835,6 +905,7 @@ async def _complete_certificate(order_id: int) -> dict:
             "auto_applied": is_renewal,
             "clusters_succeeded": clusters_succeeded,
             "cluster_errors": cluster_errors,
+            "post_completion_outcomes": post_completion_outcomes,
         }
     finally:
         if lock_held:
@@ -843,6 +914,405 @@ async def _complete_certificate(order_id: int) -> dict:
             except Exception as unlock_err:
                 logger.warning(f"ACME: failed to release advisory lock for order {order_id}: {unlock_err}")
         await close_database_connection(conn)
+
+
+async def _execute_post_completion_actions(
+    conn,
+    order_id: int,
+    actions: list,
+    cert_id: int,
+) -> list:
+    """v1.5.0 Feature B: execute the deferred actions stored on a wizard
+    ACME order's post_completion_actions JSONB.
+
+    Each action is independently wrapped in conn.transaction() (R42/M26),
+    has its own try/except (per-action errors do NOT block other actions),
+    and an executed_at idempotency flag.
+
+    Auto-apply is triggered if any executed action set _auto_apply=true on
+    its frontend_config.
+    """
+    from utils.activity_log import record_event
+    from services.frontend_service import (
+        check_bind_port_collision,
+        create_frontend_row,
+    )
+
+    outcomes = []
+    auto_apply_user_ids: set = set()
+    auto_apply_cluster_ids: set = set()
+
+    for idx, action in enumerate(actions):
+        if not isinstance(action, dict):
+            outcomes.append({"index": idx, "status": "skipped", "reason": "not a dict"})
+            continue
+
+        if action.get("executed_at"):
+            outcomes.append({"index": idx, "status": "skipped", "reason": "already executed"})
+            continue
+
+        action_type = action.get("type")
+        try:
+            async with conn.transaction():
+                if action_type == "create_frontend":
+                    fe_cfg = action.get("frontend_config") or {}
+                    cluster_id = fe_cfg.get("cluster_id")
+                    bind_address = fe_cfg.get("bind_address", "*")
+                    bind_port = fe_cfg.get("bind_port", 443)
+                    fe_name = fe_cfg.get("name") or f"fe-{order_id}-https"
+
+                    if not cluster_id:
+                        raise ValueError("frontend_config.cluster_id required")
+
+                    # Bulgu #52 (round-18 audit) — verify the cluster still
+                    # exists before any further work.
+                    #
+                    # `letsencrypt_orders.cluster_ids` is JSONB (not an FK),
+                    # so an operator can delete a cluster between
+                    # `wizard_staged` and post-completion. With the previous
+                    # code path:
+                    #
+                    #   - check_bind_port_collision would find no frontends
+                    #     for the missing cluster (returns None — no
+                    #     collision)
+                    #   - the backend-existence check would correctly flag
+                    #     `backend_missing` IF a default_backend was set,
+                    #     but actions without `default_backend` (legacy
+                    #     payloads, TCP-mode wizard runs) would proceed to
+                    #     create_frontend_row pointing at a dead
+                    #     cluster_id, then fail with a FK violation that
+                    #     surfaces only in the logs.
+                    #
+                    # Catch this upfront with the same shape as the
+                    # `backend_missing` outcome so the operator sees a
+                    # clear "cluster removed — re-run the wizard" message
+                    # in the order's activity log instead of a generic
+                    # FK error.
+                    cluster_row = await conn.fetchrow(
+                        "SELECT id FROM haproxy_clusters "
+                        "WHERE id = $1 AND is_active = TRUE",
+                        cluster_id,
+                    )
+                    if cluster_row is None:
+                        action["error"] = "cluster_missing"
+                        action["error_detail"] = (
+                            f"Cluster id={cluster_id} no longer exists "
+                            "(or was deactivated) — the wizard's target "
+                            "cluster was removed after the ACME order "
+                            "was staged. Cert was issued but no HTTPS "
+                            "frontend was created. Re-run the wizard "
+                            "against an active cluster, or assign the "
+                            "issued cert to a frontend manually."
+                        )
+                        await record_event(
+                            order_id,
+                            "post_completion_action_skipped",
+                            severity="ERROR",
+                            message=action["error_detail"],
+                            details={
+                                "action_index": idx,
+                                "type": action_type,
+                                "missing_cluster_id": cluster_id,
+                            },
+                            conn=conn,
+                        )
+                        outcomes.append({
+                            "index": idx, "status": "error",
+                            "reason": "cluster_missing",
+                            "detail": action["error_detail"],
+                        })
+                        continue
+
+                    # M21/R35: re-check port collision pre-INSERT
+                    collision = await check_bind_port_collision(
+                        conn, cluster_id, bind_address, bind_port
+                    )
+                    if collision:
+                        action["error"] = "port_collision"
+                        action["error_detail"] = (
+                            f"bind {bind_address}:{bind_port} already used by frontend id={collision}"
+                        )
+                        await record_event(
+                            order_id,
+                            "post_completion_action_skipped",
+                            severity="ERROR",
+                            message=action["error_detail"],
+                            details={"action_index": idx, "type": action_type},
+                            conn=conn,
+                        )
+                        outcomes.append({
+                            "index": idx, "status": "error",
+                            "reason": "port_collision",
+                            "detail": action["error_detail"],
+                        })
+                        continue
+
+                    # Bulgu #31 (round-13 audit) — referenced default_backend
+                    # MUST still exist before we insert the deferred HTTPS
+                    # frontend. The wizard's HTTP frontend + backend are
+                    # created at submit time and become part of the
+                    # `bulk-site-create-<ts>` config version's snapshot. If
+                    # the operator REJECTS that version between apply and
+                    # post-completion, the snapshot rollback deletes the
+                    # backend rows. `create_frontend_row` would still
+                    # happily INSERT this HTTPS frontend with
+                    # `default_backend='be_xxx'` — and HAProxy then refuses
+                    # to load the config at the next apply with:
+                    #
+                    #     [ALERT] : Proxy 'fe_xxx-https' references unknown
+                    #               backend 'be_xxx'.
+                    #
+                    # Operator sees an unrecoverable "config parse error"
+                    # AFTER the cert was already issued and the order
+                    # marked 'valid' — leaving an orphan cert and a
+                    # locked-up apply queue. Bail early with a clear
+                    # message so the operator can re-run the wizard or
+                    # create the HTTPS frontend manually pointing at a
+                    # different backend.
+                    default_be_name = fe_cfg.get("default_backend")
+                    if default_be_name:
+                        be_row = await conn.fetchrow(
+                            "SELECT id FROM backends "
+                            "WHERE cluster_id = $1 AND name = $2",
+                            cluster_id,
+                            default_be_name,
+                        )
+                        if be_row is None:
+                            action["error"] = "backend_missing"
+                            action["error_detail"] = (
+                                f"default_backend='{default_be_name}' no "
+                                f"longer exists in cluster {cluster_id} "
+                                "— the wizard's bulk-site-create version "
+                                "was likely rejected after issuance. "
+                                "Cert was issued but no HTTPS frontend "
+                                "was created. Re-run the wizard or "
+                                "create the HTTPS frontend manually."
+                            )
+                            await record_event(
+                                order_id,
+                                "post_completion_action_skipped",
+                                severity="ERROR",
+                                message=action["error_detail"],
+                                details={
+                                    "action_index": idx,
+                                    "type": action_type,
+                                    "missing_backend": default_be_name,
+                                },
+                                conn=conn,
+                            )
+                            outcomes.append({
+                                "index": idx, "status": "error",
+                                "reason": "backend_missing",
+                                "detail": action["error_detail"],
+                            })
+                            continue
+
+                    # v1.5.0 R12 — Pydantic-light shim with FULL field
+                    # surface. create_frontend_row reads every attribute
+                    # via getattr(payload, X, None), so we MUST forward
+                    # every advanced TLS / HSTS / header field the wizard
+                    # may have stored on frontend_config. Earlier versions
+                    # of this shim only listed a handful of fields, which
+                    # silently dropped HSTS / ALPN / TLS-version /
+                    # compression preferences for ACME-issued HTTPS
+                    # frontends — visible to the user as "I enabled HSTS
+                    # but the frontend doesn't have it" after the LE order
+                    # completed.
+                    from types import SimpleNamespace
+                    fe_payload = SimpleNamespace(
+                        # core
+                        name=fe_name,
+                        bind_address=bind_address,
+                        bind_port=bind_port,
+                        default_backend=fe_cfg.get("default_backend"),
+                        mode=fe_cfg.get("mode", "http"),
+                        ssl_enabled=True,
+                        # routing rules
+                        acl_rules=fe_cfg.get("acl_rules", []),
+                        redirect_rules=fe_cfg.get("redirect_rules", []),
+                        use_backend_rules=fe_cfg.get("use_backend_rules", []),
+                        # tcp-mode
+                        tcp_request_rules=fe_cfg.get("tcp_request_rules"),
+                        # timeouts + capacity
+                        timeout_client=fe_cfg.get("timeout_client"),
+                        timeout_http_request=fe_cfg.get("timeout_http_request"),
+                        maxconn=fe_cfg.get("maxconn"),
+                        rate_limit=fe_cfg.get("rate_limit"),
+                        # observability + traffic shaping
+                        compression=fe_cfg.get("compression"),
+                        log_separate=fe_cfg.get("log_separate"),
+                        monitor_uri=fe_cfg.get("monitor_uri"),
+                        # header injection (HSTS lands here)
+                        request_headers=fe_cfg.get("request_headers"),
+                        response_headers=fe_cfg.get("response_headers"),
+                        # raw HAProxy options (free-form lines)
+                        options=fe_cfg.get("options"),
+                        # advanced TLS — HAProxy 2.4+ bind directives
+                        ssl_alpn=fe_cfg.get("ssl_alpn"),
+                        ssl_npn=fe_cfg.get("ssl_npn"),
+                        ssl_ciphers=fe_cfg.get("ssl_ciphers"),
+                        ssl_ciphersuites=fe_cfg.get("ssl_ciphersuites"),
+                        ssl_min_ver=fe_cfg.get("ssl_min_ver"),
+                        ssl_max_ver=fe_cfg.get("ssl_max_ver"),
+                        ssl_strict_sni=fe_cfg.get("ssl_strict_sni"),
+                        # R17 minimum-parity: ssl_verify (mTLS client auth)
+                        # was already in the SimpleNamespace forwarding list
+                        # but the wizard's SSLChoice now actually populates
+                        # it. No code change here, but call out the contract:
+                        # SimpleNamespace.ssl_verify must reach
+                        # create_frontend_row's HAProxy bind generation.
+                        ssl_verify=fe_cfg.get("ssl_verify"),
+                        ssl_port=fe_cfg.get("ssl_port"),
+                        ssl_cert_path=fe_cfg.get("ssl_cert_path"),
+                        ssl_cert=fe_cfg.get("ssl_cert"),
+                    )
+                    new_fe_id = await create_frontend_row(
+                        conn,
+                        fe_payload,
+                        cluster_id,
+                        ssl_certificate_id=cert_id,
+                        ssl_enabled=True,
+                        mark_pending=True,
+                    )
+
+                    action["executed_at"] = datetime.utcnow().isoformat() + "Z"
+                    action["created_frontend_id"] = new_fe_id
+
+                    # Persist the executed_at flag back to the order (idempotency)
+                    await conn.execute(
+                        """
+                        UPDATE letsencrypt_orders
+                        SET post_completion_actions = $1::jsonb, updated_at = NOW()
+                        WHERE id = $2
+                        """,
+                        json.dumps(actions),
+                        order_id,
+                    )
+
+                    # Generate a fresh PENDING config_version so the new
+                    # HTTPS frontend can be applied.
+                    try:
+                        # R18c audit fix (round 1 #4 — KRITIK): pass
+                        # the active transaction connection into the
+                        # config generator. Pre-fix the call obtained
+                        # a SECOND pooled connection, which under
+                        # PostgreSQL READ COMMITTED cannot see the
+                        # uncommitted INSERT that just created the
+                        # HTTPS frontend in this same transaction.
+                        # Result: the new HTTPS frontend was silently
+                        # OMITTED from the post-completion
+                        # config_versions snapshot, so when the
+                        # operator (or auto-apply) deployed the
+                        # ACME-completed config, HAProxy reloaded
+                        # WITHOUT the HTTPS bind for the freshly-
+                        # issued cert. Operator saw "ACME success"
+                        # but the cert never went live until the
+                        # next manual config consolidation.
+                        from services.haproxy_config import generate_haproxy_config_for_cluster
+                        cfg = await generate_haproxy_config_for_cluster(cluster_id, conn)
+                        import hashlib
+                        cfg_hash = hashlib.sha256(cfg.encode()).hexdigest()
+                        ts = int(time.time())
+                        version_name = f"acme-post-https-{cert_id}-{ts}"
+                        await conn.execute(
+                            """
+                            INSERT INTO config_versions (
+                                cluster_id, version_name, config_content, checksum,
+                                is_active, status, description
+                            ) VALUES ($1, $2, $3, $4, FALSE, 'PENDING', $5)
+                            """,
+                            cluster_id,
+                            version_name,
+                            cfg,
+                            cfg_hash,
+                            f"ACME post-completion: HTTPS frontend for cert {cert_id}",
+                        )
+                    except Exception as cfg_err:
+                        logger.warning(
+                            f"[ACME] post_completion config_version creation failed: {cfg_err}"
+                        )
+
+                    if fe_cfg.get("_auto_apply"):
+                        auto_apply_cluster_ids.add(cluster_id)
+                        if fe_cfg.get("_user_id"):
+                            auto_apply_user_ids.add(fe_cfg["_user_id"])
+
+                    await record_event(
+                        order_id,
+                        "post_completion_action_executed",
+                        severity="INFO",
+                        message=f"Created HTTPS frontend '{fe_name}' from post_completion_actions",
+                        details={"action_index": idx, "frontend_id": new_fe_id},
+                        conn=conn,
+                    )
+                    outcomes.append({
+                        "index": idx, "status": "ok",
+                        "frontend_id": new_fe_id,
+                        "type": action_type,
+                    })
+                else:
+                    outcomes.append({
+                        "index": idx, "status": "skipped",
+                        "reason": f"unknown action type: {action_type}",
+                    })
+        except Exception as action_err:
+            logger.error(f"[ACME] post_completion action {idx} failed: {action_err}", exc_info=True)
+            outcomes.append({"index": idx, "status": "error", "reason": str(action_err)})
+            try:
+                await record_event(
+                    order_id,
+                    "post_completion_action_failed",
+                    severity="ERROR",
+                    message=str(action_err)[:500],
+                    details={"action_index": idx, "type": action_type},
+                    conn=conn,
+                )
+            except Exception:
+                pass
+
+    # Auto-apply if requested
+    if auto_apply_cluster_ids:
+        try:
+            from services.apply_service import apply_cluster_pending
+            for cid in auto_apply_cluster_ids:
+                # Order's created_by lookup with admin fallback (M23/M46)
+                user_for_apply = None
+                if auto_apply_user_ids:
+                    user_for_apply = next(iter(auto_apply_user_ids))
+                if user_for_apply is None:
+                    order_row = await conn.fetchrow(
+                        "SELECT created_by FROM letsencrypt_orders WHERE id = $1",
+                        order_id,
+                    )
+                    if order_row:
+                        user_for_apply = order_row["created_by"]
+                # apply_service handles None via is_admin fallback
+                try:
+                    apply_res = await apply_cluster_pending(cid, user_id=user_for_apply)
+                    await record_event(
+                        order_id,
+                        "post_completion_auto_apply",
+                        severity="INFO",
+                        message=f"Auto-applied cluster {cid} after post_completion_actions",
+                        details={"latest_version": apply_res.get("latest_version")},
+                        conn=conn,
+                    )
+                except Exception as apply_err:
+                    logger.error(
+                        f"[ACME] post_completion auto-apply for cluster {cid} failed: {apply_err}"
+                    )
+                    await record_event(
+                        order_id,
+                        "post_completion_auto_apply_failed",
+                        severity="ERROR",
+                        message=str(apply_err)[:500],
+                        details={"cluster_id": cid},
+                        conn=conn,
+                    )
+        except Exception as outer_apply_err:
+            logger.error(f"[ACME] post_completion auto-apply outer failure: {outer_apply_err}")
+
+    return outcomes
 
 
 async def _auto_apply_renewal(cert_id: int, cluster_ids: list):

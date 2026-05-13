@@ -1,5 +1,5 @@
 from pydantic import BaseModel, validator
-from typing import Optional, List
+from typing import Literal, Optional, List
 
 class ServerConfig(BaseModel):
     server_name: str
@@ -11,7 +11,15 @@ class ServerConfig(BaseModel):
     check_port: Optional[int] = None
     backup_server: bool = False
     ssl_enabled: bool = False
-    ssl_verify: Optional[str] = None
+    # PR-2 (R11.B): tighten to strict Literal aligned with HAProxy's
+    # `server ... ssl verify <none|required>` semantics. Backend-side
+    # `verify optional` is NOT supported by HAProxy (only frontend
+    # bind-side accepts it) — pre-PR-2 the field accepted arbitrary
+    # strings (`'optional'`, `'true'`, etc.) and the generator
+    # rendered them verbatim, producing parser errors. Empty strings
+    # from the React form are coerced to None by
+    # `coerce_ssl_verify_empty_to_none` below.
+    ssl_verify: Optional[Literal["none", "required"]] = None
     ssl_certificate_id: Optional[int] = None  # SSL certificate for backend server
     
     # SSL Advanced Options (server SSL parameters)
@@ -34,11 +42,56 @@ class ServerConfig(BaseModel):
                 raise ValueError(f'Invalid TLS version: {v}. Must be one of: {", ".join(valid_versions)}')
         return v
 
+    @validator('ssl_verify', pre=True)
+    def coerce_ssl_verify_empty_to_none(cls, v):
+        """PR-2 (R11.B): React form Select widgets clear to '' (empty
+        string) but the strict Literal would reject that. Coerce the
+        empty string and the legacy sentinels written by older
+        clients into None. Note: server-side mTLS only accepts
+        ``none`` or ``required`` (HAProxy's `server ... verify`
+        keyword has no `optional` mode); a legacy `'optional'`
+        value is also coerced to None to fail-safe rather than
+        rendering an invalid directive.
+        """
+        if v is None:
+            return None
+        if isinstance(v, str):
+            stripped = v.strip().lower()
+            if stripped in ("", "[]", "{}", "null"):
+                return None
+            if stripped == "none":
+                return "none"
+            if stripped == "required":
+                return "required"
+            if stripped == "optional":
+                # Server-side `verify optional` is invalid HAProxy.
+                # Coerce to None so the generator simply omits the
+                # directive instead of producing a parser-fatal line.
+                return None
+        return v
+
 class BackendConfig(BaseModel):
     name: str
     cluster_id: int
     balance_method: str = 'roundrobin'
     mode: str = 'http'
+
+    @validator('name')
+    def reject_system_prefix(cls, v):
+        # R18 audit fix (round 3 #5): manual backend create previously
+        # accepted leading-underscore names (e.g. `_my_backend`). The
+        # agent's `_should_sync_backend` filter then dropped any such
+        # row from the agent->backend reverse-sync, producing silent
+        # control-plane drift between DB and on-disk haproxy.cfg. The
+        # wizard's BackendStep already rejected this; align the manual
+        # path so the constraint is uniform across entry points.
+        if isinstance(v, str) and v.startswith('_'):
+            raise ValueError(
+                "Backend name must not start with '_' (reserved for "
+                "system-managed entities such as the ACME challenge "
+                "backend)."
+            )
+        return v
     health_check_uri: Optional[str] = None
     health_check_interval: Optional[int] = 2000
     health_check_expected_status: Optional[int] = 200
@@ -56,12 +109,34 @@ class BackendConfig(BaseModel):
     options: Optional[str] = None
     servers: List[ServerConfig] = []
 
-    @validator('health_check_interval', 'timeout_connect', 'timeout_server', 'timeout_queue', 'fullconn')
+    # Bulgu #68 (round-22 audit) — wizard's BackendStep declares
+    # `fullconn: Optional[int] = Field(default=None, ge=0, ...)`
+    # (0 == HAProxy "fullconn disabled" sentinel). The manual
+    # BackendConfig pre-fix used a single `check_positive` that
+    # rejected `<= 0` for ALL of `health_check_interval`,
+    # `timeout_connect`, `timeout_server`, `timeout_queue`, AND
+    # `fullconn` — so a wizard-created backend with
+    # `fullconn=0` (or one persisted before fullconn was
+    # introduced and now defaults to 0) would 422 on every PUT,
+    # even when the operator was only changing the balance
+    # method or adding a server. Same Bulgu #62 "wizard
+    # accepted / manual rejects" lockout pattern.
+    #
+    # Split into two validators: the four timeout/interval fields
+    # keep `> 0` (HAProxy parser hard requirement), while
+    # `fullconn` switches to `>= 0` mirroring the wizard.
+    @validator('health_check_interval', 'timeout_connect', 'timeout_server', 'timeout_queue')
     def check_positive(cls, v):
         if v is not None and v <= 0:
             raise ValueError('Timeout, interval, and connection values must be positive')
         return v
-    
+
+    @validator('fullconn')
+    def check_fullconn_non_negative(cls, v):
+        if v is not None and v < 0:
+            raise ValueError('fullconn must be >= 0 (0 disables the directive)')
+        return v
+
     @validator('health_check_expected_status')
     def check_http_status(cls, v):
         if v is not None and (v < 100 or v > 599):
@@ -72,6 +147,18 @@ class BackendConfigUpdate(BaseModel):
     name: Optional[str] = None
     balance_method: Optional[str] = None
     mode: Optional[str] = None
+
+    @validator('name')
+    def reject_system_prefix_update(cls, v):
+        # R18 audit fix (round 3 #5): rename guard. Without it an
+        # operator could `PUT` a backend's name to `_anything`, which
+        # would then be filtered out by the agent reverse-sync.
+        if v is not None and isinstance(v, str) and v.startswith('_'):
+            raise ValueError(
+                "Backend name must not start with '_' (reserved for "
+                "system-managed entities)."
+            )
+        return v
     health_check_uri: Optional[str] = None
     health_check_interval: Optional[int] = None
     health_check_expected_status: Optional[int] = None
@@ -89,12 +176,21 @@ class BackendConfigUpdate(BaseModel):
     options: Optional[str] = None
     servers: Optional[List[ServerConfig]] = None
 
-    @validator('health_check_interval', 'timeout_connect', 'timeout_server', 'timeout_queue', 'fullconn')
+    # Bulgu #68 (round-22 audit) — same alignment as BackendConfig
+    # above. Update path is where the wizard-created `fullconn=0`
+    # row most often blows up.
+    @validator('health_check_interval', 'timeout_connect', 'timeout_server', 'timeout_queue')
     def check_positive_update(cls, v):
         if v is not None and v <= 0:
             raise ValueError('Timeout, interval, and connection values must be positive')
         return v
-    
+
+    @validator('fullconn')
+    def check_fullconn_non_negative_update(cls, v):
+        if v is not None and v < 0:
+            raise ValueError('fullconn must be >= 0 (0 disables the directive)')
+        return v
+
     @validator('health_check_expected_status')
     def check_http_status_update(cls, v):
         if v is not None and (v < 100 or v > 599):

@@ -37,6 +37,7 @@ import {
 } from '@ant-design/icons';
 import axios from 'axios';
 import { useCluster } from '../contexts/ClusterContext';
+import { extractApiError } from '../utils/apiError';
 
 const { Text, Title, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -60,7 +61,7 @@ const Configuration = () => {
   const timeoutRef = useRef(null);
   const pollCountRef = useRef(0);
   
-  const { selectedCluster } = useCluster();
+  const { selectedCluster, loading: clustersLoading } = useCluster();
   const { token } = theme.useToken();
 
   // Platform configuration
@@ -102,7 +103,7 @@ const Configuration = () => {
       setFilteredAgents(agentsData);
     } catch (error) {
       console.error('Failed to fetch agents:', error);
-      message.error('Failed to fetch agents: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to fetch agents: ' + (extractApiError(error, error.message)));
     } finally {
       setLoading(false);
     }
@@ -273,7 +274,7 @@ const Configuration = () => {
       }
       setConfigLoading(false);
       setProgressPercent(0);
-      message.error('Failed to get configuration: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to get configuration: ' + (extractApiError(error, error.message)));
     }
   }, []);
 
@@ -330,7 +331,7 @@ const Configuration = () => {
     } catch (error) {
       setConfigLoading(false);
       setProgressPercent(0);
-      message.error('Failed to create configuration request: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to create configuration request: ' + (extractApiError(error, error.message)));
     }
   };
 
@@ -426,7 +427,7 @@ const Configuration = () => {
           }
           setConfigLoading(false);
           setProgressPercent(0);
-          message.error('Failed to download configuration: ' + (error.response?.data?.detail || error.message));
+          message.error('Failed to download configuration: ' + (extractApiError(error, error.message)));
           return true;
         }
       };
@@ -450,7 +451,7 @@ const Configuration = () => {
     } catch (error) {
       setConfigLoading(false);
       setProgressPercent(0);
-      message.error('Failed to create configuration request: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to create configuration request: ' + (extractApiError(error, error.message)));
     }
   };
 
@@ -704,12 +705,25 @@ const Configuration = () => {
             }
           >
         {!selectedCluster ? (
-            <Alert
-            message="No Cluster Selected"
-            description="Please select a cluster from the cluster selector above to view its agents."
-            type="warning"
-              showIcon
-          />
+            // Phase J audit fix #6 — show a neutral "Loading…" state
+            // while the ClusterContext is still fetching, otherwise
+            // the operator sees "No Cluster Selected" during the
+            // legitimate post-deploy fetch window.
+            clustersLoading ? (
+              <Alert
+                message="Loading clusters…"
+                description="Fetching the cluster list. Agent inventory will appear automatically once a cluster is selected."
+                type="info"
+                showIcon
+              />
+            ) : (
+              <Alert
+                message="No Cluster Selected"
+                description="Please select a cluster from the cluster selector above to view its agents."
+                type="warning"
+                showIcon
+              />
+            )
         ) : agents.length === 0 && !loading ? (
           <div style={{ 
             textAlign: 'center', 

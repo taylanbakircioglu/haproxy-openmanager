@@ -61,3 +61,4 @@ jobs:
             taylanbakircioglu/haproxy-openmanager-frontend:latest
             taylanbakircioglu/haproxy-openmanager-frontend:${{ steps.version.outputs.TAG }}
             taylanbakircioglu/haproxy-openmanager-frontend:${{ steps.prodversion.outputs.VERSION }}
+

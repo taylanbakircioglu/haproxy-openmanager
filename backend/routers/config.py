@@ -369,11 +369,28 @@ async def get_best_practices(
 async def compare_configurations(
     current_config: str,
     new_config: str,
-    context_lines: int = 3
+    context_lines: int = 3,
+    authorization: str = Header(None),
 ):
-    """Compare two HAProxy configurations and show differences"""
-    
+    """Compare two HAProxy configurations and show differences.
+
+    Bulgu #78 (round-22 audit) — pre-fix this endpoint accepted
+    unauthenticated POSTs with two arbitrary config blobs.
+    While the diff itself is stateless, exposing it without
+    authn:
+      * lets anyone burn CPU on an internal endpoint
+      * leaks the EXISTENCE of the diff endpoint to scanners
+      * permits drive-by use as a side-channel oracle if the
+        difflib output ever surfaces operator-specific data
+        (line numbers, comments, etc.)
+    Require a valid bearer token. Permission gating is
+    deliberately light — any authenticated viewer should still
+    be able to diff configs they're authorised to read.
+    """
     try:
+        from auth_middleware import get_current_user_from_token
+        await get_current_user_from_token(authorization)
+
         import difflib
         
         current_lines = current_config.splitlines(keepends=True)
@@ -735,7 +752,20 @@ async def parse_bulk_config(
             cluster_id=request.cluster_id,
             config_size=len(request.config_content)
         )
-        
+
+        # Bulgu #82 (round-22 audit) — pre-fix this endpoint had
+        # `config.write` permission but NO per-cluster access
+        # check. The downstream `SELECT ... FROM
+        # ssl_certificates WHERE ... cluster_id=$1` leaked
+        # certificate names and IDs from clusters the operator
+        # had no read access to, and the parse result was
+        # designed to feed `bulk_create_entities` (also un-
+        # scoped pre-fix, see same Bulgu) which then wrote
+        # into the target cluster.
+        if request.cluster_id and not is_super_admin:
+            from routers.backend import validate_user_cluster_access
+            await validate_user_cluster_access(current_user['id'], request.cluster_id, conn)
+
         # Parse the configuration
         parse_result = parse_haproxy_config(request.config_content)
         
@@ -1440,8 +1470,17 @@ async def bulk_create_entities(
             frontends_count=len(request.frontends),
             backends_count=len(request.backends)
         )
-        
+
         conn = await get_database_connection()
+
+        # Bulgu #82 (round-22 audit) — see `parse_bulk_config`
+        # above. The write path was the more damaging side of
+        # the same hole: a `config.write`-bearing operator
+        # scoped to cluster 1 could bulk-import an entire
+        # parsed config into cluster 2.
+        if request.cluster_id and not is_super_admin:
+            from routers.backend import validate_user_cluster_access
+            await validate_user_cluster_access(current_user['id'], request.cluster_id, conn)
         
         # BULK IMPORT MVP: Check for pending apply changes
         # Prevent bulk import if there are unapplied changes (conflict prevention)
@@ -2191,7 +2230,12 @@ async def bulk_create_entities(
                         frontend_data.get("ssl_port"),
                         frontend_data.get("ssl_cert_path"),
                         frontend_data.get("ssl_cert"),
-                        frontend_data.get("ssl_verify", "optional"),
+                        # R18b audit fix: bulk-import default mirrors
+                        # the model default. NULL == "omit verify
+                        # directive". Pre-fix imported configs that
+                        # lacked the field silently turned every HTTPS
+                        # bind into `verify optional`.
+                        frontend_data.get("ssl_verify"),
                         frontend_data.get("ssl_alpn"),  # SSL advanced options
                         frontend_data.get("ssl_npn"),
                         frontend_data.get("ssl_ciphers"),

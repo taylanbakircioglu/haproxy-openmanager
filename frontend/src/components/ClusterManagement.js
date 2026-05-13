@@ -9,6 +9,7 @@ import {
   SafetyCertificateOutlined, UsergroupAddOutlined, SearchOutlined, WarningOutlined
 } from '@ant-design/icons';
 import { useCluster } from '../contexts/ClusterContext';
+import { extractApiError } from '../utils/apiError';
 
 const { Option } = Select;
 const { TextArea } = Input;
@@ -172,7 +173,7 @@ const ClusterManagement = () => {
       await deleteCluster(clusterId);
       message.success('Cluster deleted successfully');
     } catch (error) {
-      message.error('Failed to delete cluster: ' + (error.response?.data?.detail || error.message));
+      message.error('Failed to delete cluster: ' + (extractApiError(error, error.message)));
     }
   };
 

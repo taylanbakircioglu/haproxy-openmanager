@@ -3,7 +3,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: backend-hpa
-  namespace: haproxy-openmanager
+  namespace: internal-haproxy-openmanager
   labels:
     app: haproxy-openmanager
     component: backend
@@ -32,7 +32,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: frontend-hpa
-  namespace: haproxy-openmanager
+  namespace: internal-haproxy-openmanager
   labels:
     app: haproxy-openmanager
     component: frontend
@@ -61,7 +61,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: nginx-hpa
-  namespace: haproxy-openmanager
+  namespace: internal-haproxy-openmanager
   labels:
     app: haproxy-openmanager
     component: nginx

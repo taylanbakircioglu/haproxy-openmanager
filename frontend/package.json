@@ -1,6 +1,6 @@
 {
   "name": "haproxy-openmanager-frontend",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "HAProxy Load Balancer Management UI",
   "dependencies": {
     "react": "^18.2.0",

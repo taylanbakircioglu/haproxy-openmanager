@@ -116,7 +116,22 @@ async def ensure_agents_table():
         # Ensure frontend columns exist (for comprehensive frontend config support)
         frontend_columns = {
             'ssl_cert': "ALTER TABLE frontends ADD COLUMN ssl_cert TEXT;",
-            'ssl_verify': "ALTER TABLE frontends ADD COLUMN ssl_verify VARCHAR(50) DEFAULT 'optional';",
+            # PR-2 (R11.B): default flipped from 'optional' to NULL.
+            # Pre-PR-2 every newly INSERTED frontend row carried
+            # ``ssl_verify='optional'``, which the HAProxy config
+            # generator then rendered as ``bind ... ssl ... verify
+            # optional`` — but without a client-CA bundle (no
+            # ``ssl_client_ca_certificate_id`` column exists yet),
+            # HAProxy emitted the fatal ALERT
+            # ``verify is enabled but no CA file specified``. The
+            # explicit data cleanup migration further down (`pr2_…`)
+            # also flips existing ``DEFAULT 'optional'`` definitions
+            # on already-deployed databases via
+            # ``ALTER COLUMN ... DROP DEFAULT``. The Python-side
+            # safeguard in services/haproxy_config.py
+            # (``_apply_bind_ssl_verify``) is the runtime backstop;
+            # this is the data-side fix.
+            'ssl_verify': "ALTER TABLE frontends ADD COLUMN ssl_verify VARCHAR(50);",
             'timeout_client': "ALTER TABLE frontends ADD COLUMN timeout_client INTEGER;",
             'timeout_http_request': "ALTER TABLE frontends ADD COLUMN timeout_http_request INTEGER;",
             'rate_limit': "ALTER TABLE frontends ADD COLUMN rate_limit INTEGER;",
@@ -138,6 +153,74 @@ async def ensure_agents_table():
                 logger.info(f"Column '{col}' not found in 'frontends', adding it...")
                 await conn.execute(query)
                 logger.info(f"Successfully added column '{col}' to 'frontends'.")
+
+        # ─────────────────────────────────────────────────────────────────
+        # PR-2 R11.B: ssl_verify default flip + invalid value cleanup.
+        # Already-deployed databases (created before PR-2) still have the
+        # column DEFAULT set to 'optional'. Drop the default in-place so
+        # all subsequent INSERTs leave the column NULL when no value is
+        # supplied. Existing rows are NOT mass-rewritten — operators may
+        # have legitimately enabled mTLS, and the runtime safeguard in
+        # services/haproxy_config.py handles them. We only clean up rows
+        # where the value is OUTSIDE the canonical Literal set, which is
+        # always-incorrect data (legacy 'true'/'false'/'1' artefacts that
+        # the unified Pydantic Literal would now reject).
+        # ─────────────────────────────────────────────────────────────────
+        try:
+            ssl_verify_default = await conn.fetchval("""
+                SELECT column_default
+                FROM information_schema.columns
+                WHERE table_name='frontends' AND column_name='ssl_verify'
+            """)
+            if ssl_verify_default and "'optional'" in str(ssl_verify_default):
+                logger.info(
+                    "PR-2 R11.B: dropping legacy DEFAULT 'optional' from "
+                    "frontends.ssl_verify (new INSERTs will leave the "
+                    "column NULL → no `verify` directive emitted by the "
+                    "HAProxy config generator until a client-CA bundle "
+                    "is configured)."
+                )
+                await conn.execute(
+                    "ALTER TABLE frontends ALTER COLUMN ssl_verify DROP DEFAULT;"
+                )
+                logger.info("PR-2 R11.B: ssl_verify DEFAULT dropped successfully.")
+
+            # Cleanup any rows whose ssl_verify is outside the canonical
+            # Literal set ({'none','optional','required'}). NULL and
+            # canonical values are preserved as-is. The cleanup is
+            # idempotent and bounded — only invalid values get rewritten.
+            #
+            # R11-audit-3 (FIX-3): the pre-fix block used `fetchval` with
+            # a CTE that returned multi-row `RETURNING f.id`, which
+            # silently kept only the first row's id and logged a
+            # misleading "cleaned up row id=<single id>" message even
+            # when N>1 rows were actually rewritten. Switched to
+            # `execute()` so we can parse the asyncpg status string
+            # (`'UPDATE N'`) and report the true row count.
+            cleanup_status = await conn.execute("""
+                UPDATE frontends
+                SET ssl_verify = NULL
+                WHERE ssl_verify IS NOT NULL
+                  AND ssl_verify NOT IN ('none', 'optional', 'required')
+            """)
+            cleanup_n = 0
+            try:
+                # asyncpg returns a status tag like 'UPDATE 0' / 'UPDATE 7'
+                cleanup_n = int(str(cleanup_status).split()[-1])
+            except (ValueError, IndexError, AttributeError):
+                cleanup_n = 0
+            if cleanup_n > 0:
+                logger.info(
+                    f"PR-2 R11.B: cleaned up {cleanup_n} frontends row(s) "
+                    f"with ssl_verify outside the canonical Literal set"
+                )
+        except Exception as e:
+            # Idempotency guard: any failure here is non-fatal (the
+            # runtime safeguard still prevents the fatal HAProxy ALERT).
+            logger.warning(
+                f"PR-2 R11.B ssl_verify cleanup migration encountered "
+                f"a non-fatal error (continuing): {e}"
+            )
 
         # Entity config status enum and per-entity status columns
         entity_status_enum_exists = await conn.fetchval("""
@@ -1603,7 +1686,20 @@ async def run_all_migrations():
     await ensure_acme_columns_on_existing_tables()
     # Issue #11 cleanup: must run AFTER acme_tables/columns to ensure FK refs exist
     await cleanup_orphan_acme_challenge_backend()
-    
+    # v1.5.0 Feature A (ACME diagnostics) + Feature B (site wizard)
+    # Order matters: letsencrypt_orders column additions BEFORE acme_order_events
+    # FK setup; both BEFORE wizard_drafts (user FK uses pre-existing users table).
+    await ensure_letsencrypt_orders_post_completion_actions_column()
+    await ensure_letsencrypt_orders_wizard_staged_until_column()
+    await ensure_letsencrypt_orders_pending_apply_version_name_column()
+    await ensure_letsencrypt_orders_created_by_column()
+    await ensure_acme_order_events_table()
+    await ensure_wizard_drafts_table()
+    await ensure_user_activity_logs_user_action_time_index()
+    # R18c round 3 #1 (KRITIK concurrency): partial unique on
+    # (cluster_id, bind_address, bind_port) WHERE is_active.
+    await ensure_frontends_bind_unique_constraint()
+
     logger.info("Database migrations completed successfully.")
 
 async def add_ssl_certificate_id_to_backend_servers():
@@ -2129,7 +2225,7 @@ async def create_essential_tables(conn):
                 ssl_port INTEGER,
                 ssl_cert_path VARCHAR(255),
                 ssl_cert TEXT,
-                ssl_verify VARCHAR(20) DEFAULT 'optional',
+                ssl_verify VARCHAR(20),  -- PR-2 (R11.B): no DEFAULT; NULL means "omit verify directive"
                 acl_rules JSONB DEFAULT '[]'::jsonb,
                 redirect_rules JSONB DEFAULT '[]'::jsonb,
                 use_backend_rules JSONB DEFAULT '[]'::jsonb,
@@ -3242,3 +3338,340 @@ async def cleanup_orphan_acme_challenge_backend():
         if conn:
             await close_database_connection(conn)
         logger.error(f"Error in cleanup_orphan_acme_challenge_backend: {e}")
+
+
+# =============================================================================
+# v1.5.0 migrations: ACME diagnostic panel (Feature A) + site wizard (B)
+# =============================================================================
+
+async def ensure_letsencrypt_orders_post_completion_actions_column():
+    """v1.5.0: add post_completion_actions JSONB column on letsencrypt_orders.
+
+    Carries the deferred HTTPS frontend create payload (and any future
+    post-completion actions) for wizard-staged ACME orders. Idempotent.
+    """
+    conn = None
+    try:
+        conn = await get_database_connection()
+        await conn.execute(
+            """
+            ALTER TABLE letsencrypt_orders
+            ADD COLUMN IF NOT EXISTS post_completion_actions JSONB DEFAULT '[]'::jsonb
+            """
+        )
+        logger.info("Ensured letsencrypt_orders.post_completion_actions column")
+        await close_database_connection(conn)
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"Error in ensure_letsencrypt_orders_post_completion_actions_column: {e}")
+
+
+async def ensure_letsencrypt_orders_wizard_staged_until_column():
+    """v1.5.0: add wizard_staged_until TIMESTAMPTZ column on letsencrypt_orders.
+
+    Used by complete_pending_acme_orders to abandon stale wizard_staged orders
+    after 24h (M25). NULL for non-wizard orders.
+    """
+    conn = None
+    try:
+        conn = await get_database_connection()
+        await conn.execute(
+            """
+            ALTER TABLE letsencrypt_orders
+            ADD COLUMN IF NOT EXISTS wizard_staged_until TIMESTAMPTZ
+            """
+        )
+        logger.info("Ensured letsencrypt_orders.wizard_staged_until column")
+        await close_database_connection(conn)
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"Error in ensure_letsencrypt_orders_wizard_staged_until_column: {e}")
+
+
+async def ensure_letsencrypt_orders_pending_apply_version_name_column():
+    """v1.5.0: add pending_apply_version_name VARCHAR + partial index for fast
+    `wizard_staged` lookups by config version name.
+
+    The wizard records the bulk-site-create-{ts} version name (legacy
+    naming pre-rename: bulk-proxied-host-create-{ts}) into
+    this column when it stages the order; the background task uses
+    string-equality vs agents.applied_config_version to gate LE API calls.
+    """
+    conn = None
+    try:
+        conn = await get_database_connection()
+        await conn.execute(
+            """
+            ALTER TABLE letsencrypt_orders
+            ADD COLUMN IF NOT EXISTS pending_apply_version_name VARCHAR(255)
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_letsencrypt_orders_wizard_staged
+            ON letsencrypt_orders (pending_apply_version_name)
+            WHERE status = 'wizard_staged'
+            """
+        )
+        logger.info(
+            "Ensured letsencrypt_orders.pending_apply_version_name column + partial index"
+        )
+        await close_database_connection(conn)
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(
+            f"Error in ensure_letsencrypt_orders_pending_apply_version_name_column: {e}"
+        )
+
+
+async def ensure_letsencrypt_orders_created_by_column():
+    """v1.5.0: add created_by INTEGER on letsencrypt_orders (R31/M23).
+
+    Carries the requesting user_id so post_completion_actions auto-apply
+    can attribute the apply to the original wizard caller. ON DELETE
+    SET NULL so deleting the user does not break orphan orders.
+    """
+    conn = None
+    try:
+        conn = await get_database_connection()
+        await conn.execute(
+            """
+            ALTER TABLE letsencrypt_orders
+            ADD COLUMN IF NOT EXISTS created_by INTEGER
+                REFERENCES users(id) ON DELETE SET NULL
+            """
+        )
+        logger.info("Ensured letsencrypt_orders.created_by column (FK ON DELETE SET NULL)")
+        await close_database_connection(conn)
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"Error in ensure_letsencrypt_orders_created_by_column: {e}")
+
+
+async def ensure_acme_order_events_table():
+    """v1.5.0 Feature A: detailed ACME event log table.
+
+    Used by record_event() for diagnostic timeline display. CASCADE on order
+    delete so deleting a letsencrypt_order also cleans up its event trail.
+    Daily-watermarked TTL prune (90d) lives in main.py background task.
+    """
+    conn = None
+    try:
+        conn = await get_database_connection()
+        exists = await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'acme_order_events'
+            )
+            """
+        )
+        if not exists:
+            await conn.execute(
+                """
+                CREATE TABLE acme_order_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    order_id INTEGER NOT NULL
+                        REFERENCES letsencrypt_orders(id) ON DELETE CASCADE,
+                    event_type VARCHAR(64) NOT NULL,
+                    severity VARCHAR(16) NOT NULL DEFAULT 'INFO',
+                    message TEXT,
+                    details JSONB DEFAULT '{}'::jsonb,
+                    correlation_id VARCHAR(64),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            logger.info("Created acme_order_events table")
+        # R16 hardening (#R16-2): indexes must run UNCONDITIONALLY on every
+        # startup, not just on first table creation. An older deploy that
+        # raced ahead of these indexes (or where the table was created by a
+        # previous v1.5.0 push before the daily-watermarked retention task
+        # existed) would otherwise be stuck doing sequential scans for the
+        # 90-day prune query. Both `CREATE INDEX IF NOT EXISTS` calls are
+        # idempotent so re-running is safe.
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_acme_order_events_order_id "
+            "ON acme_order_events(order_id, created_at DESC)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_acme_order_events_created_at "
+            "ON acme_order_events(created_at)"
+        )
+        await close_database_connection(conn)
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"Error in ensure_acme_order_events_table: {e}")
+
+
+async def ensure_wizard_drafts_table():
+    """v1.5.0 Feature B: persisted wizard drafts.
+
+    expires_at defaults to NOW() + 30d; daily-watermarked prune in main.py.
+    user_id ON DELETE CASCADE so deleting a user removes their drafts.
+    """
+    conn = None
+    try:
+        conn = await get_database_connection()
+        exists = await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'wizard_drafts'
+            )
+            """
+        )
+        if not exists:
+            await conn.execute(
+                """
+                CREATE TABLE wizard_drafts (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL
+                        REFERENCES users(id) ON DELETE CASCADE,
+                    wizard_type VARCHAR(64) NOT NULL DEFAULT 'site',
+                    title VARCHAR(255),
+                    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '30 days'),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            logger.info("Created wizard_drafts table")
+        # R16 hardening (#R16-2): see acme_order_events fix above. Indexes
+        # MUST run unconditionally so existing v1.5.0 first-deploy tables
+        # also get the prune-supporting expires_at index.
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wizard_drafts_user_type "
+            "ON wizard_drafts(user_id, wizard_type, updated_at DESC)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wizard_drafts_expires_at "
+            "ON wizard_drafts(expires_at)"
+        )
+        # Phase I: Site rebrand — flip the schema-level DEFAULT for the
+        # `wizard_type` column from the legacy 'proxied_host' value to
+        # the post-rebrand 'site' value so all NEW rows (when callers
+        # rely on the column default) land with the canonical naming.
+        # This is purely an `ALTER TABLE … ALTER COLUMN … SET DEFAULT`
+        # — idempotent, takes a SHARE UPDATE EXCLUSIVE-equivalent
+        # metadata lock that does NOT block readers/writers, and does
+        # not rewrite existing rows. Pre-rename rows still carry
+        # `wizard_type='proxied_host'`; the application code path
+        # accepts BOTH values via dual-filter (`IN ('site',
+        # 'proxied_host')`) on every read/delete query, so older
+        # drafts remain visible to their owner and remain rejectable
+        # via the cluster cleanup.
+        await conn.execute(
+            "ALTER TABLE wizard_drafts ALTER COLUMN wizard_type SET DEFAULT 'site'"
+        )
+        await close_database_connection(conn)
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(f"Error in ensure_wizard_drafts_table: {e}")
+
+
+async def ensure_user_activity_logs_user_action_time_index():
+    """v1.5.0 (M33/R50): composite index on user_activity_logs for the new
+    per-user-per-minute rate-limit COUNT(*) query used by ACME diagnostics
+    and wizard preflight rate-limits.
+    """
+    conn = None
+    try:
+        conn = await get_database_connection()
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_user_activity_logs_user_action_time
+            ON user_activity_logs (user_id, action, created_at DESC)
+            """
+        )
+        logger.info("Ensured user_activity_logs (user_id, action, created_at) composite index")
+        await close_database_connection(conn)
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        logger.error(
+            f"Error in ensure_user_activity_logs_user_action_time_index: {e}"
+        )
+
+
+async def ensure_frontends_bind_unique_constraint():
+    """v1.5.0 (R18c round 3 #1 — KRITIK concurrency): partial unique
+    constraint on (cluster_id, bind_address, bind_port) WHERE
+    is_active.
+
+    Pre-fix: `services/frontend_service.check_bind_port_collision`
+    ran a plain `SELECT` outside the wizard transaction with no
+    `FOR UPDATE`, and the schema had NO uniqueness on
+    (cluster_id, bind_address, bind_port). Two concurrent wizards
+    targeting the same cluster + bind could both pass the check
+    and both INSERT, producing TWO active frontends bound to the
+    same port — HAProxy then refused to reload (port already in
+    use) and the cluster was wedged until manual cleanup.
+
+    Adding a partial UNIQUE INDEX serializes the race at the
+    database level: the second INSERT raises UniqueViolationError,
+    which the wizard router (R18b round 3 #11) already maps to a
+    clean 409.
+
+    NOT auto-deduplicating: `CREATE UNIQUE INDEX IF NOT EXISTS`
+    only skips when the index NAME already exists. If a deployment
+    already has duplicate active rows (a pre-fix race that landed),
+    the migration FAILS with "could not create unique index" and is
+    logged as non-fatal — runtime continues without the index, which
+    means the database-level race protection is OFF until an operator
+    manually consolidates the conflicting rows. Operationally:
+        # find conflicting active rows
+        SELECT cluster_id, bind_address, bind_port, COUNT(*)
+        FROM frontends
+        WHERE is_active = TRUE
+        GROUP BY 1,2,3 HAVING COUNT(*) > 1;
+    Even without the index, the wizard router still maps the
+    happy-path race outcome to 409 via UniqueViolationError when
+    the index DOES exist, so this migration is the belt-and-
+    suspenders layer rather than the only protection.
+
+    Partial WHERE is_active is intentional — soft-deleted
+    frontends (is_active=false) are kept for audit and would
+    otherwise prevent re-creating a binding after deactivation.
+    """
+    conn = None
+    try:
+        conn = await get_database_connection()
+        # Use a unique INDEX (not constraint) because PostgreSQL
+        # only allows partial uniqueness via an INDEX, not a table
+        # CONSTRAINT. Functionally equivalent for asyncpg's
+        # UniqueViolationError path.
+        await conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                idx_frontends_active_bind_unique
+            ON frontends (cluster_id, bind_address, bind_port)
+            WHERE is_active = TRUE
+            """
+        )
+        logger.info(
+            "Ensured frontends partial UNIQUE on "
+            "(cluster_id, bind_address, bind_port) WHERE is_active=TRUE"
+        )
+        await close_database_connection(conn)
+    except Exception as e:
+        if conn:
+            await close_database_connection(conn)
+        # Existing duplicates would surface here as
+        # 'could not create unique index'. Log loudly so operators
+        # see the conflicting rows in their migration logs but do
+        # NOT abort startup — the wizard 409-mapping path already
+        # covers the steady-state race; the constraint is the
+        # belt-and-suspenders.
+        logger.error(
+            f"Error in ensure_frontends_bind_unique_constraint: {e} "
+            "(non-fatal — wizard router still maps UniqueViolation "
+            "to 409 even without the index)"
+        )

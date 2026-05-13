@@ -227,11 +227,60 @@ async def get_user_permissions(user_id: int) -> Dict[str, Dict[str, bool]]:
         logger.error(f"Error getting user permissions for user {user_id}: {e}")
         return {}
 
-async def check_user_permission(user_id: int, resource: str, action: str) -> bool:
+async def check_user_permission(
+    user_id: int,
+    resource: str,
+    action: str,
+    *,
+    current_user: Optional[Dict[str, Any]] = None,
+) -> bool:
     """
-    Check if user has specific permission
+    Check if user has specific permission.
+
+    R18c round 7 (Bulgu 1): system-wide admin bypass. A user with
+    ``users.is_admin = TRUE`` is the canonical super-admin and MUST pass
+    every granular permission check, regardless of the role they're
+    attached to. Otherwise enterprise admins were getting 403s on
+    composite endpoints (e.g. wizard CREATE) when their role's
+    ``permissions`` JSONB didn't enumerate every individual action
+    (backend.create, frontend.create, ssl.create, apply.execute).
+
+    Two short-circuit paths:
+
+    1. Caller already has ``current_user`` resolved (typical FastAPI
+       endpoint) — pass it via the kwarg-only ``current_user`` to skip
+       the DB roundtrip entirely.
+    2. Caller doesn't have it — we run a single
+       ``SELECT is_admin FROM users WHERE id=$1 AND is_active=TRUE``
+       before falling back to the role-based permission lookup.
+
+    Backward-compat: positional 3-arg signature preserved.
     """
     try:
+        # Path 1: caller-provided current_user dict
+        if current_user is not None and current_user.get("is_admin") is True:
+            logger.debug(
+                "Admin bypass for %s.%s (user_id=%s, via current_user)",
+                resource, action, user_id,
+            )
+            return True
+
+        # Path 2: cheap is_admin lookup before role-permissions join
+        conn = await get_database_connection()
+        try:
+            row = await conn.fetchrow(
+                "SELECT is_admin FROM users WHERE id = $1 AND is_active = TRUE",
+                int(user_id),
+            )
+        finally:
+            await close_database_connection(conn)
+        if row and row.get("is_admin") is True:
+            logger.debug(
+                "Admin bypass for %s.%s (user_id=%s, via DB lookup)",
+                resource, action, user_id,
+            )
+            return True
+
         permissions = await get_user_permissions(user_id)
         return permissions.get(resource, {}).get(action, False)
     except Exception as e:
