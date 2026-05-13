@@ -632,6 +632,61 @@ async def check_agents(conn, cluster_ids: List[int]) -> Dict[str, Any]:
 CHECK_IDS = ("dns", "port80", "routing", "account", "agents")
 
 
+def _coerce_cluster_ids(raw) -> List[int]:
+    """Coerce a cluster_ids list to ints, dropping non-integer-compatible
+    values. JSONB-stored lists occasionally land as ["1", "2"] (string form)
+    due to legacy paths; asyncpg's `$1::int[]` cast then fails the diagnostic
+    query with InvalidTextRepresentationError. We normalise here so the
+    diagnostic surface is the same regardless of how the order was written.
+    """
+    out: List[int] = []
+    if not raw:
+        return out
+    for v in raw:
+        try:
+            out.append(int(v))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+# Bulgu #94 (Round-25 audit) — the entire point of the diagnostic panel
+# is to SHOW the operator what went wrong. Pre-fix, a single check raising
+# an uncaught exception (e.g. an asyncpg cast error from a malformed
+# cluster_ids JSONB, a DNS resolver outage, an SSRF-guard glitch) would
+# propagate up to the router's `try/finally` block, which had no `except`
+# clause, and return HTTP 500 with no body. The operator saw only
+# "Internal Server Error" in DevTools — the inverse of what a diagnostic
+# panel should ever produce. We now wrap every check inside `run_checks`
+# so that a check crash becomes a structured `fail` row instead of
+# bubbling up; the operator gets the exception type + message in the
+# UI and can carry it forward, and the rest of the panel still renders.
+async def _safe_check(check_id: str, label: str, coro):
+    """Run an awaitable that produces a check result; swallow exceptions
+    and convert them to a structured `fail` result so the diagnostic
+    response is never short-circuited by a single broken check."""
+    started = time.time()
+    try:
+        return await coro
+    except Exception as exc:  # noqa: BLE001 — diagnostic boundary
+        duration_ms = int((time.time() - started) * 1000)
+        logger.exception(
+            "ACME diagnostic check %s raised", check_id
+        )
+        return _check_result(
+            check_id,
+            label,
+            "fail",
+            f"Diagnostic check crashed: {exc.__class__.__name__}: {exc}",
+            severity="error",
+            details={
+                "exception_type": exc.__class__.__name__,
+                "exception_message": str(exc),
+            },
+            duration_ms=duration_ms,
+        )
+
+
 async def run_checks(
     conn,
     *,
@@ -642,19 +697,32 @@ async def run_checks(
 ) -> List[Dict[str, Any]]:
     """Execute the full pre-flight check suite. `only` lets callers re-run a
     subset (per-check rerun in the UI).
+
+    Every individual check is wrapped in `_safe_check` so the diagnostic
+    endpoint NEVER 500s because of one broken check — the operator gets
+    a structured `fail` row identifying which check crashed and why.
     """
     selected = set(only) if only else set(CHECK_IDS)
     results: List[Dict[str, Any]] = []
 
+    # Normalise inputs once so the per-check error stays in the right
+    # bucket (a malformed cluster_ids should not crash routing/agents).
+    safe_domains = [d for d in (domains or []) if isinstance(d, str) and d]
+    safe_cluster_ids = _coerce_cluster_ids(cluster_ids)
+    try:
+        safe_account_id = int(account_id) if account_id is not None else None
+    except (TypeError, ValueError):
+        safe_account_id = None
+
     if "dns" in selected:
-        results.append(await check_dns(domains))
+        results.append(await _safe_check("dns", "DNS resolution", check_dns(safe_domains)))
     if "port80" in selected:
-        results.append(await check_port80(domains))
+        results.append(await _safe_check("port80", "Port 80 reachability", check_port80(safe_domains)))
     if "routing" in selected:
-        results.append(await check_routing(conn, domains, cluster_ids))
+        results.append(await _safe_check("routing", "HAProxy routing", check_routing(conn, safe_domains, safe_cluster_ids)))
     if "account" in selected:
-        results.append(await check_account(conn, account_id))
+        results.append(await _safe_check("account", "ACME account", check_account(conn, safe_account_id)))
     if "agents" in selected:
-        results.append(await check_agents(conn, cluster_ids))
+        results.append(await _safe_check("agents", "HAProxy agents", check_agents(conn, safe_cluster_ids)))
 
     return results

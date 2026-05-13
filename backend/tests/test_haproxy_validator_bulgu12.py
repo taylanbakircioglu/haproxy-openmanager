@@ -6363,9 +6363,16 @@ def test_bulgu83_static_marker_in_fe_warning_toast():
     calls these rules "legacy" and now lists each offending rule
     body. Static-source check so a refactor that re-introduces
     the misleading wording or drops the rule snippets is caught.
+
+    Skipped automatically when the test runs inside the backend
+    Dockerfile build context (which only copies `backend/` and
+    therefore has no `frontend/` tree next to it). This mirrors
+    the guard already used by every other front-end static-source
+    pin in this file (e.g. lines 583-592, 795-810, 833-845, etc.)
+    — Bulgu #83's pin was missing it, which broke the corporate
+    CI's `RUN python -m pytest` step in the backend Docker build
+    immediately after Round-23 went live.
     """
-    # The frontend tree lives next to backend/ at the workspace
-    # root, so walk up one extra level from _BACKEND_DIR.
     fm_path = (
         _BACKEND_DIR.parent
         / "frontend"
@@ -6373,6 +6380,11 @@ def test_bulgu83_static_marker_in_fe_warning_toast():
         / "components"
         / "FrontendManagement.js"
     )
+    if not fm_path.exists():
+        pytest.skip(
+            f"frontend not present at {fm_path}; running in backend-only "
+            "container is expected — skip JS source pin"
+        )
     fm_src = fm_path.read_text()
     assert "Bulgu #83 (round-23 audit)" in fm_src
     # No more `legacy routing/redirect rule(s)` wording.

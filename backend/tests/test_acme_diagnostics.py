@@ -549,3 +549,180 @@ async def test_run_checks_unknown_only_returns_empty():
         account_id=None, only=["bogus"],
     )
     assert out == []
+
+
+# ----------------------------------------------------------------------------
+# Bulgu #94 / #95 (Round-25 audit) — diagnostic-runner robustness
+# ----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bulgu94_run_checks_swallows_single_check_crash(monkeypatch):
+    """Bulgu #94 — a single check exception must NOT collapse the suite.
+
+    Pre-fix, an asyncpg UndefinedColumnError from check_agents (e.g. the
+    Bulgu #84 ``a.last_heartbeat`` typo on an older deploy) propagated
+    up to the FastAPI router which had no `except`, so the operator saw
+    HTTP 500 with no body. The diagnostic panel is precisely the place
+    that should SURFACE this — never opaque-500 it. We now wrap each
+    check; the failing one becomes a structured `fail` row and the
+    other four still render.
+    """
+    monkeypatch.setattr(socket, "gethostbyname_ex",
+                        lambda d: (d, [], ["10.0.0.1"]))
+
+    def _ctor(*args, **kwargs):
+        return _FakeSession(statuses=[200])
+    monkeypatch.setattr("aiohttp.ClientSession", _ctor)
+
+    conn = AsyncMock()
+
+    # check_routing + check_agents both call conn.fetch; explode on the
+    # FIRST call (which is check_routing) and return rows on the second.
+    call_count = {"n": 0}
+
+    async def _fetch(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("simulated: column a.last_heartbeat does not exist")
+        return []
+
+    conn.fetch = _fetch
+    conn.fetchrow.return_value = None
+
+    out = await run_checks(
+        conn,
+        domains=["a.example.com"],
+        cluster_ids=[1],
+        account_id=None,
+    )
+    # All five checks must still appear in the response.
+    ids = [c["id"] for c in out]
+    assert ids == ["dns", "port80", "routing", "account", "agents"]
+    routing = next(c for c in out if c["id"] == "routing")
+    assert routing["status"] == "fail"
+    assert "Diagnostic check crashed" in routing["message"]
+    assert routing["details"]["exception_type"] == "RuntimeError"
+    assert "last_heartbeat" in routing["details"]["exception_message"]
+
+
+@pytest.mark.asyncio
+async def test_bulgu94_run_checks_coerces_string_cluster_ids(monkeypatch):
+    """Bulgu #94 — cluster_ids stored as JSONB strings (legacy paths)
+    must not crash check_routing / check_agents with
+    ``invalid input syntax for type integer: "1"``."""
+    monkeypatch.setattr(socket, "gethostbyname_ex",
+                        lambda d: (d, [], ["10.0.0.1"]))
+
+    def _ctor(*args, **kwargs):
+        return _FakeSession(statuses=[200])
+    monkeypatch.setattr("aiohttp.ClientSession", _ctor)
+
+    captured_args = []
+
+    async def _fetch(*args, **kwargs):
+        captured_args.append(args)
+        return []
+
+    conn = AsyncMock()
+    conn.fetch = _fetch
+    conn.fetchrow.return_value = None
+
+    out = await run_checks(
+        conn,
+        domains=["a.example.com"],
+        cluster_ids=["1", "2", "garbage", None, 3],
+        account_id=None,
+    )
+    # The list passed to asyncpg should already be a pure-int list.
+    # check_routing is the first call that uses cluster_ids.
+    routing_call_args = [a for a in captured_args if "frontends" in a[0]]
+    assert routing_call_args, "check_routing should have queried frontends"
+    cluster_ids_arg = routing_call_args[0][1]
+    assert cluster_ids_arg == [1, 2, 3], (
+        f"cluster_ids must be coerced to ints before being passed to "
+        f"asyncpg's ::int[] cast; got: {cluster_ids_arg!r}"
+    )
+    assert all(c["status"] != "fail" or c["id"] != "routing"
+               for c in out
+               if c["id"] == "routing" and "Diagnostic check crashed" in (c.get("message") or "")
+              ), "routing should not have crashed on coerced cluster_ids"
+
+
+@pytest.mark.asyncio
+async def test_bulgu94_safe_check_does_not_swallow_cancellation(monkeypatch):
+    """`_safe_check` must catch `Exception` but NOT `BaseException`.
+
+    asyncio.CancelledError is a BaseException (Python 3.8+) so it must
+    propagate out of `_safe_check` — otherwise a request that the
+    client cancelled mid-flight would silently keep running diagnostic
+    checks instead of unwinding cleanly. We hand `_safe_check` a coro
+    that raises CancelledError and assert it bubbles up.
+    """
+    from services.acme_diagnostics import _safe_check
+
+    async def _cancelled_coro():
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await _safe_check("dns", "DNS resolution", _cancelled_coro())
+
+
+@pytest.mark.asyncio
+async def test_bulgu94_safe_check_handles_keyboardinterrupt(monkeypatch):
+    """`_safe_check` must also not swallow `KeyboardInterrupt`."""
+    from services.acme_diagnostics import _safe_check
+
+    async def _interrupt_coro():
+        raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        await _safe_check("dns", "DNS resolution", _interrupt_coro())
+
+
+@pytest.mark.asyncio
+async def test_bulgu94_coerce_cluster_ids_handles_none():
+    """Coercion must handle None input without raising."""
+    from services.acme_diagnostics import _coerce_cluster_ids
+    assert _coerce_cluster_ids(None) == []
+    assert _coerce_cluster_ids([]) == []
+    assert _coerce_cluster_ids([1, 2, 3]) == [1, 2, 3]
+    assert _coerce_cluster_ids(["1", "2"]) == [1, 2]
+    assert _coerce_cluster_ids([1.5]) == [1]  # int() truncates floats
+    assert _coerce_cluster_ids(["abc", None, "5"]) == [5]
+
+
+@pytest.mark.asyncio
+async def test_bulgu94_run_checks_filters_invalid_domains(monkeypatch):
+    """Non-string entries in `domains` must not reach the DNS resolver."""
+    seen_domains = []
+
+    def fake_gethostbyname_ex(domain):
+        seen_domains.append(domain)
+        return (domain, [], ["10.0.0.1"])
+
+    monkeypatch.setattr(socket, "gethostbyname_ex", fake_gethostbyname_ex)
+
+    def _ctor(*args, **kwargs):
+        return _FakeSession(statuses=[200])
+    monkeypatch.setattr("aiohttp.ClientSession", _ctor)
+
+    conn = AsyncMock()
+    conn.fetch.return_value = []
+    conn.fetchrow.return_value = None
+
+    out = await run_checks(
+        conn,
+        domains=["a.example.com", None, "", 42, "b.example.com"],
+        cluster_ids=[1],
+        account_id=None,
+    )
+    # Both check_dns and check_port80 resolve DNS, so each valid domain
+    # may appear multiple times — but invalid entries (None, "", 42)
+    # must never reach the resolver.
+    assert set(seen_domains) == {"a.example.com", "b.example.com"}
+    assert None not in seen_domains
+    assert "" not in seen_domains
+    assert 42 not in seen_domains
+    dns_check = next(c for c in out if c["id"] == "dns")
+    assert dns_check["status"] == "ok"

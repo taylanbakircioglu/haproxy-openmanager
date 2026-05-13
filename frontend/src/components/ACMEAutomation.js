@@ -92,7 +92,15 @@ const ACMEAutomation = () => {
   const [diagEvents, setDiagEvents] = useState([]);
   const [diagLoading, setDiagLoading] = useState(false);
   const [diagRunningCheckId, setDiagRunningCheckId] = useState(null);
+  // Bulgu #94 (Round-25 audit): the diagnostic panel's job is to make
+  // failures visible. We now keep dedicated error envelopes for the
+  // diagnostics POST and the /events GET so the modal can render them
+  // inline instead of silently dropping them like the v1.5.1 build did.
+  const [diagRunError, setDiagRunError] = useState(null);
+  const [diagEventsError, setDiagEventsError] = useState(null);
+  const [diagMeta, setDiagMeta] = useState(null);
   const diagPollRef = useRef(null);
+  const diagPollFailCountRef = useRef(0);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -231,6 +239,12 @@ const ACMEAutomation = () => {
   };
 
   // v1.5.0 Issue #13: open diagnostics modal for an order
+  // Bulgu #94 (Round-25 audit): the modal is the operator's last line
+  // of defence when ACME goes sideways — it MUST render failure causes
+  // verbatim instead of swallowing them. We capture both the
+  // diagnostics POST and the events GET errors into dedicated state
+  // and stop the auto-tail poll after consecutive failures so the
+  // network tab does not get spammed with /events 500s every 5s.
   const handleDiagnose = async (orderId) => {
     setDiagOrderId(orderId);
     setDiagVisible(true);
@@ -238,6 +252,10 @@ const ACMEAutomation = () => {
     setDiagChecks([]);
     setDiagHumanizedError(null);
     setDiagEvents([]);
+    setDiagRunError(null);
+    setDiagEventsError(null);
+    setDiagMeta(null);
+    diagPollFailCountRef.current = 0;
     try {
       const [orderRes, diagRes] = await Promise.allSettled([
         axios.get(`/api/letsencrypt/orders/${orderId}`),
@@ -245,18 +263,68 @@ const ACMEAutomation = () => {
       ]);
       if (orderRes.status === 'fulfilled') setDiagOrder(orderRes.value.data);
       if (diagRes.status === 'fulfilled') {
-        setDiagChecks(diagRes.value.data?.checks || []);
-        setDiagHumanizedError(diagRes.value.data?.humanized_error || null);
+        const data = diagRes.value.data || {};
+        setDiagChecks(data.checks || []);
+        setDiagHumanizedError(data.humanized_error || null);
+        setDiagMeta(data.meta || null);
+        // Bulgu #94 follow-up: the Round-25 backend now returns HTTP 200
+        // with `status: 'diagnostics_unavailable'` + `meta.error_stage`
+        // instead of HTTP 500 when the diagnostic runner itself crashes
+        // (e.g. `column a.last_heartbeat does not exist` on a stale
+        // deploy). The fulfilled branch must therefore detect the
+        // envelope and surface the structured failure alert — otherwise
+        // the operator would only see one `diagnostics_runner` row in
+        // the table without the prominent red banner that explains the
+        // crash + correlation_id. This is exactly the "panel renders
+        // but doesn't visibly say WHY" trap we're trying to avoid.
+        if (data.status === 'diagnostics_unavailable' || data?.meta?.error_stage) {
+          setDiagRunError({
+            status: 200,
+            message: data?.meta?.error_message
+              || data?.checks?.[0]?.message
+              || 'Diagnostic runner failed',
+            correlation_id: data?.meta?.correlation_id || null,
+            error_stage: data?.meta?.error_stage || null,
+            error_type: data?.meta?.error_type || null,
+          });
+        }
       } else if (diagRes.status === 'rejected') {
-        const detail = diagRes.reason?.response?.data?.detail || 'Diagnostics failed';
+        const resp = diagRes.reason?.response;
+        const detail = resp?.data?.detail
+          || resp?.data?.error?.message
+          || diagRes.reason?.message
+          || 'Diagnostics failed';
+        setDiagRunError({
+          status: resp?.status || 0,
+          message: detail,
+          correlation_id: resp?.data?.error?.correlation_id || resp?.headers?.['x-correlation-id'] || null,
+        });
         message.error(detail);
       }
-      // Best-effort merged event log fetch (404 if migration not yet run)
+      // Best-effort merged event log fetch — bug #95: server-side schema
+      // drift used to return 500; we now surface that in the modal so
+      // the operator sees "events unavailable because <reason>".
       try {
         const evRes = await axios.get(`/api/letsencrypt/orders/${orderId}/events`);
         setDiagEvents(evRes.data?.events || []);
-      } catch (_evErr) {
-        // ignore
+        if (evRes.data?.meta?.errors?.length) {
+          setDiagEventsError({
+            kind: 'partial',
+            errors: evRes.data.meta.errors,
+            correlation_id: evRes.data.meta.correlation_id,
+          });
+        }
+      } catch (evErr) {
+        const resp = evErr?.response;
+        setDiagEventsError({
+          kind: 'fatal',
+          status: resp?.status || 0,
+          message: resp?.data?.detail
+            || resp?.data?.error?.message
+            || evErr?.message
+            || 'Event log unavailable',
+          correlation_id: resp?.data?.error?.correlation_id || null,
+        });
       }
     } finally {
       setDiagLoading(false);
@@ -299,8 +367,38 @@ const ACMEAutomation = () => {
       try {
         const evRes = await axios.get(`/api/letsencrypt/orders/${diagOrderId}/events`);
         setDiagEvents(evRes.data?.events || []);
-      } catch (_e) {
-        /* ignore */
+        diagPollFailCountRef.current = 0;
+        if (evRes.data?.meta?.errors?.length) {
+          setDiagEventsError({
+            kind: 'partial',
+            errors: evRes.data.meta.errors,
+            correlation_id: evRes.data.meta.correlation_id,
+          });
+        } else {
+          setDiagEventsError(null);
+        }
+      } catch (e) {
+        // Bulgu #94 (Round-25): stop the auto-tail after 3 consecutive
+        // failures so a broken backend doesn't drown the user's
+        // network tab in 500s. Operator can re-open the modal to retry.
+        diagPollFailCountRef.current += 1;
+        if (diagPollFailCountRef.current >= 3) {
+          if (diagPollRef.current) {
+            clearInterval(diagPollRef.current);
+            diagPollRef.current = null;
+          }
+          const resp = e?.response;
+          setDiagEventsError({
+            kind: 'fatal',
+            status: resp?.status || 0,
+            message: resp?.data?.detail
+              || resp?.data?.error?.message
+              || e?.message
+              || 'Event log polling stopped after repeated failures',
+            correlation_id: resp?.data?.error?.correlation_id || null,
+            polling_stopped: true,
+          });
+        }
       }
     }, 5000);
     return () => {
@@ -318,6 +416,10 @@ const ACMEAutomation = () => {
     setDiagChecks([]);
     setDiagHumanizedError(null);
     setDiagEvents([]);
+    setDiagRunError(null);
+    setDiagEventsError(null);
+    setDiagMeta(null);
+    diagPollFailCountRef.current = 0;
     if (diagPollRef.current) {
       clearInterval(diagPollRef.current);
       diagPollRef.current = null;
@@ -1100,8 +1202,50 @@ const ACMEAutomation = () => {
                 label: 'Pre-flight Checks',
                 children: (
                   <div>
+                    {/* Bulgu #94 (Round-25): expose backend failures so the
+                        operator can act on them — not just see a blank panel. */}
+                    {diagRunError && (
+                      <Alert
+                        type="error"
+                        showIcon
+                        style={{ marginBottom: 12 }}
+                        message={`Diagnostic runner failed${diagRunError.status && diagRunError.status !== 200 ? ` (HTTP ${diagRunError.status})` : ''}`}
+                        description={
+                          <div>
+                            <div>{diagRunError.message}</div>
+                            {(diagRunError.error_stage || diagRunError.error_type) && (
+                              <div style={{ marginTop: 6, fontSize: 12, color: '#666' }}>
+                                {diagRunError.error_stage && <span>Stage: <code>{diagRunError.error_stage}</code> </span>}
+                                {diagRunError.error_type && <span>· Type: <code>{diagRunError.error_type}</code></span>}
+                              </div>
+                            )}
+                            {diagRunError.correlation_id && (
+                              <div style={{ marginTop: 6, fontSize: 12, color: '#666' }}>
+                                Correlation ID: <code>{diagRunError.correlation_id}</code>
+                              </div>
+                            )}
+                            <div style={{ marginTop: 6, fontSize: 12, color: '#666' }}>
+                              Share this correlation ID with the platform team; the full traceback is in the API log.
+                            </div>
+                          </div>
+                        }
+                      />
+                    )}
+                    {diagMeta?.correlation_id && (diagMeta.checks_failed > 0 || diagMeta.checks_warn > 0) && !diagRunError && (
+                      <Alert
+                        type={diagMeta.checks_failed > 0 ? 'warning' : 'info'}
+                        showIcon
+                        style={{ marginBottom: 12 }}
+                        message={`${diagMeta.checks_failed} check(s) failed, ${diagMeta.checks_warn} warning(s)`}
+                        description={
+                          <span style={{ fontSize: 12, color: '#666' }}>
+                            Correlation ID: <code>{diagMeta.correlation_id}</code>
+                          </span>
+                        }
+                      />
+                    )}
                     {diagChecks.length === 0 ? (
-                      <Empty description="No diagnostic checks available" />
+                      <Empty description={diagRunError ? 'Diagnostic runner did not return any check' : 'No diagnostic checks available'} />
                     ) : (
                       <Table
                         size="small"
@@ -1148,24 +1292,81 @@ const ACMEAutomation = () => {
                 key: 'events',
                 label: `Event Log (${diagEvents.length})`,
                 children: (
-                  diagEvents.length === 0 ? (
-                    <Empty description="No events recorded for this order" />
-                  ) : (
-                    <Timeline
-                      items={diagEvents.map((ev) => ({
-                        color:
-                          (ev.severity || '').toUpperCase() === 'ERROR' ? 'red' :
-                          (ev.severity || '').toUpperCase() === 'WARN' ? 'orange' : 'blue',
-                        children: (
+                  <div>
+                    {/* Bulgu #95 (Round-25): /events used to 500 because of
+                        a schema-drift bug (`status` column did not exist).
+                        Now the response carries `meta.errors[]` for partial
+                        failures and a `kind: fatal` envelope for total
+                        failure — both render here so the operator never
+                        wonders why the timeline is empty. */}
+                    {diagEventsError?.kind === 'fatal' && (
+                      <Alert
+                        type="error"
+                        showIcon
+                        style={{ marginBottom: 12 }}
+                        message={`Event log unavailable${diagEventsError.status ? ` (HTTP ${diagEventsError.status})` : ''}`}
+                        description={
                           <div>
-                            <div style={{ fontSize: 12, color: '#888' }}>{ev.created_at} · {ev.source}</div>
-                            <div><strong>{ev.event_type}</strong></div>
-                            {ev.message && <div>{ev.message}</div>}
+                            <div>{diagEventsError.message}</div>
+                            {diagEventsError.correlation_id && (
+                              <div style={{ marginTop: 6, fontSize: 12, color: '#666' }}>
+                                Correlation ID: <code>{diagEventsError.correlation_id}</code>
+                              </div>
+                            )}
+                            {diagEventsError.polling_stopped && (
+                              <div style={{ marginTop: 6, fontSize: 12, color: '#666' }}>
+                                Auto-refresh stopped after repeated failures. Re-open the panel to retry.
+                              </div>
+                            )}
                           </div>
-                        ),
-                      }))}
-                    />
-                  )
+                        }
+                      />
+                    )}
+                    {diagEventsError?.kind === 'partial' && (
+                      <Alert
+                        type="warning"
+                        showIcon
+                        style={{ marginBottom: 12 }}
+                        message="Event log partial — one or more sources failed"
+                        description={
+                          <div>
+                            <ul style={{ margin: '4px 0 4px 16px' }}>
+                              {diagEventsError.errors.map((err, i) => (
+                                <li key={i}>
+                                  <strong>{err.section}</strong>: {err.exception_type} — {err.message}
+                                </li>
+                              ))}
+                            </ul>
+                            {diagEventsError.correlation_id && (
+                              <div style={{ fontSize: 12, color: '#666' }}>
+                                Correlation ID: <code>{diagEventsError.correlation_id}</code>
+                              </div>
+                            )}
+                          </div>
+                        }
+                      />
+                    )}
+                    {diagEvents.length === 0 ? (
+                      <Empty description={diagEventsError?.kind === 'fatal'
+                        ? 'No events could be loaded (see error above)'
+                        : 'No events recorded for this order'} />
+                    ) : (
+                      <Timeline
+                        items={diagEvents.map((ev) => ({
+                          color:
+                            (ev.severity || '').toUpperCase() === 'ERROR' ? 'red' :
+                            (ev.severity || '').toUpperCase() === 'WARN' ? 'orange' : 'blue',
+                          children: (
+                            <div>
+                              <div style={{ fontSize: 12, color: '#888' }}>{ev.created_at} · {ev.source}</div>
+                              <div><strong>{ev.event_type}</strong></div>
+                              {ev.message && <div>{ev.message}</div>}
+                            </div>
+                          ),
+                        }))}
+                      />
+                    )}
+                  </div>
                 ),
               },
               {
