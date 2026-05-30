@@ -2367,6 +2367,9 @@ Developed with ❤️ for the HAProxy community
 
 ## Release Notes
 
+- **v1.6.2** (2026-05-30) — Bugfixes: (1) agents (which authenticate with their `X-API-Key` token) could not reach `GET /api/clusters` / `/api/clusters/{id}` after the v1.5.x cluster-read hardening, breaking agent assignment ("401: Authorization header missing"); these endpoints now accept either a user JWT or an agent token (anonymous access is still rejected). (2) The uninstall-script generator returned 400 for macOS agents (which report platform `darwin`); it now normalizes the platform the same way the install generator does. No UI or schema changes.
+- **v1.6.1** (2026-05-21) — Security patch: bump `axios` to 1.16.x (prototype-pollution hardening, header-injection fix, keep-alive memory leak fix) and `fast-uri` to 3.1.2 (GHSA-v39h-62p7-jpjc). No functional changes.
+
 For full release notes and the list of features delivered in each version (v1.5.x Site Wizard + ACME Diagnostic Panel, v1.4.0 ACME stability + enterprise audit, v1.3.0, ...) see the [GitHub Releases](https://github.com/taylanbakircioglu/haproxy-openmanager/releases) page.
 
 ---

@@ -522,7 +522,7 @@ if [[ "$SKIP_TO_DAEMON" != "true" ]]; then
 
     # Validate cluster exists by checking management API
     log "DEBUG" "Validating HAProxy Cluster..."
-    CLUSTER_CHECK=$("$CURL_BIN" -k -s -f "$MANAGEMENT_URL/api/clusters" -H "User-Agent: haproxy-agent-installer" || echo "FAILED")
+    CLUSTER_CHECK=$("$CURL_BIN" -k -s -f "$MANAGEMENT_URL/api/clusters" -H "X-API-Key: $AGENT_TOKEN" -H "User-Agent: haproxy-agent-installer" || echo "FAILED")
     if [[ "$CLUSTER_CHECK" == "FAILED" ]]; then
         log "ERROR" "Failed to connect to management API!"
         echo "   Please check your network connection and management URL."
@@ -867,7 +867,7 @@ SSL_SYNC_TIMESTAMP_FILE="/tmp/haproxy-agent-ssl-sync-${AGENT_NAME}"
 get_cluster_paths() {
     log "DEBUG" "Fetching cluster paths from management API"
     local cluster_response=$("$CURL_BIN" -k -s -X GET "$MANAGEMENT_URL/api/clusters" \
-        -H "Authorization: Bearer $AGENT_TOKEN")
+        -H "X-API-Key: $AGENT_TOKEN")
     
     if [[ $? -eq 0 ]]; then
         local _cfg _bin _sock

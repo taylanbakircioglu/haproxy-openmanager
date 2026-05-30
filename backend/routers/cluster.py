@@ -517,7 +517,7 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
 
 
 @router.get("/{cluster_id}", summary="Get Cluster by ID", response_description="Cluster details")
-async def get_cluster(cluster_id: int, authorization: str = Header(None)):
+async def get_cluster(cluster_id: int, authorization: str = Header(None), x_api_key: Optional[str] = Header(None)):
     """
     # Get Specific HAProxy Cluster
     
@@ -528,8 +528,12 @@ async def get_cluster(cluster_id: int, authorization: str = Header(None)):
     
     ## Example Request
     ```bash
+    # User (UI) authentication:
     curl -X GET "{BASE_URL}/api/clusters/1" \\
       -H "Authorization: Bearer eyJhbGciOiJIUz..."
+    # Agent authentication (agent token in X-API-Key):
+    curl -X GET "{BASE_URL}/api/clusters/1" \\
+      -H "X-API-Key: hap_..."
     ```
     
     ## Example Response
@@ -554,15 +558,24 @@ async def get_cluster(cluster_id: int, authorization: str = Header(None)):
     - **404**: Cluster not found
     - **500**: Server error
     """
-    try:
-        # R18c audit fix (round 6 final convergence): authenticate
-        # the caller before fetching cluster topology by ID. Pre-fix
-        # this sibling of GET /api/clusters was anonymous, so an
-        # attacker could iterate cluster IDs to enumerate the same
-        # info (stats socket, paths, ACME flags, pool identity) the
-        # list endpoint just locked down. Closes the asymmetry.
+    # R18c audit fix (round 6 final convergence): authenticate the caller
+    # before fetching cluster topology by ID. Pre-fix this sibling of
+    # GET /api/clusters was anonymous, so an attacker could iterate cluster
+    # IDs to enumerate the same info (stats socket, paths, ACME flags, pool
+    # identity) the list endpoint just locked down.
+    # Issue #22: agents send their token in the X-API-Key header (not a user
+    # JWT), so accept either credential — mirrors the dual-auth on
+    # POST /api/agents/generate-install-script. Anonymous is still rejected.
+    if authorization:
         from auth_middleware import get_current_user_from_token
         await get_current_user_from_token(authorization)
+    elif x_api_key:
+        from auth_middleware import validate_agent_api_key
+        if not await validate_agent_api_key(x_api_key):
+            raise HTTPException(status_code=401, detail="Invalid agent API key")
+    else:
+        raise HTTPException(status_code=401, detail="Authorization header or X-API-Key required")
+    try:
         conn = await get_database_connection()
         
         cluster = await conn.fetchrow("""
@@ -602,7 +615,7 @@ async def get_cluster(cluster_id: int, authorization: str = Header(None)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("", summary="Get All Clusters", response_description="List of all clusters")
-async def get_clusters(authorization: str = Header(None)):
+async def get_clusters(authorization: str = Header(None), x_api_key: Optional[str] = Header(None)):
     """
     # Get All HAProxy Clusters
     
@@ -610,8 +623,12 @@ async def get_clusters(authorization: str = Header(None)):
     
     ## Example Request
     ```bash
+    # User (UI) authentication:
     curl -X GET "{BASE_URL}/api/clusters" \\
       -H "Authorization: Bearer eyJhbGciOiJIUz..."
+    # Agent authentication (agent token in X-API-Key):
+    curl -X GET "{BASE_URL}/api/clusters" \\
+      -H "X-API-Key: hap_..."
     ```
     
     ## Example Response
@@ -662,18 +679,28 @@ async def get_clusters(authorization: str = Header(None)):
     ## Error Responses
     - **500**: Server error
     """
-    try:
-        # R18c audit fix (round 6 #3 — KRITIK info leak): require an
-        # authenticated caller. Pre-fix the endpoint accepted
-        # anonymous GETs and returned cluster topology including
-        # internal HAProxy paths (stats socket, config path, bin
-        # path), pool ids, ACME flags, and agent counts. This is
-        # both reconnaissance for an attacker and the spine of the
-        # cluster-scoped RBAC the rest of the platform builds on,
-        # so guarding it at the read layer is essential after R18c
-        # round 5's roster + role guards.
+    # R18c audit fix (round 6 #3 — KRITIK info leak): require an authenticated
+    # caller. Pre-fix the endpoint accepted anonymous GETs and returned cluster
+    # topology including internal HAProxy paths (stats socket, config path, bin
+    # path), pool ids, ACME flags, and agent counts. This is both reconnaissance
+    # for an attacker and the spine of the cluster-scoped RBAC the rest of the
+    # platform builds on, so guarding it at the read layer is essential.
+    # Issue #22: agents send their token in the X-API-Key header (not a user
+    # JWT), so accept either credential — mirrors the dual-auth on
+    # POST /api/agents/generate-install-script. Anonymous is still rejected.
+    # (Guard kept OUTSIDE the try below: get_clusters' broad `except Exception`
+    # re-wraps raised HTTPExceptions into 500, which produced the "500 - 401"
+    # in the issue log; raising here yields a clean 401.)
+    if authorization:
         from auth_middleware import get_current_user_from_token
         await get_current_user_from_token(authorization)
+    elif x_api_key:
+        from auth_middleware import validate_agent_api_key
+        if not await validate_agent_api_key(x_api_key):
+            raise HTTPException(status_code=401, detail="Invalid agent API key")
+    else:
+        raise HTTPException(status_code=401, detail="Authorization header or X-API-Key required")
+    try:
         conn = await get_database_connection()
         
         clusters = await conn.fetch("""

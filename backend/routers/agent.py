@@ -730,14 +730,15 @@ async def generate_uninstall_script(platform: str, authorization: str = Header(N
     ```
     """
     try:
-        # Validate platform
-        platform_lower = platform.lower()
-        if platform_lower not in ['linux', 'macos']:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Invalid platform: {platform}. Must be 'linux' or 'macos'"
-            )
-        
+        # Normalize platform to a canonical key (always 'linux' or 'macos').
+        # macOS agents register with platform 'darwin' (from `uname -s`), so the
+        # strict ['linux','macos'] check used to 400 on the UI's uninstall flow
+        # (GET /generate-uninstall-script/darwin). Reuse the same get_platform_key()
+        # helper the install-script generator uses, so darwin/osx/mac and the
+        # linux distro variants all resolve correctly. Backward-compatible:
+        # 'linux'/'macos' still map to themselves.
+        platform_lower = get_platform_key(platform)
+
         # Read uninstall script from agent_scripts directory (same as install scripts)
         import os
         script_filename = f"uninstall-agent-{platform_lower}.sh"

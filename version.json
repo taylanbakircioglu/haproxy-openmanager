@@ -1,5 +1,5 @@
 {
-  "version": "1.6.0",
-  "releaseName": "Multi-Factor Authentication (MFA)",
-  "releaseDate": "2026-05-18"
+  "version": "1.6.2",
+  "releaseName": "Agent auth fix (issue #22)",
+  "releaseDate": "2026-05-30"
 }
