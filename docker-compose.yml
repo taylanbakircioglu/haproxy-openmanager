@@ -96,9 +96,9 @@ services:
 
   # Nginx Reverse Proxy
   nginx:
-    # Pinned to a patched stable release for the nginx "poolslip" advisory
-    # (mainline <=1.31.0 affected; fixed in stable 1.30.2+).
-    image: nginx:1.30.2-alpine
+    # Pinned to a patched release for the nginx "poolslip" advisory
+    # (mainline <=1.31.0 affected; fixed in mainline 1.31.1+ / stable 1.30.2+).
+    image: nginx:1.31.1-alpine
     container_name: haproxy-openmanager-nginx
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
