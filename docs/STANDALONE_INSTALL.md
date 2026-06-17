@@ -163,6 +163,11 @@ serve -s build -l 3000
 
 Option B — copy to nginx (recommended, see next section).
 
+> **Important: use the nginx URL on port 8080 as your entry point.** The `serve` option above (port 3000) hosts
+> only the static UI; there is no `/api` backend behind it, so the login page renders but cannot actually log you
+> in. nginx (next section) serves the UI *and* proxies `/api` to the backend on a single port, so do your login and
+> everyday use at `http://<server-ip>:8080`.
+
 ### Create a systemd service for the frontend (if using `serve`)
 
 ```bash
@@ -268,10 +273,10 @@ curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/
 # Login
 curl -s -X POST http://127.0.0.1:8080/api/auth/login \
     -H "Content-Type: application/json" \
-    -d '{"username": "admin", "password": "admin"}' | python3 -m json.tool
+    -d '{"username": "admin", "password": "admin123"}' | python3 -m json.tool
 ```
 
-> **Default credentials**: `admin` / `admin` — change the password immediately after first login.
+> **Default credentials**: `admin` / `admin123` — change the password immediately after first login.
 
 ## 9. Firewall
 
@@ -290,8 +295,8 @@ sudo ufw allow 8080/tcp
 | Service | Port | URL |
 |---------|------|-----|
 | Backend API | 8000 | `http://127.0.0.1:8000/api/health` |
-| Frontend | 3000 | `http://127.0.0.1:3000` |
-| Nginx (unified) | 8080 | `http://your-server-ip:8080` |
+| Frontend (static only) | 3000 | `http://127.0.0.1:3000` (UI only, no API; not the login URL) |
+| Nginx (unified, entry point) | 8080 | `http://your-server-ip:8080` (use this) |
 | PostgreSQL | 5432 | local |
 | Redis | 6379 | local |
 
