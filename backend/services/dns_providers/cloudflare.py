@@ -10,6 +10,7 @@ Token scope required: Zone:DNS:Edit + Zone:Read.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -22,12 +23,25 @@ logger = logging.getLogger(__name__)
 CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4"
 _TIMEOUT = aiohttp.ClientTimeout(total=20)
 
+# Characters NOT valid in an HTTP bearer credential (RFC 6750 token68: A-Za-z0-9-._~+/=).
+# Cloudflare API tokens are a strict subset of this set, so removing anything outside it can
+# never corrupt a valid token, but it does strip the paste artifacts that make Cloudflare
+# reject the Authorization header with HTTP 400 "Invalid request headers" (CF code 6003):
+# surrounding/embedded quotes, interior spaces/tabs, zero-width/unicode chars, and CR/LF
+# (the latter would otherwise make aiohttp raise client-side before the request is even sent).
+_NON_TOKEN68 = re.compile(r"[^A-Za-z0-9._~+/=-]")
+
 
 def _strip_quotes(s: str) -> str:
     s = (s or "").strip()
     if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
         return s[1:-1]
     return s
+
+
+def _sanitize_token(s: str) -> str:
+    """Strip surrounding quotes/whitespace, then drop every character outside the token68 set."""
+    return _NON_TOKEN68.sub("", _strip_quotes(s))
 
 
 class CloudflareDNSProvider(DnsProvider):
@@ -47,7 +61,10 @@ class CloudflareDNSProvider(DnsProvider):
 
     def __init__(self, credentials: Dict[str, str] | None = None):
         super().__init__(credentials)
-        self._token = (self.credentials.get("api_token") or "").strip()
+        self._raw_token = (self.credentials.get("api_token") or "").strip()
+        # Sanitize to the token68 set so a pasted token with quotes/spaces/control/unicode chars
+        # cannot produce an invalid Authorization header (CF 6003 "Invalid request headers").
+        self._token = _sanitize_token(self._raw_token)
 
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
@@ -97,7 +114,13 @@ class CloudflareDNSProvider(DnsProvider):
                 detail = f"Cloudflare token valid; {total} zone(s) visible."
             return {"ok": True, "detail": detail}
         except DnsProviderError as exc:
-            return {"ok": False, "detail": str(exc)}
+            # Always surface the real Cloudflare reason (e.g. token scope). If sanitizing also changed
+            # the token, append a hint that stray characters were stripped (never echo the token).
+            detail = str(exc)
+            if self._raw_token != self._token:
+                detail += (" Note: the token contained characters that were stripped; if it still "
+                           "fails, re-copy it from Cloudflare without quotes or spaces.")
+            return {"ok": False, "detail": detail}
         except Exception:  # noqa: BLE001 — never leak an internal/transport error verbatim
             return {"ok": False, "detail": "Could not verify the Cloudflare token."}
 

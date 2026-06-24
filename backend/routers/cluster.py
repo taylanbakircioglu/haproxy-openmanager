@@ -5048,9 +5048,15 @@ async def reject_all_pending_changes(cluster_id: int, authorization: str = Heade
         # Get all pending config versions for this cluster (CRITICAL: Include metadata for rollback!)
         # HA/VIP (Issue #27): exclude vip-* versions — they are rejected/reverted by the
         # VIP reject endpoint (which restores keepalived state), not the generic rollback.
+        # ORDER BY created_at ASC: the rollback loop dedups per entity and keeps the FIRST-processed
+        # snapshot, so the OLDEST snapshot must win — its old_values hold the true pre-change state.
+        # Critical when one entity has multiple pending versions (e.g. cluster ACME enable->disable->enable):
+        # rolling back to the oldest restores the original acme_enabled. (Matches the apply SELECT, which
+        # already orders created_at ASC.)
         pending_versions = await conn.fetch("""
             SELECT id, version_name, metadata FROM config_versions
             WHERE cluster_id = $1 AND status = 'PENDING' AND version_name NOT LIKE 'vip-%'
+            ORDER BY created_at ASC
         """, cluster_id)
         
         # CRITICAL FIX: Detect and clean orphan config versions

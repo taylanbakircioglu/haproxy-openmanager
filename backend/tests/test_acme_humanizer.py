@@ -81,6 +81,7 @@ def test_legacy_plain_string_with_brace_but_invalid_json_falls_back():
     ("urn:ietf:params:acme:error:rejectedIdentifier", "blacklisted",    "rejected"),
     ("urn:ietf:params:acme:error:serverInternal", "internal err",       "ACME server"),
     ("urn:ietf:params:acme:error:userActionRequired", "agree to ToS",   "User action"),
+    ("urn:ietf:params:acme:error:externalAccountRequired", "EAB required", "External Account Binding"),
 ])
 def test_known_problem_types_are_humanized(problem_type, detail_text, expected_title_contains):
     payload = json.dumps({"type": problem_type, "detail": detail_text, "status": 400})

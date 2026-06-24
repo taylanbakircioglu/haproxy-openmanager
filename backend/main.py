@@ -8,7 +8,8 @@ import redis
 import asyncio
 from datetime import datetime, timedelta
 
-_version_info = {"version": "1.8.0", "releaseName": "ACME DNS-01 challenge support", "releaseDate": "2026-06-23"}
+# Build/deploy marker for the v1.8.x (Issue #35, DNS-01) rollout — ensures the pipeline ships this commit's image.
+_version_info = {"version": "1.8.1", "releaseName": "ACME DNS-01 fixes (Cloudflare token, EAB, Apply Management)", "releaseDate": "2026-06-24"}
 for _vpath in ["/app/version.json", os.path.join(os.path.dirname(__file__), "..", "version.json")]:
     try:
         with open(_vpath) as _vf:

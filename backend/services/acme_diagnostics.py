@@ -116,6 +116,10 @@ _PROBLEM_HUMANIZED: Dict[str, Dict[str, str]] = {
         "title": "HTTP-01 challenge response mismatch",
         "hint": "The CA fetched the challenge URL but received the wrong key authorization. Confirm the challenge was served from the right backend.",
     },
+    "urn:ietf:params:acme:error:externalAccountRequired": {
+        "title": "External Account Binding (EAB) required",
+        "hint": "This CA (e.g. ZeroSSL, Google) requires EAB. Enter the EAB Key ID and HMAC Key from your CA account when registering.",
+    },
     "urn:ietf:params:acme:error:invalidContact": {
         "title": "Invalid contact email",
         "hint": "The ACME account email is malformed. Update the LE account email.",

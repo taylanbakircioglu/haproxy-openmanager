@@ -368,7 +368,7 @@ const ApplyManagement = () => {
       title: 'Apply All Configuration Changes',
       content: (
         <div>
-          <p>You are about to apply <strong>{effectiveTotal}</strong> pending changes:</p>
+          <p>You are about to apply <strong>{modalChangeCount}</strong> pending changes:</p>
           <ul style={{ marginTop: 10, marginBottom: 10 }}>
             {pendingChanges.frontends.length > 0 && (
               <li><strong>{pendingChanges.frontends.length}</strong> Frontend changes</li>
@@ -384,6 +384,12 @@ const ApplyManagement = () => {
             )}
             {(pendingChanges.vips || []).length > 0 && (
               <li><strong>{pendingChanges.vips.length}</strong> HA/VIP changes</li>
+            )}
+            {acmeVersions.length > 0 && (
+              <li><strong>{acmeVersions.length}</strong> ACME Challenge Routing changes</li>
+            )}
+            {otherConfigVersions.length > 0 && (
+              <li><strong>{otherConfigVersions.length}</strong> Other configuration changes</li>
             )}
           </ul>
           <Alert
@@ -523,6 +529,10 @@ const ApplyManagement = () => {
       // async on their next agent poll) instead of looping on "Entities: 0/0".
       const vipCount = (pendingChanges.vips || []).length;
       const isVipOnly = totalEntities === 0 && !isRestoreOperation && nonVipPendingVersions.length === 0 && vipCount > 0;
+      // Config-version-only apply (e.g. cluster ACME enable/disable): no entity rows, not a restore,
+      // but there ARE non-vip config versions to push. Without this branch it falls to the "else" and
+      // shows a misleading "Entities: 0/0" while still syncing agents.
+      const isConfigVersionOnly = totalEntities === 0 && !isRestoreOperation && vipCount === 0 && nonVipPendingVersions.length > 0;
 
       if (isRestoreOperation) {
         // Restore operation: Show "Configuration" instead of "Entities"
@@ -534,6 +544,12 @@ const ApplyManagement = () => {
         setSyncProgress({ visible: true, step: `Applying ${vipCount} HA/VIP change(s)...`, progress: 20 });
         startProgress('apply', `Applying ${vipCount} HA/VIP change(s)...`);
         updateEntityCounts(0, vipCount, 0, 0, 0);
+      } else if (isConfigVersionOnly) {
+        // Config-version-only (ACME toggle, etc.): show "Configuration" instead of "Entities: 0/0".
+        const cfgCount = nonVipPendingVersions.length;
+        setSyncProgress({ visible: true, step: `Applying configuration change... Configuration: 0/${cfgCount}, Agents: ⏳`, progress: 20 });
+        startProgress('apply', `Applying configuration change... Configuration: 0/${cfgCount}, Agents: ⏳`);
+        updateEntityCounts(0, cfgCount, 0, totalAgents, disabledAgents);
       } else {
         // Normal operation: Show "Entities" as usual
         setSyncProgress({ visible: true, step: `Applying configuration changes... Entities: 0/${totalEntities}, Agents: ⏳`, progress: 20 });
@@ -556,10 +572,12 @@ const ApplyManagement = () => {
         }
       }
 
-      // Apply HAProxy changes only if there are any (avoids a no-op call when only VIPs are pending).
+      // Apply HAProxy changes if there are entity-level changes OR any non-vip config version
+      // (cluster ACME enable/disable, restore, bulk-import). Gating only on haproxyPending used to
+      // skip the call for config-version-only states, leaving those versions stuck PENDING.
       const haproxyPending = pendingChanges.frontends.length + pendingChanges.backends.length
         + pendingChanges.waf_rules.length + pendingChanges.ssl_certificates.length;
-      const response = haproxyPending > 0
+      const response = (haproxyPending > 0 || nonVipPendingVersions.length > 0)
         ? await axios.post(
             `/api/clusters/${selectedCluster.id}/apply-changes`,
             {},
@@ -805,7 +823,7 @@ const ApplyManagement = () => {
       title: 'Reject All Configuration Changes',
       content: (
         <div>
-          <p>You are about to reject <strong>{effectiveTotal}</strong> pending changes:</p>
+          <p>You are about to reject <strong>{modalChangeCount}</strong> pending changes:</p>
           <ul style={{ marginTop: 10, marginBottom: 10 }}>
             {pendingChanges.frontends.length > 0 && (
               <li><strong>{pendingChanges.frontends.length}</strong> Frontend changes</li>
@@ -821,6 +839,12 @@ const ApplyManagement = () => {
             )}
             {(pendingChanges.vips || []).length > 0 && (
               <li><strong>{pendingChanges.vips.length}</strong> HA/VIP changes</li>
+            )}
+            {acmeVersions.length > 0 && (
+              <li><strong>{acmeVersions.length}</strong> ACME Challenge Routing changes</li>
+            )}
+            {otherConfigVersions.length > 0 && (
+              <li><strong>{otherConfigVersions.length}</strong> Other configuration changes</li>
             )}
           </ul>
           <Alert
@@ -874,10 +898,16 @@ const ApplyManagement = () => {
         }
       }
 
-      // Reject HAProxy changes only if there are any.
+      // Reject HAProxy changes if there are entity-level changes OR any non-vip config version
+      // (e.g. cluster ACME enable/disable, restore, bulk-import) — the backend DELETE rejects all
+      // non-vip PENDING versions and rolls back their snapshots. Gating only on haproxyPending used
+      // to skip the call for config-version-only states, returning the misleading "Rejected 0 HA/VIP".
       const haproxyPending = pendingChanges.frontends.length + pendingChanges.backends.length
         + pendingChanges.waf_rules.length + pendingChanges.ssl_certificates.length;
-      const response = haproxyPending > 0
+      const nonVipPendingVersions = configVersions.filter(
+        v => v.status === 'PENDING' && !(v.version_name || '').startsWith('vip-')
+      );
+      const response = (haproxyPending > 0 || nonVipPendingVersions.length > 0)
         ? await axios.delete(
             `/api/clusters/${selectedCluster.id}/pending-changes`,
             { headers: { Authorization: `Bearer ${token}` } }
@@ -957,6 +987,23 @@ const ApplyManagement = () => {
   const appliedVersions = configVersions.filter(v => v.status === 'APPLIED');
   const rejectedVersions = configVersions.filter(v => v.status === 'REJECTED');
   const effectiveTotal = pendingChanges.total_count > 0 ? pendingChanges.total_count : pendingVersions.length;
+  // Issue #35: cluster ACME enable/disable produce `cluster-<id>-acme-<enable|disable>-<ts>` config
+  // versions that have NO entity-level pending flag, so they were neither categorized nor counted.
+  const ACME_VERSION_RE = /^cluster-\d+-acme-(enable|disable)-/;
+  const ENTITY_VERSION_PREFIXES = ['frontend-', 'backend-', 'server-', 'ssl-', 'waf-'];
+  const acmeVersions = pendingVersions.filter(v => ACME_VERSION_RE.test(v.version_name || ''));
+  // "Other" config versions for the confirm modal = non-vip, non-acme, non-entity-backed (i.e.
+  // restore-*/bulk-import-*/other cluster-level) — entity-backed versions are already counted via
+  // total_count, and vips are listed separately, so excluding them avoids double-counting.
+  const otherConfigVersions = pendingVersions.filter(v => {
+    const n = v.version_name || '';
+    if (n.startsWith('vip-') || ACME_VERSION_RE.test(n)) return false;
+    return !ENTITY_VERSION_PREFIXES.some(p => n.startsWith(p));
+  });
+  // Confirm-modal header count: entities+VIPs (total_count) + ACME + other config versions, so the
+  // header equals the sum of the listed <li> items in every state. The button-enable gate keeps
+  // using effectiveTotal (unchanged) so entity-only button/Alert behavior is byte-identical.
+  const modalChangeCount = (pendingChanges.total_count || 0) + acmeVersions.length + otherConfigVersions.length;
 
   const renderPendingItem = (item, type, icon) => {
     // For PENDING items, don't show sync status since they haven't been applied yet
@@ -1314,12 +1361,46 @@ const ApplyManagement = () => {
                     </div>
                   )}
 
+                  {/* Issue #35: ACME Challenge Routing (cluster-<id>-acme-*) versions have no entity
+                      flag. Render them in their own section REGARDLESS of whether entity sections are
+                      present, so a co-pending ACME toggle is never hidden in the left panel. */}
+                  {acmeVersions.length > 0 && (
+                    <div style={{ marginTop: 8, marginBottom: 8 }}>
+                      <Title level={5}>
+                        <SafetyCertificateOutlined style={{ marginRight: 8, color: '#1890ff' }} />
+                        ACME Challenge Routing ({acmeVersions.length})
+                      </Title>
+                      {acmeVersions.map(v => {
+                        const isEnable = /^cluster-\d+-acme-enable-/.test(v.version_name);
+                        return (
+                          <div key={v.id} style={{
+                            padding: 10, border: '1px dashed #1890ff', borderRadius: 6, marginBottom: 8,
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#f0f8ff'
+                          }}>
+                            <span style={{ fontFamily: 'monospace' }}>{v.version_name}</span>
+                            <span>
+                              <Tag color={isEnable ? 'green' : 'default'}>{isEnable ? 'ENABLE' : 'DISABLE'}</Tag>
+                              <Tag color="orange">PENDING</Tag>
+                            </span>
+                          </div>
+                        );
+                      })}
+                      <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 4 }}>
+                        ACME challenge routing change. Apply to push the updated HAProxy config to the agents.
+                      </div>
+                    </div>
+                  )}
+
                   {pendingChanges.frontends.length === 0 && pendingChanges.backends.length === 0 && pendingChanges.waf_rules.length === 0 && pendingChanges.ssl_certificates.length === 0 && (pendingChanges.vips || []).length === 0 && pendingVersions.length > 0 && (
                     <div style={{ marginTop: 8 }}>
                       {(() => {
                         const restoreVersions = pendingVersions.filter(v => v.version_name.startsWith('restore-'));
                         const bulkImportVersions = pendingVersions.filter(v => v.version_name.startsWith('bulk-import-'));
-                        const otherVersions = pendingVersions.filter(v => !v.version_name.startsWith('restore-') && !v.version_name.startsWith('bulk-import-'));
+                        // Exclude restore-/bulk-import- (own sections), vip-* (VIP section), and acme-*
+                        // (the dedicated ACME section above) so they aren't duplicated in "Other".
+                        const otherVersions = pendingVersions.filter(v =>
+                          !v.version_name.startsWith('restore-') && !v.version_name.startsWith('bulk-import-')
+                          && !v.version_name.startsWith('vip-') && !ACME_VERSION_RE.test(v.version_name));
                         
                         return (
                           <>

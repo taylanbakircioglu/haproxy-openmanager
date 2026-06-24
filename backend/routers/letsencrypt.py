@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict
+import base64
 import json
 import logging
 import re
@@ -59,8 +60,11 @@ class AccountCreate(BaseModel):
     email: str
     directory_url: Optional[str] = None
     tos_agreed: bool = True
-    eab_kid: Optional[str] = None
-    eab_hmac_key: Optional[str] = None
+    # EAB (External Account Binding) for CAs that require it (ZeroSSL, Google). The KID is opaque
+    # (bound only); the HMAC key must be base64url so newAccount's _b64url_decode won't raise a
+    # cryptic binascii error (a common copy mistake is standard-base64 '+'/'/' vs urlsafe '-'/'_').
+    eab_kid: Optional[str] = Field(default=None, max_length=256)
+    eab_hmac_key: Optional[str] = Field(default=None, max_length=512)
     # Issue #35: per-account default challenge method + DNS provider (for dns-01).
     challenge_type: str = "http-01"
     dns_provider: Optional[str] = None
@@ -70,6 +74,17 @@ class AccountCreate(BaseModel):
     def _validate_challenge_type(cls, v):
         if v not in _CHALLENGE_TYPES:
             raise ValueError(f"challenge_type must be one of {_CHALLENGE_TYPES}")
+        return v
+
+    @field_validator('eab_hmac_key')
+    @classmethod
+    def _validate_eab_hmac_key(cls, v):
+        if not v:
+            return v
+        try:
+            base64.urlsafe_b64decode(v + '=' * (-len(v) % 4))
+        except Exception:
+            raise ValueError("eab_hmac_key is not valid base64; copy it exactly from your CA account.")
         return v
 
     @model_validator(mode='after')
@@ -216,8 +231,19 @@ async def create_account(body: AccountCreate, authorization: str = Header(None))
             dns_provider=(body.dns_provider or None),
         )
         return result
+    except HTTPException:
+        # Preserve deliberate status codes (e.g. 409 DNS-01 disabled, 422 unsupported provider) —
+        # the broad except below would otherwise downgrade them all to 400.
+        raise
     except Exception as e:
         logger.error(f"ACME account registration failed: {e}")
+        # Humanize the common EAB-required failure (ZeroSSL/Google). The ACME error propagates as a
+        # string ("Account registration failed: {<dict>}"), so match the URN substring in str(e).
+        if 'externalaccountrequired' in str(e).lower():
+            raise HTTPException(status_code=400, detail=(
+                "This CA requires External Account Binding (EAB). Enter the EAB Key ID and HMAC Key "
+                "from your ZeroSSL/Google account and retry."
+            ))
         raise HTTPException(status_code=400, detail=str(e))
 
 

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Card, Table, Button, Tag, Space, Modal, Form, Input, Select, Steps,
-  message, Row, Col, Statistic, Alert, Tooltip, Switch, theme, Segmented,
+  message, Row, Col, Statistic, Alert, Tooltip, Switch, theme, Segmented, Collapse,
   Tabs, Timeline, Spin, Empty, Typography, Divider
 } from 'antd';
 import {
@@ -18,8 +18,14 @@ import axios from 'axios';
 
 const { Option } = Select;
 
-const getErrorMsg = (err, fallback) =>
-  err?.response?.data?.error?.message || err?.response?.data?.detail || fallback;
+const getErrorMsg = (err, fallback) => {
+  const data = err?.response?.data;
+  // FastAPI/Pydantic 422s wrap the specific field message in error.details.validation_errors[];
+  // the top-level error.message is generic ("Validation error in request data"), so prefer the
+  // field-level message (e.g. the EAB base64 hint) when present.
+  const fieldMsg = data?.error?.details?.validation_errors?.[0]?.message;
+  return fieldMsg || data?.error?.message || data?.detail || fallback;
+};
 
 // Issue #35: humanize the dotted event_type tokens emitted for DNS-01 orders so the diagnostics
 // timeline reads as a step-by-step progress log rather than raw machine strings. Unknown types
@@ -561,6 +567,9 @@ const ACMEAutomation = () => {
         tos_agreed: values.tos_agreed,
         challenge_type: challengeType,
         dns_provider: dnsProvider,
+        // EAB for CAs that require it (ZeroSSL/Google). Empty → backend falls back to global Settings.
+        eab_kid: (values.eab_kid || '').trim() || undefined,
+        eab_hmac_key: (values.eab_hmac_key || '').trim() || undefined,
       });
       const accountId = res.data?.id;
       // For an automated DNS-01 provider, store the entered credentials (verified server-side).
@@ -1613,6 +1622,59 @@ const ACMEAutomation = () => {
               Let's Encrypt Subscriber Agreement
             </a>).
           </div>
+          {/* Issue #35: External Account Binding — required by ZeroSSL / Google Trust Services. */}
+          <Collapse
+            ghost
+            style={{ marginTop: 12 }}
+            items={[{
+              key: 'eab',
+              label: 'External Account Binding (EAB)',
+              children: (
+                <>
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    message="Required by some CAs (ZeroSSL, Google Trust Services). Copy the Key ID and HMAC Key from your CA account. Re-enter them on each registration; the HMAC key is not stored."
+                  />
+                  <Form.Item
+                    name="eab_kid"
+                    label="EAB Key ID"
+                    dependencies={['eab_hmac_key']}
+                    rules={[({ getFieldValue }) => ({
+                      validator(_, value) {
+                        const kid = (value || '').trim();
+                        const hmac = (getFieldValue('eab_hmac_key') || '').trim();
+                        if (!kid && hmac) {
+                          return Promise.reject(new Error('EAB Key ID is required when an HMAC Key is entered.'));
+                        }
+                        return Promise.resolve();
+                      },
+                    })]}
+                  >
+                    <Input placeholder="EAB Key Identifier" autoComplete="off" />
+                  </Form.Item>
+                  <Form.Item
+                    name="eab_hmac_key"
+                    label="EAB HMAC Key"
+                    dependencies={['eab_kid']}
+                    rules={[({ getFieldValue }) => ({
+                      validator(_, value) {
+                        const kid = (getFieldValue('eab_kid') || '').trim();
+                        const hmac = (value || '').trim();
+                        if (kid && !hmac) {
+                          return Promise.reject(new Error('EAB HMAC Key is required when a Key ID is entered.'));
+                        }
+                        return Promise.resolve();
+                      },
+                    })]}
+                  >
+                    <Input.Password placeholder="EAB HMAC Key (base64url)" autoComplete="new-password" />
+                  </Form.Item>
+                </>
+              ),
+            }]}
+          />
           {dns01Enabled && (
             <>
               <Divider style={{ margin: '16px 0 12px' }} />

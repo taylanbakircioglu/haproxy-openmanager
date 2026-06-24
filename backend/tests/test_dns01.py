@@ -68,3 +68,24 @@ def test_provider_registry_and_allow_list():
     except ValueError:
         raised = True
     assert raised
+
+
+def test_cloudflare_token_sanitize():
+    # Issue #35 follow-up: a pasted token with quotes/spaces/control/unicode chars produced an
+    # invalid Authorization header (CF 6003 "Invalid request headers"). The sanitizer strips them.
+    from services.dns_providers.cloudflare import _sanitize_token, CloudflareDNSProvider
+
+    # Surrounding double quotes stripped.
+    assert _sanitize_token('"abc123-_def"') == 'abc123-_def'
+    # Interior spaces / tabs / newlines removed.
+    assert _sanitize_token('abc 123\tdef\n') == 'abc123def'
+    # A clean token68 string is unchanged (cannot corrupt a valid Cloudflare token).
+    clean = 'A1b2-_C3.d4~e5+f6/g7=='
+    assert _sanitize_token(clean) == clean
+    # Single quotes and a zero-width char removed.
+    assert _sanitize_token("'tok" + chr(0x200b) + "en'") == 'token'
+
+    # The provider constructor sanitizes into _token and keeps the raw input for diagnostics.
+    p = CloudflareDNSProvider({"api_token": '"my-token_123"'})
+    assert p._token == 'my-token_123'
+    assert p._raw_token == '"my-token_123"'
