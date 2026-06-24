@@ -28,7 +28,7 @@ def _b64url(data: bytes) -> str:
 
 
 def _b64url_decode(s: str) -> bytes:
-    s += '=' * (4 - len(s) % 4)
+    s += '=' * (-len(s) % 4)  # pad to a multiple of 4 (0 pad when already aligned)
     return base64.urlsafe_b64decode(s)
 
 
@@ -37,7 +37,11 @@ class ACMEService:
 
     def __init__(self):
         self._directory_cache: Dict[str, dict] = {}
-        self._nonce: Optional[str] = None
+        # Anti-replay nonces are scoped PER CA (directory_url). A Replay-Nonce issued by one ACME
+        # server must never be sent in a JWS to another, or the second server rejects it (e.g. ZeroSSL
+        # "malformed: The Replay Nonce could not be base64url-decoded"). This client is a process-wide
+        # singleton shared across CAs, so a single shared nonce was leaking across them.
+        self._nonce_by_dir: Dict[str, str] = {}
 
     async def _get_settings(self) -> dict:
         conn = await get_database_connection()
@@ -71,17 +75,21 @@ class ACMEService:
                     raise Exception(f"Failed to fetch ACME directory: HTTP {resp.status}")
                 data = await resp.json()
                 if 'Replay-Nonce' in resp.headers:
-                    self._nonce = resp.headers['Replay-Nonce']
+                    self._nonce_by_dir[directory_url] = resp.headers['Replay-Nonce']
                 data['_fetched_at'] = time.time()
                 self._directory_cache[directory_url] = data
                 return data
 
     async def _get_nonce(self, directory_url: str) -> str:
-        if self._nonce:
-            nonce = self._nonce
-            self._nonce = None
-            return nonce
+        # Use a cached nonce for THIS CA only; otherwise fetch a fresh one from THIS CA's newNonce.
+        cached = self._nonce_by_dir.pop(directory_url, None)
+        if cached:
+            return cached
         directory = await self.get_directory(directory_url)
+        # get_directory may have just captured a nonce for this CA from the directory response.
+        cached = self._nonce_by_dir.pop(directory_url, None)
+        if cached:
+            return cached
         async with aiohttp.ClientSession() as session:
             async with session.head(directory['newNonce']) as resp:
                 return resp.headers['Replay-Nonce']
@@ -188,11 +196,17 @@ class ACMEService:
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
                     if 'Replay-Nonce' in resp.headers:
-                        self._nonce = resp.headers['Replay-Nonce']
+                        self._nonce_by_dir[directory_url] = resp.headers['Replay-Nonce']
 
-                    if resp.status == 400:
+                    if resp.status == 400 and attempt < 2:
                         err = await resp.json()
-                        if err.get('type') == 'urn:ietf:params:acme:error:badNonce' and attempt < 2:
+                        etype = (err.get('type') or '')
+                        edetail = (err.get('detail') or '').lower()
+                        # Retry on badNonce, and on any nonce-related malformed rejection (e.g.
+                        # "The Replay Nonce could not be base64url-decoded") — refetch a FRESH nonce
+                        # from the target CA and resign. With per-CA scoping the cross-CA cause is gone;
+                        # this is defense-in-depth so a stale/rejected nonce always self-heals.
+                        if etype.endswith('badNonce') or 'nonce' in edetail:
                             nonce = resp.headers.get('Replay-Nonce') or await self._get_nonce(directory_url)
                             protected['nonce'] = nonce
                             body = self._sign_jws(private_key, protected, payload)

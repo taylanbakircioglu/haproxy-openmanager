@@ -1,5 +1,5 @@
 {
-  "version": "1.8.1",
-  "releaseName": "ACME DNS-01 fixes (Cloudflare token, EAB, Apply Management)",
-  "releaseDate": "2026-06-24"
+  "version": "1.8.2",
+  "releaseName": "ACME nonce fix (ZeroSSL registration)",
+  "releaseDate": "2026-06-25"
 }

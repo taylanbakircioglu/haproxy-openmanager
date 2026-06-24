@@ -89,3 +89,24 @@ def test_cloudflare_token_sanitize():
     p = CloudflareDNSProvider({"api_token": '"my-token_123"'})
     assert p._token == 'my-token_123'
     assert p._raw_token == '"my-token_123"'
+
+
+def test_b64url_decode_padding_roundtrip():
+    # Issue #35 v1.8.2: _b64url_decode must round-trip for EVERY length, including base64url strings
+    # whose length is a multiple of 4 (the case the old padding formula '=' * (4 - len%4) over-padded).
+    from services.acme_service import _b64url as enc_fn, _b64url_decode as dec_fn
+    for n in range(0, 20):
+        data = bytes(range(n))
+        assert dec_fn(enc_fn(data)) == data, f"round-trip failed at byte length {n}"
+
+
+def test_nonce_scoped_per_directory():
+    # Issue #35 v1.8.2: a nonce cached for one CA (directory_url) must never be returned for another,
+    # and must be single-use. Both directories are pre-cached so _get_nonce returns without network.
+    import asyncio
+    svc = ACMEService()
+    svc._nonce_by_dir = {"https://a.example/dir": "NONCE_A", "https://b.example/dir": "NONCE_B"}
+    got = asyncio.run(svc._get_nonce("https://a.example/dir"))
+    assert got == "NONCE_A"                                            # returns THIS CA's nonce
+    assert svc._nonce_by_dir.get("https://a.example/dir") is None      # consumed (single-use)
+    assert svc._nonce_by_dir.get("https://b.example/dir") == "NONCE_B" # the other CA is untouched
