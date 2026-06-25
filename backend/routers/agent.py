@@ -29,6 +29,40 @@ AGENT_VERSIONS = {
     "linux": "2.0.0"
 }
 
+
+def _sanitize_agent_json(body_str: str):
+    """Repair the common malformed-JSON patterns a hand-built agent heartbeat can emit.
+
+    Agents assemble their heartbeat JSON as text in bash, so an empty interpolated value can leave
+    a structurally-invalid comma (issue #31). Returns (possibly_repaired_str, was_changed). The
+    repairs are conservative and target only structural artifacts an agent produces; they never
+    alter this endpoint's legitimate string values (the agent emits no string containing ',,' —
+    haproxy_stats_csv is base64/comma-free and the rest are constrained os/kernel/ip/version text).
+    """
+    import re
+    sanitized = False
+    # Fix 1: empty value before a comma ("server_statuses": ,)
+    if re.search(r':\s*,', body_str):
+        body_str = re.sub(r':\s*,', ': null,', body_str); sanitized = True
+    # Fix 2: empty value before a closing brace ("field":})
+    if re.search(r':\s*}', body_str):
+        body_str = re.sub(r':\s*}', ': null}', body_str); sanitized = True
+    # Fix 3: trailing comma before } or ]
+    if re.search(r',(\s*[}\]])', body_str):
+        body_str = re.sub(r',(\s*[}\]])', r'\1', body_str); sanitized = True
+    # Fix 4: leading comma run right after an opening brace/bracket (issue #31): an empty
+    # $system_info as the first member collapses to '{ , "name": ...'. The ': ,' fix above cannot
+    # catch this because there is no key/colon before the comma.
+    if re.search(r'([{\[])(\s*,)+', body_str):
+        body_str = re.sub(r'([{\[])(\s*,)+', r'\1', body_str); sanitized = True
+    # Fix 5: a run of commas between members (issue #31): an empty $system_info between two fields
+    # produces '"version": "x",\n    ,\n    "haproxy_status": ...'. Runs after Fix 1/3 so only
+    # structural commas remain; collapse any comma run to a single comma.
+    if re.search(r',(\s*,)+', body_str):
+        body_str = re.sub(r',(\s*,)+', ',', body_str); sanitized = True
+    return body_str, sanitized
+
+
 def get_platform_key(agent_platform: str) -> str:
     """Convert agent platform to standardized platform key - fixed empty platform fallback"""
     platform = agent_platform.lower() if agent_platform else 'unknown'
@@ -1455,47 +1489,33 @@ async def agent_heartbeat_by_name(
     import json
     from pydantic import ValidationError
     
-    # Read raw body and sanitize common JSON errors from agents
+    # Read raw body. Parse VALID JSON as-is (the normal case for every agent version) and only
+    # fall back to the malformed-JSON repair when the body does not parse. This guarantees a healthy
+    # heartbeat from any agent version is byte-for-byte untouched — the repair regexes can never run
+    # against a well-formed payload (issue #31; strictly safer than repairing unconditionally).
     try:
         raw_body = await request.body()
         body_str = raw_body.decode('utf-8')
-        
-        # Sanitize common malformed JSON patterns from agents
-        original_body = body_str
-        sanitized = False
-        
-        # Fix 1: Empty values before comma (most common: "server_statuses": ,)
-        if re.search(r':\s*,', body_str):
-            body_str = re.sub(r':\s*,', ': null,', body_str)
-            sanitized = True
-        
-        # Fix 2: Empty values before closing brace
-        if re.search(r':\s*}', body_str):
-            body_str = re.sub(r':\s*}', ': null}', body_str)
-            sanitized = True
-        
-        # Fix 3: Trailing commas
-        if re.search(r',(\s*[}\]])', body_str):
-            body_str = re.sub(r',(\s*[}\]])', r'\1', body_str)
-            sanitized = True
-        
-        if sanitized:
-            # Extract agent name for logging
-            agent_name = "unknown"
-            try:
-                name_match = re.search(r'"name"\s*:\s*"([^"]+)"', body_str)
-                if name_match:
-                    agent_name = name_match.group(1)
-            except:
-                pass
-            
-            logger.info(f"Sanitized malformed JSON from agent '{agent_name}' - fixed empty values and trailing commas")
-            logger.debug(f"Original JSON (preview): {original_body[:300]}")
-            logger.debug(f"Sanitized JSON (preview): {body_str[:300]}")
-        
-        # Parse sanitized JSON into Pydantic model
-        heartbeat_dict = json.loads(body_str)
-        
+
+        try:
+            heartbeat_dict = json.loads(body_str)
+        except json.JSONDecodeError:
+            # Malformed body (would otherwise be a hard 400). Attempt a conservative repair of the
+            # comma artifacts a hand-built agent heartbeat can emit, then re-parse.
+            repaired, changed = _sanitize_agent_json(body_str)
+            if changed:
+                agent_name = "unknown"
+                try:
+                    name_match = re.search(r'"name"\s*:\s*"([^"]+)"', repaired)
+                    if name_match:
+                        agent_name = name_match.group(1)
+                except Exception:
+                    pass
+                logger.info(f"Repaired malformed JSON from agent '{agent_name}' before parsing")
+                logger.debug(f"Original JSON (preview): {body_str[:300]}")
+                logger.debug(f"Repaired JSON (preview): {repaired[:300]}")
+            heartbeat_dict = json.loads(repaired)  # may still raise -> handled as 400 below
+
         # DEBUG: Log cluster_id for auto-register troubleshooting
         if heartbeat_dict.get('name'):
             logger.info(f"HEARTBEAT DEBUG: agent={heartbeat_dict.get('name')}, cluster_id={heartbeat_dict.get('cluster_id')}, has_cluster_id={bool(heartbeat_dict.get('cluster_id'))}")

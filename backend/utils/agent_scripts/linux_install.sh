@@ -1055,7 +1055,12 @@ register_agent() {
     local arch=$(uname -m)
     platform=$(uname -s | tr '[:upper:]' '[:lower:]')  # Remove local to make it global
     local system_info=$(collect_system_info)
-    
+    # issue #31: if collect_system_info produced no JSON content (empty on an unusual host), the
+    # '$system_info,' line below would collapse to a bare comma and break the heartbeat JSON. A
+    # valid fragment always contains a quoted key; if none is present, fall back to one. The glob
+    # '*"*' is the most portable bash test (no POSIX class / pattern-substitution), safe on bash 3.x+.
+    [[ "$system_info" != *'"'* ]] && system_info='"operating_system": "unknown"'
+
     local json_payload=$(cat <<SIMPLE_EOF
 {
     "name": "$AGENT_NAME",
@@ -1357,7 +1362,12 @@ send_heartbeat() {
     local server_statuses=$(get_server_statuses)
     local haproxy_stats_csv=$(get_haproxy_stats_csv)
     local system_info=$(collect_system_info)
-    
+    # issue #31: if collect_system_info produced no JSON content (empty on an unusual host), the
+    # '$system_info,' line below would collapse to a bare comma and break the heartbeat JSON. A
+    # valid fragment always contains a quoted key; if none is present, fall back to one. The glob
+    # '*"*' is the most portable bash test (no POSIX class / pattern-substitution), safe on bash 3.x+.
+    [[ "$system_info" != *'"'* ]] && system_info='"operating_system": "unknown"'
+
     # Get HAProxy version for heartbeat (safe extraction, fallback to "unknown")
     local haproxy_version="unknown"
     if command -v haproxy &> /dev/null; then
