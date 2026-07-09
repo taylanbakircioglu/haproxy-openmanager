@@ -8,9 +8,13 @@ import redis
 import asyncio
 from datetime import datetime, timedelta
 
-# Build/deploy marker for the v1.8.x (Issue #35, DNS-01) rollout — ensures the pipeline ships this commit's image.
-_version_info = {"version": "1.8.4", "releaseName": "Agent installer self-kill fix", "releaseDate": "2026-06-27"}
-for _vpath in ["/app/version.json", os.path.join(os.path.dirname(__file__), "..", "version.json")]:
+# Single source of truth: backend/version.json, which sits next to this module and is baked into
+# every image by `COPY . .` (build context ./backend) — no pipeline staging needed. The literal
+# below is only a last-resort "file missing" marker; it is deliberately NOT a real version so it can
+# never silently drift out of sync (this exact drift showed a stale version after v1.8.5/v1.8.6).
+# Keep the canonical version ONLY in backend/version.json — test_version_consistency.py enforces it.
+_version_info = {"version": "unknown", "releaseName": "unknown", "releaseDate": ""}
+for _vpath in [os.path.join(os.path.dirname(__file__), "version.json"), "/app/version.json"]:
     try:
         with open(_vpath) as _vf:
             _version_info = json.load(_vf)

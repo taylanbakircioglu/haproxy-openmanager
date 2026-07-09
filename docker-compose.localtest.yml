@@ -10,7 +10,6 @@ services:
       dockerfile: Dockerfile
     volumes:
       - haproxy_configs:/etc/haproxy
-      - ./version.json:/app/version.json:ro
 
   frontend:
     image: haproxy-openmanager-frontend:localtest

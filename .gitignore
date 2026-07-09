@@ -39,11 +39,6 @@ venv.bak/
 *.sqlite
 *.sqlite3
 
-# Build-time staged version.json (CI `cp version.json backend/`).
-# The canonical file lives at repo root; this path is a transient
-# copy for the backend Docker build context.
-backend/version.json
-
 # IDE
 .vscode/
 .idea/

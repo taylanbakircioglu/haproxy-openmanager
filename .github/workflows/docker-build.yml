@@ -21,27 +21,17 @@ jobs:
       - name: read product version
         id: prodversion
         run: |
-          VERSION=$(jq -r .version version.json)
+          VERSION=$(jq -r .version backend/version.json)
           if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-            echo "Failed to read product version from version.json" >&2
+            echo "Failed to read product version from backend/version.json" >&2
             exit 1
           fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
-      # The backend image is built with `context: ./backend`, so the
-      # repo-root version.json is OUTSIDE the build context and never
-      # reaches the container. Backend `main.py` falls back to a
-      # compile-time constant when /app/version.json is missing, which
-      # caused a real production drift: a redeploy of the v1.5.2 tree
-      # silently still reported "v1.5.0" in `/api/version` because the
-      # constant in main.py had been bumped but the file was not
-      # available to read. Stage version.json into the backend
-      # context here so the canonical file IS shipped and the
-      # constant only serves as a defensive fallback. The staged file
-      # is gitignored to keep `git status` clean for developers.
-      - name: stage version.json into backend build context
-        run: cp version.json backend/version.json
-
+      # version.json now lives at backend/version.json (inside the ./backend build
+      # context), so `COPY . .` bakes it into the image directly — no staging step
+      # is needed and the backend reports the correct version in every deployment,
+      # not just this workflow's builds.
       - name: set up qemu
         uses: docker/setup-qemu-action@v3
 
