@@ -6,7 +6,7 @@
   "dependencies": {
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.8.0",
+    "react-router-dom": "^6.30.4",
     "axios": "^1.16.0",
     "antd": "^5.2.0",
     "@ant-design/icons": "^5.0.0",
@@ -29,6 +29,20 @@
     "@testing-library/jest-dom": "^5.16.4",
     "@testing-library/user-event": "^14.4.3",
     "@babel/plugin-proposal-private-property-in-object": "^7.21.0"
+  },
+  "overrides": {
+    "ws": "7.5.11",
+    "webpack-dev-server": { "ws": "8.21.0" },
+    "form-data": "4.0.6",
+    "jsdom": { "form-data": "3.0.5" },
+    "js-yaml": "3.15.0",
+    "eslint": { "js-yaml": "4.2.0" },
+    "@eslint/eslintrc": { "js-yaml": "4.2.0" },
+    "http-proxy-middleware": "2.0.10",
+    "launch-editor": "2.14.1",
+    "postcss": "8.5.10",
+    "resolve-url-loader": { "postcss": "7.0.39" },
+    "@babel/core": "7.29.6"
   },
   "scripts": {
     "start": "react-scripts start",
