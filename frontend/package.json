@@ -41,8 +41,9 @@
     "http-proxy-middleware": "2.0.10",
     "launch-editor": "2.14.1",
     "postcss": "8.5.10",
-    "resolve-url-loader": { "postcss": "7.0.39" },
-    "@babel/core": "7.29.6"
+    "resolve-url-loader": "5.0.0",
+    "@babel/core": "7.29.6",
+    "websocket-driver": "0.7.5"
   },
   "scripts": {
     "start": "react-scripts start",
