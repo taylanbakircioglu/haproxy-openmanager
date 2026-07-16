@@ -22,7 +22,7 @@ services:
 
   # Redis Cache
   redis:
-    image: redis:7-alpine
+    image: redis:8.8.0-alpine
     container_name: haproxy-openmanager-redis
     command: redis-server --maxmemory 2gb --maxmemory-policy volatile-lru --save ""
     ports:

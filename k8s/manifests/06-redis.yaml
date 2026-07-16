@@ -22,7 +22,7 @@ spec:
       serviceAccountName: haproxy-openmanager-redis
       containers:
       - name: redis
-        image: redis:7-alpine
+        image: redis:8.8.0-alpine
         command:
           - redis-server
           - /usr/local/etc/redis/redis.conf
