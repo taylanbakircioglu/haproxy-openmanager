@@ -96,8 +96,16 @@ class ACMEService:
         cached = self._nonce_by_dir.pop(directory_url, None)
         if cached:
             return cached
-        async with aiohttp.ClientSession() as session:
-            async with session.head(directory['newNonce']) as resp:
+        # SECURITY (GHSA-3vh4-gvxx-wm2p): newNonce is taken from the (attacker-
+        # influenceable) directory JSON and is fetched here BEFORE the guarded
+        # _signed_request POST, so it must be guarded too — otherwise a directory
+        # that returns an internal newNonce (and omits Replay-Nonce) is a live SSRF.
+        # https + public IP only, IPv4-pinned connector, no redirects, bounded timeout.
+        from utils.ssrf_guard import assert_public_url, safe_connector
+        nonce_url = directory['newNonce']
+        await assert_public_url(nonce_url)
+        async with aiohttp.ClientSession(connector=safe_connector()) as session:
+            async with session.head(nonce_url, timeout=aiohttp.ClientTimeout(total=15), allow_redirects=False) as resp:
                 return resp.headers['Replay-Nonce']
 
     def _generate_account_key(self) -> Tuple[str, dict]:

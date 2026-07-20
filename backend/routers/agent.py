@@ -251,7 +251,7 @@ def calculate_agent_health(status, last_seen):
         return "offline"
 
 @router.get("", summary="Get All Agents", response_description="List of all agents")
-async def get_agents(pool_id: Optional[int] = None, authorization: str = Header(None)):
+async def get_agents(pool_id: Optional[int] = None, authorization: str = Header(None), x_api_key: Optional[str] = Header(None)):
     """
     # Get All Agents
     
@@ -305,9 +305,17 @@ async def get_agents(pool_id: Optional[int] = None, authorization: str = Header(
     """
     # SECURITY (GHSA-3p5c-m5m4-mjpx): the agent inventory (names, hostnames, IPs,
     # pools, OS) is operator data and was previously served unauthenticated — it is
-    # also the read-back channel used in the RCE exfil PoC. Require a valid JWT.
-    # Raised before the try so the 401 is not swallowed by the generic handler.
-    current_user = await get_current_user_from_token(authorization)
+    # also the read-back channel used in the RCE exfil PoC. Require EITHER a valid
+    # operator JWT OR a valid agent X-API-Key: deployed agents poll this endpoint
+    # (with their key, not a JWT) to read their own applied_config_version and avoid
+    # re-applying config on restart, so a JWT-only gate would break them. Checked
+    # before the try so the 401 is not swallowed by the generic handler.
+    if authorization:
+        current_user = await get_current_user_from_token(authorization)  # raises 401 on invalid JWT
+    else:
+        from auth_middleware import validate_agent_api_key
+        if not await validate_agent_api_key(x_api_key):
+            raise HTTPException(status_code=401, detail="Authentication required")
     try:
         conn = await get_database_connection()
 
@@ -768,6 +776,14 @@ async def generate_uninstall_script(platform: str, authorization: str = Header(N
     sudo ./uninstall-agent.sh
     ```
     """
+    # SECURITY (GHSA-3p5c-m5m4-mjpx): require authentication (operator JWT or agent
+    # key), consistent with generate-install-script. The uninstall script itself is
+    # generic (no secrets/topology), but an agent-management endpoint should not be
+    # anonymously reachable. Checked before the try so the 401 is not swallowed.
+    if authorization:
+        await get_current_user_from_token(authorization)
+    elif not await validate_agent_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="Authentication required")
     try:
         # Normalize platform to a canonical key (always 'linux' or 'macos').
         # macOS agents register with platform 'darwin' (from `uname -s`), so the
@@ -1103,6 +1119,8 @@ async def agent_config_applied_notification(agent_name: str, notification_data: 
         await close_database_connection(conn)
         return {"status": "ok", "message": "Config applied notification received"}
         
+    except HTTPException:
+        raise  # let auth 401/403 propagate (do not turn it into a 200 error body)
     except Exception as e:
         logger.error(f"Failed to process config applied notification from agent '{agent_name}': {e}")
         return {"status": "error", "message": str(e)}
@@ -1198,6 +1216,8 @@ async def agent_config_validation_failed(agent_name: str, notification_data: dic
         
         return {"status": "ok", "message": "Validation error notification received"}
         
+    except HTTPException:
+        raise  # let auth 401/403 propagate (do not turn it into a 200 error body)
     except Exception as e:
         logger.error(f"Failed to process validation error notification from agent '{agent_name}': {e}")
         return {"status": "error", "message": str(e)}
@@ -1487,6 +1507,8 @@ async def agent_config_sync(agent_name: str, sync_data: dict, x_api_key: Optiona
         logger.info(f"CONFIG SYNC: Agent '{agent_name}' synced {len(active_backends)} backends, {len(active_frontends)} frontends, {len(active_servers)} servers with database")
         return {"status": "ok", "message": f"Config synced - {len(active_backends)} backends, {len(active_frontends)} frontends, {len(active_servers)} servers processed"}
         
+    except HTTPException:
+        raise  # let auth 401/403 propagate (do not turn it into a 200 error body)
     except Exception as e:
         logger.error(f"Failed to process config sync from agent '{agent_name}': {e}")
         return {"status": "error", "message": str(e)}

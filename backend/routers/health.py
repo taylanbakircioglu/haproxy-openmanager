@@ -330,7 +330,7 @@ async def clusters_health():
         logger.error(f"Cluster health check failed: {e}")
         raise HTTPException(status_code=500, detail=f"Cluster health check failed: {str(e)}")
 
-@router.get("/errors")
+@router.get("/errors", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): app error metrics, sibling of /deep,/agents,/clusters
 async def error_statistics():
     """Get application error statistics and metrics"""
     try:

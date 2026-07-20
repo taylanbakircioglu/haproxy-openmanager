@@ -122,6 +122,87 @@ def test_script_template_read_requires_auth(client):
     assert res.status_code in REJECT
 
 
+# --------------------------------------------------------------------------
+# GHSA-3p5c (round 2): sibling endpoints exposing the SAME class of data
+# (found during post-merge review — must also require a JWT)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("path", [
+    "/api/haproxy-cluster-pools/1/agents",   # full agent inventory — same class as GET /api/agents
+    "/api/pools",
+    "/api/haproxy-cluster-pools",
+    "/api/dashboard/stats",
+    "/api/dashboard/overview",               # optional-auth pattern — leaked stats/names/alerts anonymously
+    "/api/haproxy/stats",
+    "/api/waf/rules",
+    "/api/health/errors",
+])
+def test_sibling_inventory_endpoints_require_jwt(client, path):
+    res = client.get(path)
+    assert res.status_code in REJECT, (
+        f"GHSA-3p5c (round 2) regression: {path} served without a JWT ({res.status_code}) — "
+        f"anonymous access to inventory/topology/WAF/error data"
+    )
+
+
+def test_pool_agents_no_anonymous_inventory_leak(client):
+    """The richest bypass: /api/haproxy-cluster-pools/{id}/agents must not leak inventory."""
+    res = client.get("/api/haproxy-cluster-pools/1/agents")
+    assert res.status_code in REJECT
+    if res.status_code == 200:
+        assert "ip_address" not in res.text and "hostname" not in res.text
+
+
+# --------------------------------------------------------------------------
+# GHSA-3p5c (round 2): agent webhooks must return 401 (not a 200 error body)
+# for anonymous callers — the auth raise must propagate, not be swallowed.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("path", [
+    "/api/agents/some-agent/config-applied",
+    "/api/agents/some-agent/config-validation-failed",
+    "/api/agents/some-agent/config-sync",
+])
+def test_agent_webhooks_reject_anonymous_with_401(client, path):
+    res = client.post(path, json={})
+    assert res.status_code in REJECT, (
+        f"{path} returned {res.status_code} for an anonymous caller — the auth "
+        f"rejection must be a 401/403, not a swallowed 200 error body"
+    )
+    # Specifically must NOT be a 200 "status: error" body.
+    assert res.status_code != 200
+
+
+# --------------------------------------------------------------------------
+# GHSA-3p5c (round 2): GET /api/agents must accept EITHER a JWT OR an agent
+# X-API-Key. Anonymous (neither) is still rejected — agents send a key, so a
+# JWT-only gate would break them (verified end-to-end in the localtest smoke).
+# --------------------------------------------------------------------------
+
+def test_agents_inventory_still_rejects_fully_anonymous(client):
+    """No JWT and no X-API-Key -> 401 (the agent-key accept path needs a valid key)."""
+    res = client.get("/api/agents")
+    assert res.status_code in REJECT
+
+
+def test_generate_uninstall_script_requires_auth(client):
+    """Agent-management endpoint must not be anonymously reachable (JWT or agent key)."""
+    res = client.get("/api/agents/generate-uninstall-script/linux")
+    assert res.status_code in REJECT
+
+
+@pytest.mark.parametrize("path", [
+    "/api/config/validate",
+    "/api/config/optimize",
+    "/api/config/templates/default/generate",
+])
+def test_config_compute_endpoints_require_auth(client, path):
+    """Config compute endpoints (run a HAProxy validator on caller input) were
+    optional-auth; now require a JWT. The dependency rejects before body parsing."""
+    res = client.post(path, json={})
+    assert res.status_code in REJECT
+
+
 def test_script_template_write_enforces_agents_version_permission():
     """Static guarantee: the write handler checks agents.version (not just authN).
 

@@ -3,7 +3,7 @@ Configuration Management and Validation API
 Provides endpoints for HAProxy configuration validation, templates, and optimization
 """
 
-from fastapi import APIRouter, HTTPException, Header, Request
+from fastapi import APIRouter, HTTPException, Header, Request, Depends
 from pydantic import BaseModel
 from typing import Dict, List, Any, Optional
 import logging
@@ -18,7 +18,7 @@ from utils.config_templates import (
 )
 from utils.haproxy_config_parser import parse_haproxy_config
 from utils.logging_config import log_with_correlation, PerformanceLogger
-from auth_middleware import get_current_user_from_token
+from auth_middleware import get_current_user_from_token, require_authenticated_user
 from database.connection import get_database_connection, close_database_connection
 
 router = APIRouter(prefix="/api/config", tags=["Configuration Management"])
@@ -62,7 +62,7 @@ class ConfigOptimizationRequest(BaseModel):
     optimization_level: str = "balanced"  # conservative, balanced, aggressive
     target_environment: str = "production"  # development, staging, production
 
-@router.post("/validate")
+@router.post("/validate", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): was optional-auth; runs HAProxy validator on caller input
 async def validate_configuration(
     request: ConfigValidationRequest,
     current_user: dict = None,
@@ -203,7 +203,7 @@ async def get_template_details(template_id: str):
         )
         raise HTTPException(status_code=500, detail=f"Failed to get template: {str(e)}")
 
-@router.post("/templates/{template_id}/generate")
+@router.post("/templates/{template_id}/generate", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): was optional-auth
 async def generate_configuration(
     template_id: str,
     request: TemplateGenerationRequest,
@@ -271,7 +271,7 @@ async def generate_configuration(
                 detail=f"Configuration generation failed: {str(e)}"
             )
 
-@router.post("/optimize")
+@router.post("/optimize", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): was optional-auth
 async def optimize_configuration(
     request: ConfigOptimizationRequest,
     current_user: dict = None,
