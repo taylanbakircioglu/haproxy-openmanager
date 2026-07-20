@@ -87,6 +87,32 @@ class AccountCreate(BaseModel):
             raise ValueError("eab_hmac_key is not valid base64; copy it exactly from your CA account.")
         return v
 
+    @field_validator('directory_url')
+    @classmethod
+    def _validate_directory_url(cls, v):
+        # SECURITY (GHSA-3vh4-gvxx-wm2p): reject non-https URLs and literal
+        # non-public IP hosts at the API boundary. The full DNS-based SSRF check
+        # runs at fetch time (acme_service.get_directory -> ssrf_guard).
+        if not v:
+            return v
+        from urllib.parse import urlparse
+        import ipaddress
+        from utils.ssrf_guard import is_public_ip
+        parsed = urlparse(v.strip())
+        if parsed.scheme.lower() != 'https':
+            raise ValueError("directory_url must be an https URL")
+        host = parsed.hostname
+        if not host:
+            raise ValueError("directory_url has no host")
+        try:
+            ipaddress.ip_address(host)
+            is_ip_literal = True
+        except ValueError:
+            is_ip_literal = False
+        if is_ip_literal and not is_public_ip(host):
+            raise ValueError("directory_url must not point to a private/loopback IP address")
+        return v
+
     @model_validator(mode='after')
     def _require_provider_for_dns01(self):
         if self.challenge_type == 'dns-01' and not (self.dns_provider or '').strip():

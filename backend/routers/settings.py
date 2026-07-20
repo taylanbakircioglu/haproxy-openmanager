@@ -104,16 +104,40 @@ async def test_acme_connection(authorization: str = Header(None), directory_url:
         finally:
             await close_database_connection(conn)
 
+    # SECURITY (GHSA-3vh4-gvxx-wm2p): validate the URL before any outbound request
+    # (https-only; block loopback/RFC1918/link-local/cloud-metadata after DNS),
+    # pin the connector to IPv4, and never follow redirects. Also do NOT reflect
+    # arbitrary upstream JSON keys back to the caller — that was an information-
+    # disclosure oracle. Only report presence of the FIXED, known ACME directory
+    # field names (never attacker-controlled data).
+    from utils.ssrf_guard import assert_public_url, safe_connector, SSRFValidationError
+
+    directory_url = str(directory_url)
+    try:
+        await assert_public_url(directory_url)
+    except SSRFValidationError as e:
+        return {"success": False, "error": f"Refused to fetch directory URL: {e}"}
+
+    _KNOWN_ACME_FIELDS = ["newNonce", "newAccount", "newOrder", "newAuthz", "revokeCert", "keyChange"]
     try:
         import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.get(str(directory_url), timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with aiohttp.ClientSession(connector=safe_connector()) as session:
+            async with session.get(
+                directory_url,
+                timeout=aiohttp.ClientTimeout(total=10),
+                allow_redirects=False,
+            ) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
+                    data = await resp.json(content_type=None)
+                    if not isinstance(data, dict):
+                        return {"success": False, "error": "Directory URL did not return a JSON object"}
+                    present = [k for k in _KNOWN_ACME_FIELDS if k in data]
+                    if not present:
+                        return {"success": False, "error": "Response is not a valid ACME directory"}
                     return {
                         "success": True,
-                        "directory": str(directory_url),
-                        "endpoints": list(data.keys()) if isinstance(data, dict) else []
+                        "directory": directory_url,
+                        "endpoints": present,
                     }
                 else:
                     return {"success": False, "error": f"HTTP {resp.status} from directory URL"}

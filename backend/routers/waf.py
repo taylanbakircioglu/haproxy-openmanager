@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Request, Header
+from fastapi import APIRouter, HTTPException, Request, Header, Depends
+from auth_middleware import require_authenticated_user
 from typing import Optional
 import logging
 import time
@@ -182,7 +183,8 @@ async def get_waf_stats(cluster_id: Optional[int] = None, authorization: str = H
         logger.error(f"Error fetching WAF stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/rules", summary="Get WAF Rules", response_description="List of WAF rules")
+@router.get("/rules", summary="Get WAF Rules", response_description="List of WAF rules",
+            dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): WAF rule definitions aid bypass crafting
 async def get_waf_rules(cluster_id: Optional[int] = None):
     """
     # Get WAF Rules

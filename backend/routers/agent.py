@@ -251,7 +251,7 @@ def calculate_agent_health(status, last_seen):
         return "offline"
 
 @router.get("", summary="Get All Agents", response_description="List of all agents")
-async def get_agents(pool_id: Optional[int] = None, authorization: str = Header(None)):
+async def get_agents(pool_id: Optional[int] = None, authorization: str = Header(None), x_api_key: Optional[str] = Header(None)):
     """
     # Get All Agents
     
@@ -303,9 +303,22 @@ async def get_agents(pool_id: Optional[int] = None, authorization: str = Header(
     - **haproxy_status**: Status of HAProxy service on agent's server
     - **last_seen**: Last heartbeat timestamp
     """
+    # SECURITY (GHSA-3p5c-m5m4-mjpx): the agent inventory (names, hostnames, IPs,
+    # pools, OS) is operator data and was previously served unauthenticated — it is
+    # also the read-back channel used in the RCE exfil PoC. Require EITHER a valid
+    # operator JWT OR a valid agent X-API-Key: deployed agents poll this endpoint
+    # (with their key, not a JWT) to read their own applied_config_version and avoid
+    # re-applying config on restart, so a JWT-only gate would break them. Checked
+    # before the try so the 401 is not swallowed by the generic handler.
+    if authorization:
+        current_user = await get_current_user_from_token(authorization)  # raises 401 on invalid JWT
+    else:
+        from auth_middleware import validate_agent_api_key
+        if not await validate_agent_api_key(x_api_key):
+            raise HTTPException(status_code=401, detail="Authentication required")
     try:
         conn = await get_database_connection()
-        
+
         try:
             if pool_id:
                 agents = await conn.fetch("""
@@ -763,6 +776,14 @@ async def generate_uninstall_script(platform: str, authorization: str = Header(N
     sudo ./uninstall-agent.sh
     ```
     """
+    # SECURITY (GHSA-3p5c-m5m4-mjpx): require authentication (operator JWT or agent
+    # key), consistent with generate-install-script. The uninstall script itself is
+    # generic (no secrets/topology), but an agent-management endpoint should not be
+    # anonymously reachable. Checked before the try so the 401 is not swallowed.
+    if authorization:
+        await get_current_user_from_token(authorization)
+    elif not await validate_agent_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="Authentication required")
     try:
         # Normalize platform to a canonical key (always 'linux' or 'macos').
         # macOS agents register with platform 'darwin' (from `uname -s`), so the
@@ -958,14 +979,24 @@ def _extract_agent_ip(heartbeat_data: AgentHeartbeat) -> Optional[str]:
     return None
 
 @router.post("/{agent_id}/heartbeat")
-async def agent_heartbeat(agent_id: int, heartbeat_data: AgentHeartbeat):
+async def agent_heartbeat(agent_id: int, heartbeat_data: AgentHeartbeat, x_api_key: Optional[str] = Header(None)):
     """Receive agent heartbeat and update status."""
+    # Agent authentication is MANDATORY (GHSA-3p5c-m5m4-mjpx). This legacy by-ID
+    # heartbeat previously had NO auth, allowing unauthenticated state spoofing of
+    # any agent row. Deployed agents use the by-name heartbeat; a valid global
+    # agent token is now required here too. NOTE: raised BEFORE the try below so
+    # the 401 is not swallowed by the generic `except Exception` handler.
+    from auth_middleware import validate_agent_api_key
+    agent_auth = await validate_agent_api_key(x_api_key)
+    if not agent_auth:
+        logger.warning(f"Missing/invalid API key on by-id heartbeat for agent ID {agent_id}")
+        raise HTTPException(status_code=401, detail="Authentication required")
     try:
         conn = await get_database_connection()
-        
+
         await conn.execute("""
-            UPDATE agents 
-            SET status = 'online', 
+            UPDATE agents
+            SET status = 'online',
                 last_seen = CURRENT_TIMESTAMP,
                 hostname = COALESCE($2, hostname),
                 haproxy_status = COALESCE($3, haproxy_status),
@@ -1088,6 +1119,8 @@ async def agent_config_applied_notification(agent_name: str, notification_data: 
         await close_database_connection(conn)
         return {"status": "ok", "message": "Config applied notification received"}
         
+    except HTTPException:
+        raise  # let auth 401/403 propagate (do not turn it into a 200 error body)
     except Exception as e:
         logger.error(f"Failed to process config applied notification from agent '{agent_name}': {e}")
         return {"status": "error", "message": str(e)}
@@ -1183,6 +1216,8 @@ async def agent_config_validation_failed(agent_name: str, notification_data: dic
         
         return {"status": "ok", "message": "Validation error notification received"}
         
+    except HTTPException:
+        raise  # let auth 401/403 propagate (do not turn it into a 200 error body)
     except Exception as e:
         logger.error(f"Failed to process validation error notification from agent '{agent_name}': {e}")
         return {"status": "error", "message": str(e)}
@@ -1472,6 +1507,8 @@ async def agent_config_sync(agent_name: str, sync_data: dict, x_api_key: Optiona
         logger.info(f"CONFIG SYNC: Agent '{agent_name}' synced {len(active_backends)} backends, {len(active_frontends)} frontends, {len(active_servers)} servers with database")
         return {"status": "ok", "message": f"Config synced - {len(active_backends)} backends, {len(active_frontends)} frontends, {len(active_servers)} servers processed"}
         
+    except HTTPException:
+        raise  # let auth 401/403 propagate (do not turn it into a 200 error body)
     except Exception as e:
         logger.error(f"Failed to process config sync from agent '{agent_name}': {e}")
         return {"status": "error", "message": str(e)}
@@ -1532,20 +1569,24 @@ async def agent_heartbeat_by_name(
         logger.error(f"Unexpected error processing heartbeat: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
     
+    # Agent authentication is MANDATORY (GHSA-3p5c-m5m4-mjpx). A valid global agent
+    # token is required to heartbeat OR auto-register. Deployed agents always send
+    # X-API-Key; an absent/invalid key is an unauthenticated caller. This is done
+    # OUTSIDE the processing try below (whose generic `except Exception` would
+    # otherwise convert the 401 into a 500), and before opening a DB connection
+    # (validate_agent_api_key(None) needs no DB). Closes keyless heartbeat spoofing
+    # and keyless rogue-agent auto-registration (the `elif not agent` keyless path
+    # below is now unreachable, since agent_auth is guaranteed truthy past here).
+    from auth_middleware import validate_agent_api_key
+    agent_auth = await validate_agent_api_key(x_api_key)
+    if not agent_auth:
+        logger.warning(f"Missing/invalid API key on heartbeat for agent '{heartbeat_data.name}'")
+        raise HTTPException(status_code=401, detail="Authentication required")
+
     # Continue with normal heartbeat processing
     try:
-        # Validate agent API key for security
-        from auth_middleware import validate_agent_api_key
-        agent_auth = await validate_agent_api_key(x_api_key)
-        
         conn = await get_database_connection()
         agent_name = heartbeat_data.name
-
-        # If API key provided, validate it exists but allow placeholder agent updates
-        if x_api_key and not agent_auth:
-            await close_database_connection(conn)
-            logger.warning(f"Invalid API key provided by agent '{agent_name}'")
-            raise HTTPException(status_code=401, detail="Invalid API key")
 
         agent = await conn.fetchrow("SELECT id, pool_id, api_key FROM agents WHERE name = $1", agent_name)
         
@@ -1955,9 +1996,19 @@ async def agent_heartbeat_by_name(
 @router.get("/{agent_name}/config")
 async def get_agent_config(agent_name: str, x_api_key: Optional[str] = Header(None)):
     """Get HAProxy configuration for specific agent"""
+    # Validate agent API key — MANDATORY (GHSA-3p5c-m5m4-mjpx). Checked BEFORE any
+    # DB work and before the existence check, so an unauthenticated caller learns
+    # neither the full haproxy.cfg nor whether the agent exists. Raised before the
+    # try so it is not swallowed by the generic handler; validate_agent_api_key(None)
+    # returns None without touching the DB.
+    from auth_middleware import validate_agent_api_key
+    agent_auth = await validate_agent_api_key(x_api_key)
+    if not agent_auth:
+        logger.warning(f"Missing/invalid API key for agent '{agent_name}' config fetch")
+        raise HTTPException(status_code=401, detail="Authentication required")
     try:
         conn = await get_database_connection()
-        
+
         # Get agent info first to check pool
         # CRITICAL: Include cluster's haproxy_bin_path, haproxy_config_path, stats_socket_path
         # These are needed for dynamic validation - cluster admin can change paths without reinstalling agent
@@ -1969,30 +2020,19 @@ async def get_agent_config(agent_name: str, x_api_key: Optional[str] = Header(No
             LEFT JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
             WHERE a.name = $1
         """, agent_name)
-        
+
         if not agent_info:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
-        
-        # Validate agent API key
-        # API key is global - can be used for multiple agents
-        if x_api_key:
-            from auth_middleware import validate_agent_api_key
-            agent_auth = await validate_agent_api_key(x_api_key)
-            
-            if not agent_auth:
-                await close_database_connection(conn)
-                logger.warning(f"Invalid API key provided for agent '{agent_name}' config fetch")
-                raise HTTPException(status_code=401, detail="Invalid API key")
-            
-            # Log which agent's API key was used (for audit trail)
-            if agent_auth['name'] == agent_name:
-                logger.info(f"Agent '{agent_name}' fetching config using its own API key")
-            else:
-                logger.info(f"Agent '{agent_name}' fetching config using API key from agent '{agent_auth['name']}'")
-            
-            logger.debug(f"Config fetch authorized for agent '{agent_name}'")
-        
+
+        # Log which agent's API key was used (for audit trail)
+        if agent_auth['name'] == agent_name:
+            logger.info(f"Agent '{agent_name}' fetching config using its own API key")
+        else:
+            logger.info(f"Agent '{agent_name}' fetching config using API key from agent '{agent_auth['name']}'")
+
+        logger.debug(f"Config fetch authorized for agent '{agent_name}'")
+
         if not agent_info['enabled']:
             await close_database_connection(conn)
             return {
@@ -2083,9 +2123,18 @@ async def get_agent_config(agent_name: str, x_api_key: Optional[str] = Header(No
 @router.get("/{agent_name}/ssl-certificates")
 async def get_agent_ssl_certificates(agent_name: str, since: Optional[str] = None, x_api_key: Optional[str] = Header(None)):
     """Get SSL certificates for specific agent's cluster"""
+    # Validate agent API key — MANDATORY (GHSA-3p5c-m5m4-mjpx). This response
+    # returns SSL private_key_content, so authentication is checked BEFORE any DB
+    # work and before the existence check. Raised before the try so the 401 is not
+    # swallowed; validate_agent_api_key(None) returns None without a DB hit.
+    from auth_middleware import validate_agent_api_key
+    agent_auth = await validate_agent_api_key(x_api_key)
+    if not agent_auth:
+        logger.warning(f"Missing/invalid API key for agent '{agent_name}' SSL certificates")
+        raise HTTPException(status_code=401, detail="Authentication required")
     try:
         conn = await get_database_connection()
-        
+
         # Get agent and cluster info first
         agent_info = await conn.fetchrow("""
             SELECT a.id, a.name, a.pool_id, hc.id as cluster_id, hc.name as cluster_name,
@@ -2094,29 +2143,18 @@ async def get_agent_ssl_certificates(agent_name: str, since: Optional[str] = Non
             LEFT JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
             WHERE a.name = $1
         """, agent_name)
-        
+
         if not agent_info:
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
-        
-        # Validate agent API key
-        # API key is global - can be used for multiple agents
-        if x_api_key:
-            from auth_middleware import validate_agent_api_key
-            agent_auth = await validate_agent_api_key(x_api_key)
-            
-            if not agent_auth:
-                await close_database_connection(conn)
-                logger.warning(f"Invalid API key provided for agent '{agent_name}' SSL certificates")
-                raise HTTPException(status_code=401, detail="Invalid API key")
-            
-            # Log which agent's API key was used (for audit trail)
-            if agent_auth['name'] == agent_name:
-                logger.info(f"Agent '{agent_name}' fetching SSL certificates using its own API key")
-            else:
-                logger.info(f"Agent '{agent_name}' fetching SSL certificates using API key from agent '{agent_auth['name']}'")
-            
-            logger.debug(f"SSL fetch authorized for agent '{agent_name}'")
+
+        # Log which agent's API key was used (for audit trail)
+        if agent_auth['name'] == agent_name:
+            logger.info(f"Agent '{agent_name}' fetching SSL certificates using its own API key")
+        else:
+            logger.info(f"Agent '{agent_name}' fetching SSL certificates using API key from agent '{agent_auth['name']}'")
+
+        logger.debug(f"SSL fetch authorized for agent '{agent_name}'")
         
         if not agent_info['enabled']:
             await close_database_connection(conn)
@@ -2440,16 +2478,24 @@ async def get_latest_script_version(platform: str = "macos"):
 @router.get("/{agent_name}/upgrade-status")
 async def get_agent_upgrade_status(agent_name: str, x_api_key: Optional[str] = Header(None)):
     """Get agent upgrade status - used by agents to check if they should upgrade"""
+    # Validate agent API key — MANDATORY (GHSA-3p5c-m5m4-mjpx). Checked before any
+    # DB work; deployed agents always send X-API-Key. Raised before the try so the
+    # 401 is not swallowed; validate_agent_api_key(None) returns None without a DB hit.
+    from auth_middleware import validate_agent_api_key
+    agent_auth = await validate_agent_api_key(x_api_key)
+    if not agent_auth:
+        logger.warning(f"Missing/invalid API key for agent '{agent_name}' upgrade status")
+        raise HTTPException(status_code=401, detail="Authentication required")
     try:
         conn = await get_database_connection()
-        
+
         # Check if agent has upgrade pending (include platform and pool for validation)
         agent = await conn.fetchrow("""
             SELECT status, version as current_version, platform, pool_id
-            FROM agents 
+            FROM agents
             WHERE name = $1
         """, agent_name)
-        
+
         if not agent:
             await close_database_connection(conn)
             return {
@@ -2457,26 +2503,15 @@ async def get_agent_upgrade_status(agent_name: str, x_api_key: Optional[str] = H
                 "target_version": "",
                 "message": "Agent not found"
             }
-        
-        # Validate agent API key
-        # API key is global - can be used for multiple agents
-        if x_api_key:
-            from auth_middleware import validate_agent_api_key
-            agent_auth = await validate_agent_api_key(x_api_key)
-            
-            if not agent_auth:
-                await close_database_connection(conn)
-                logger.warning(f"Invalid API key provided for agent '{agent_name}' upgrade status")
-                raise HTTPException(status_code=401, detail="Invalid API key")
-            
-            # Log which agent's API key was used (for audit trail)
-            if agent_auth['name'] == agent_name:
-                logger.debug(f"Agent '{agent_name}' checking upgrade status using its own API key")
-            else:
-                logger.info(f"Agent '{agent_name}' checking upgrade status using API key from agent '{agent_auth['name']}'")
-            
-            logger.debug(f"Upgrade status check authorized for agent '{agent_name}'")
-        
+
+        # Log which agent's API key was used (for audit trail)
+        if agent_auth['name'] == agent_name:
+            logger.debug(f"Agent '{agent_name}' checking upgrade status using its own API key")
+        else:
+            logger.info(f"Agent '{agent_name}' checking upgrade status using API key from agent '{agent_auth['name']}'")
+
+        logger.debug(f"Upgrade status check authorized for agent '{agent_name}'")
+
         await close_database_connection(conn)
         
         # Agent should upgrade if status is 'upgrading'
@@ -2910,7 +2945,17 @@ async def get_agent_script_template(platform: str, authorization: str = Header(N
     """Get the latest script template for specified platform from database"""
     try:
         current_user = await get_current_user_from_token(authorization)
-        
+
+        # SECURITY (GHSA-7rhv-c5pc-69r8): the raw install/upgrade script is a
+        # version-management surface. Gate reads with agents.version too, matching
+        # the write path above (operator/security_admin/super_admin retain access).
+        has_permission = await check_user_permission(current_user["id"], "agents", "version")
+        if not has_permission:
+            raise HTTPException(
+                status_code=403,
+                detail="Insufficient permissions: agents.version required"
+            )
+
         conn = await get_database_connection()
         
         # Get latest script template for platform
@@ -2961,7 +3006,19 @@ async def save_agent_script_template(platform: str, template_data: dict, authori
     """Save updated script template to database using shared helper function"""
     try:
         current_user = await get_current_user_from_token(authorization)
-        
+
+        # SECURITY (GHSA-7rhv-c5pc-69r8): agent script templates become the
+        # install/self-upgrade script executed as root on HAProxy nodes. A poisoned
+        # template is RCE. Authentication alone is NOT enough — require the same
+        # agents.version permission as POST /versions; otherwise any JWT holder
+        # (including viewer) could overwrite the active script.
+        has_permission = await check_user_permission(current_user["id"], "agents", "version")
+        if not has_permission:
+            raise HTTPException(
+                status_code=403,
+                detail="Insufficient permissions: agents.version required"
+            )
+
         script_content = template_data.get('script_content', '')
         version = template_data.get('version', '')
         

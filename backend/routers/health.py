@@ -3,8 +3,9 @@ Production-Ready Health Check and Monitoring Endpoints
 Provides comprehensive system health monitoring for Kubernetes and production environments
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
+from auth_middleware import require_authenticated_user
 import logging
 import asyncio
 import time
@@ -74,7 +75,7 @@ async def readiness_probe():
         logger.error(f"Readiness probe failed: {e}")
         raise HTTPException(status_code=503, detail=f"Not ready: {str(e)}")
 
-@router.get("/deep")
+@router.get("/deep", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): leaks host CPU/mem/disk, DB/redis/python versions, PID
 async def deep_health_check():
     """Comprehensive health check with detailed system information"""
     global _health_cache
@@ -197,7 +198,7 @@ async def deep_health_check():
         
         raise HTTPException(status_code=503, detail=error_response)
 
-@router.get("/agents")
+@router.get("/agents", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): leaks agent names/hostnames
 async def agents_health():
     """Monitor agent connectivity and health status"""
     try:
@@ -261,7 +262,7 @@ async def agents_health():
         logger.error(f"Agent health check failed: {e}")
         raise HTTPException(status_code=500, detail=f"Agent health check failed: {str(e)}")
 
-@router.get("/clusters")
+@router.get("/clusters", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): leaks cluster names, HAProxy versions, pending counts
 async def clusters_health():
     """Monitor HAProxy cluster health and configuration status"""
     try:
@@ -329,7 +330,7 @@ async def clusters_health():
         logger.error(f"Cluster health check failed: {e}")
         raise HTTPException(status_code=500, detail=f"Cluster health check failed: {str(e)}")
 
-@router.get("/errors")
+@router.get("/errors", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): app error metrics, sibling of /deep,/agents,/clusters
 async def error_statistics():
     """Get application error statistics and metrics"""
     try:

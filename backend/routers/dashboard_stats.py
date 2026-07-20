@@ -3,13 +3,22 @@ Dashboard Stats Router
 API endpoints for HAProxy statistics dashboard
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import Optional, List
 import logging
 
 from services.dashboard_stats_service import dashboard_stats_service
+from auth_middleware import require_authenticated_user
 
-router = APIRouter(prefix="/api/dashboard-stats", tags=["dashboard-stats"])
+# SECURITY (GHSA-3p5c-m5m4-mjpx): this entire router (traffic metrics, backend
+# health, cluster topology, agent status) was mounted without authentication.
+# Require a valid JWT on every route. The frontend Dashboard already sends the
+# operator JWT on these calls, so this is transparent to the UI.
+router = APIRouter(
+    prefix="/api/dashboard-stats",
+    tags=["dashboard-stats"],
+    dependencies=[Depends(require_authenticated_user)],
+)
 logger = logging.getLogger(__name__)
 
 

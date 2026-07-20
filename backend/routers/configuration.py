@@ -201,13 +201,15 @@ async def get_pending_config_requests(agent_name: str, x_api_key: Optional[str] 
     Called during heartbeat.
     """
     try:
-        # Validate agent API key
+        # Validate agent API key — MANDATORY (GHSA-3p5c-m5m4-mjpx). Deployed agents
+        # always send X-API-Key; an absent/invalid key is unauthenticated. This
+        # endpoint also mutates state (marks requests 'processing'), so a keyless
+        # caller could otherwise starve the real agent.
         agent_auth = await validate_agent_api_key(x_api_key)
-        
-        if x_api_key and not agent_auth:
-            logger.warning(f"Invalid API key provided by agent '{agent_name}' for pending requests")
-            raise HTTPException(status_code=401, detail="Invalid API key")
-        
+        if not agent_auth:
+            logger.warning(f"Missing/invalid API key from '{agent_name}' for pending requests")
+            raise HTTPException(status_code=401, detail="Authentication required")
+
         conn = await get_database_connection()
         
         # Get pending requests

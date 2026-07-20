@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, Depends
+from auth_middleware import require_authenticated_user
 from typing import Optional
 from datetime import datetime
 import logging
@@ -11,7 +12,7 @@ from agent_notifications import get_cluster_agents_status
 router = APIRouter(prefix="/api", tags=["dashboard", "pools"])
 logger = logging.getLogger(__name__)
 
-@router.get("/dashboard/overview")
+@router.get("/dashboard/overview", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): leaked cluster/pool/agent stats, names, health & alerts anonymously (auth was optional)
 async def get_dashboard_overview(cluster_id: Optional[int] = None, authorization: str = Header(None)):
     """Get dashboard overview with comprehensive statistics, optionally filtered by cluster"""
     try:
@@ -238,7 +239,7 @@ async def get_dashboard_overview(cluster_id: Optional[int] = None, authorization
         logger.error(f"Error fetching dashboard overview: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/dashboard/stats")
+@router.get("/dashboard/stats", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): aggregate cluster/agent counts
 async def get_dashboard_stats():
     """Get dashboard statistics"""
     try:
@@ -279,7 +280,7 @@ async def get_dashboard_stats():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/pools")
+@router.get("/pools", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): pool names/env/counts
 async def get_pools():
     """Get all HAProxy cluster pools"""
     try:
@@ -350,7 +351,7 @@ async def get_pools():
         logger.error(f"Error fetching pools: {e}")
         return {"pools": []}
 
-@router.get("/haproxy-cluster-pools")
+@router.get("/haproxy-cluster-pools", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c)
 async def get_haproxy_cluster_pools():
     """Get all HAProxy cluster pools (legacy endpoint)"""
     # Just call the main pools endpoint
@@ -474,7 +475,7 @@ async def update_pool(pool_id: int, pool: PoolUpdate, authorization: str = Heade
         logger.error(f"Failed to update pool: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update pool: {str(e)}")
 
-@router.get("/haproxy-cluster-pools/{pool_id}/agents")
+@router.get("/haproxy-cluster-pools/{pool_id}/agents", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): full agent inventory — same class as GET /api/agents
 async def get_pool_agents(pool_id: int):
     """Get all agents for a specific pool"""
     try:
@@ -561,7 +562,7 @@ async def get_pool_agents(pool_id: int):
         logger.error(f"Error fetching pool agents: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch pool agents: {str(e)}")
 
-@router.get("/haproxy/stats")
+@router.get("/haproxy/stats", dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c)
 async def get_haproxy_stats(cluster_id: Optional[int] = None):
     """Get HAProxy statistics"""
     try:

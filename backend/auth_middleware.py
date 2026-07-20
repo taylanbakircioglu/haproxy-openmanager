@@ -1,4 +1,4 @@
-from fastapi import HTTPException, status
+from fastapi import HTTPException, status, Header
 from typing import Optional, Dict, Any
 from jose import jwt
 import logging
@@ -91,6 +91,18 @@ async def get_current_user_from_token(authorization: Optional[str] = None) -> Op
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication failed"
         )
+
+async def require_authenticated_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """FastAPI dependency: require a valid operator JWT, else 401.
+
+    Reads the Authorization header itself, so it can be attached at router or
+    route level to gate operator/UI endpoints that must not be public:
+        APIRouter(..., dependencies=[Depends(require_authenticated_user)])
+        @router.get(..., dependencies=[Depends(require_authenticated_user)])
+    Any authenticated user passes (no fine-grained RBAC here) — this restores the
+    pre-existing "logged-in users only" expectation without changing role access.
+    """
+    return await get_current_user_from_token(authorization)
 
 async def get_current_user_from_token_no_exception(authorization: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
