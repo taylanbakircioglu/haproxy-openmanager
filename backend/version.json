@@ -1,5 +1,5 @@
 {
-  "version": "1.8.9",
-  "releaseName": "ACL -f pattern-file support (Issue #38 follow-up)",
-  "releaseDate": "2026-07-13"
+  "version": "1.8.10",
+  "releaseName": "Security hardening — RCE, missing-auth and SSRF advisories (GHSA-7rhv/3p5c/3vh4)",
+  "releaseDate": "2026-07-20"
 }
