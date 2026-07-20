@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 # Import database and models
 from database.connection import get_database_connection, close_database_connection
-from auth_middleware import get_current_user_from_token
+from auth_middleware import get_current_user_from_token, require_authenticated_user
 from models.ssl import SSLCertificate, SSLCertificateCreate, SSLCertificateUpdate, SSLCertificateResponse
 from utils.ssl_parser import parse_ssl_certificate, validate_private_key, validate_certificate_chain, format_certificate_info
 from utils.activity_log import log_user_activity
@@ -825,7 +825,8 @@ async def get_ssl_certificate(cert_id: int, authorization: str = Header(None)):
         logger.error(f"Error getting SSL certificate: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/certificates/{cert_id}/config-versions")
+@router.get("/certificates/{cert_id}/config-versions",
+            dependencies=[Depends(require_authenticated_user)])  # SECURITY (GHSA-3p5c): was unauthenticated
 async def get_ssl_certificate_config_versions(cert_id: int):
     """Get config version history for specific SSL certificate"""
     try:

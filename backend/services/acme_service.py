@@ -69,8 +69,14 @@ class ACMEService:
             if cached.get('_fetched_at', 0) > time.time() - 3600:
                 return cached
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(directory_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+        # SECURITY (GHSA-3vh4-gvxx-wm2p): directory_url can come from a stored
+        # account row; validate it (https + public IP, no redirects) before the
+        # server-side fetch so it cannot be pointed at internal/metadata targets.
+        from utils.ssrf_guard import assert_public_url, safe_connector
+        await assert_public_url(directory_url)
+
+        async with aiohttp.ClientSession(connector=safe_connector()) as session:
+            async with session.get(directory_url, timeout=aiohttp.ClientTimeout(total=15), allow_redirects=False) as resp:
                 if resp.status != 200:
                     raise Exception(f"Failed to fetch ACME directory: HTTP {resp.status}")
                 data = await resp.json()
@@ -187,13 +193,21 @@ class ACMEService:
 
         body = self._sign_jws(private_key, protected, payload)
 
-        async with aiohttp.ClientSession() as session:
+        # SECURITY (GHSA-3vh4-gvxx-wm2p): `url` is taken from the CA directory /
+        # order responses. The directory is already fetched from a validated
+        # public CA, but guard the follow-up POST target too (defence in depth)
+        # so a tampered/malicious directory cannot steer the request internally.
+        from utils.ssrf_guard import assert_public_url, safe_connector
+        await assert_public_url(url)
+
+        async with aiohttp.ClientSession(connector=safe_connector()) as session:
             for attempt in range(3):
                 async with session.post(
                     url,
                     json=body,
                     headers={"Content-Type": "application/jose+json"},
                     timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=False,
                 ) as resp:
                     if 'Replay-Nonce' in resp.headers:
                         self._nonce_by_dir[directory_url] = resp.headers['Replay-Nonce']
