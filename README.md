@@ -105,6 +105,7 @@ This architecture provides better security (no inbound connections to HAProxy se
 ✅ **Version Control & Rollback** - Every change versioned with one-click restore capability  
 ✅ **Real-Time Monitoring** - Live stats, health checks, and performance dashboards  
 ✅ **SSL Certificate Management** - Centralized SSL with expiration tracking  
+✅ **CSR Creation** *(v1.9.0)* - Generate a private key + CSR in-app (RSA 2048/4096, ECDSA P-256/P-384, full subject + SANs), have it signed by any external CA, then import the signed certificate — the key never leaves the server  
 ✅ **ACME Auto SSL (Let's Encrypt)** - Automated certificate issuance, renewal, and deployment via ACME protocol  
 ✅ **ACME DNS-01 Challenge** *(v1.8.0)* - TXT-record validation for internal/isolated clusters (no public port 80) and wildcard certificates; pluggable DNS providers (Manual + Cloudflare), opt-in, HTTP-01 unchanged  
 ✅ **ACME Certificate Diagnostic Panel** - Automated preflight that checks agent readiness, DNS resolution, port 80 reachability, and ACME challenge ACL before issuing certificates  
@@ -777,6 +778,15 @@ User Updates SSL in UI → All Agents Poll Backend (30s)
   → Download New Certificate → Update Frontend Bindings 
   → Validate Config → Reload HAProxy (zero downtime)
 ```
+
+#### CSR Workflow (external / corporate CAs) — v1.9.0
+
+For certificates signed by an external or corporate CA, the **CSR tab** on the SSL Certificates page covers the whole flow without the private key ever leaving the server:
+
+1. **Create CSR**: pick a name (becomes the certificate name / on-agent file path), Common Name, optional SANs and subject fields (O/OU/L/ST/C/email), and a key algorithm (RSA 2048/4096 or ECDSA P-256/P-384). The backend generates the key + CSR; only the CSR PEM is shown (copy or download as `.csr`).
+2. **Get it signed**: submit the CSR to your Certificate Authority.
+3. **Import**: paste the signed certificate (+ optional chain), choose Global or cluster-specific scope and usage type. The backend verifies the certificate matches the stored key, rejects expired certs, warns on SAN drift, and creates a normal SSL certificate entry (source: `CSR`).
+4. **Deploy**: the imported certificate goes through the standard **PENDING → Apply Management → agent pull** pipeline like any other certificate.
 
 #### Key Features
 - **Certificate Upload**: PEM format certificate and private key upload
@@ -1856,6 +1866,42 @@ GET /api/backends?cluster_id=1
 GET /api/frontends?cluster_id=1
 ```
 
+### SSL CSR API (v1.9.0)
+```bash
+# Create a CSR (generates the private key server-side; response contains the
+# CSR PEM — the private key is never returned by any endpoint)
+POST /api/ssl/csrs
+Authorization: Bearer <token>
+{
+  "name": "www-example-com",
+  "common_name": "www.example.com",
+  "sans": ["api.example.com"],
+  "key_algorithm": "rsa-2048",   # rsa-2048 | rsa-4096 | ecdsa-p256 | ecdsa-p384
+  "organization": "Example Corp",
+  "country": "TR"
+}
+
+# List CSRs (metadata only, no PEM)
+GET /api/ssl/csrs
+
+# CSR detail (includes the CSR PEM)
+GET /api/ssl/csrs/{csr_id}
+
+# Import the CA-signed certificate for a pending CSR
+POST /api/ssl/csrs/{csr_id}/import
+{
+  "certificate_content": "-----BEGIN CERTIFICATE-----...",
+  "chain_content": "-----BEGIN CERTIFICATE-----...",   # optional
+  "usage_type": "frontend",                            # frontend | server
+  "is_global": false,
+  "cluster_ids": [1, 2]
+}
+
+# Delete a CSR (pending: permanently destroys the private key;
+# completed: removes history only — the imported certificate is unaffected)
+DELETE /api/ssl/csrs/{csr_id}
+```
+
 ### ACME / Let's Encrypt API
 ```bash
 # List ACME accounts
@@ -2428,6 +2474,7 @@ Developed with ❤️ for the HAProxy community
 
 ## Release Notes
 
+- **v1.9.0** (2026-08-04) — **CSR creation** (in-app key + CSR generation and signed-certificate import): a new **CSR tab** on the SSL Certificates page generates a private key and Certificate Signing Request server-side (RSA 2048/4096 or ECDSA P-256/P-384; full subject — O/OU/L/ST/C/email — plus DNS SANs with wildcard support), for certificates signed by an **external or corporate CA**. The operator downloads/copies the CSR PEM, has it signed, then imports the signed certificate (+ optional chain): the backend verifies the certificate against the stored key (hard gate), rejects expired certs, warns on SAN drift, and creates a normal SSL certificate entry (source `CSR`) that flows through the standard **PENDING → Apply Management → agent pull** pipeline. The private key **never leaves the server** — no CSR endpoint returns it, and after import the CSR row's key copy is destroyed (the key then lives only on the certificate, like every other key). Additive schema change: one new table `ssl_csrs` (SCHEMA_VERSION 9 → 10, auto-migrated, no existing table altered); key generation runs off the event loop and is rate-limited per user; existing `ssl.*` permissions govern all new endpoints. No agent or rendered-config changes.
 - **v1.8.7** (2026-07-09) — **Version reporting single-source fix**: the version shown in the UI (backend-sourced via `/api/version`) could lag behind the real release. The canonical version lived in the repo-root `version.json`, but the backend image is built from the `./backend` context, so that file did not reach the container in every pipeline; the backend then fell back to a hardcoded constant in `main.py` that had to be bumped by hand and had drifted (it reported 1.8.4 after 1.8.5/1.8.6 shipped). The version now lives in a single file, `backend/version.json`, baked into every image automatically, and `main.py` no longer carries a real version literal (its fallback is a neutral "unknown"). A new test enforces that the version stays single-source and cannot drift. No functional or API change.
 - **v1.8.6** (2026-07-06) — **Performance: opt-in API workers + heartbeat micro-optimization** (Issue #35 follow-up): the backend container can now run multiple uvicorn worker processes via the new `UVICORN_WORKERS` environment variable (default **1** — behavior unchanged unless you opt in), letting the API use all cores on multi-core hosts; background tasks were already multi-replica safe, as exercised by the Kubernetes HPA deployment. The agent heartbeat handler now reads the agent's `status`/`version`/`upgrade_status` in one query instead of three (one round-trip per heartbeat, per agent, every 30s). Added a *Performance Tuning* section to the README (worker/replica scaling and how to use the `X-Response-Time` header and `Slow request detected` logs to pinpoint slow endpoints). Zero-risk release: no schema, API, or agent changes; defaults preserve existing behavior exactly.
 - **v1.8.5** (2026-07-03) — **ACME completion-task SQL fix** (Issue #35 follow-up): the background order-completion task (`complete_pending_acme_orders`, runs every 60s) died on **every cycle** with `syntax error at or near ")"` — an extra closing parenthesis introduced in v1.8.0's bounded DNS-01 retry claim query. Because that query is the task's first database call, **no background ACME work ran at all from v1.8.0 through v1.8.4**: orders were never claimed for finalize/download, the DNS-01 TXT record was never published (so DNS-01 with an automated provider such as Cloudflare could never validate), Site Wizard staged orders never left `wizard_staged`, and DNS-01 retry/TXT-cleanup never executed. The stray parenthesis is removed and a regression test now scans all ACME modules' SQL for unbalanced parentheses (the unit suite mocks the database, which is why a raw-SQL syntax error could slip through). One-line backend query fix; no schema, API, or agent changes — fully backward compatible.

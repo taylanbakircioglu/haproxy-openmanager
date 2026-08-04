@@ -1,3 +1,27 @@
+# Upgrade Notes — v1.9.0 (CSR creation)
+
+**Backward compatible & additive.** Upgrading to v1.9.0 changes nothing for existing
+clusters/agents until you create a CSR:
+
+- **Schema:** `SCHEMA_VERSION` bumps to `10`, so on first start the (idempotent)
+  migration sequence re-runs once and adds **one new table** (`ssl_csrs`) plus its
+  indexes. **No existing table is altered**, existing rows are untouched, and the
+  **admin password is not reset**. No new permission strings are introduced — all CSR
+  endpoints are governed by the existing `ssl.create` / `ssl.read` / `ssl.delete`
+  permissions, so custom roles need no changes.
+- **Key storage:** CSR private keys are stored in the database like every other key
+  in the system (`ssl_certificates.private_key_content` and the ACME order keys).
+  The key is never returned by any CSR API endpoint, and after a successful import
+  the CSR row's key copy is set to NULL (the key then lives only on the certificate
+  row).
+- **Agents:** zero agent changes. Agents never read the new table; a CSR becomes
+  visible to agents only after its signed certificate is imported **and** applied via
+  Apply Management (the standard PENDING pipeline).
+- **Rollback:** simply don't use the CSR tab. The `ssl_csrs` table is inert when
+  empty; downgrading the application leaves it as an ignored extra table.
+
+---
+
 # Upgrade Notes — v1.7.0 (HA / VIP Keepalived management, Issue #27)
 
 **Backward compatible & opt-in.** Upgrading to v1.7.0 changes nothing for existing
