@@ -47,6 +47,7 @@ from routers.acme_diagnostics import router as acme_diagnostics_router
 from routers.site_wizard import router as site_wizard_router
 from routers.mfa import router as mfa_router
 from routers.vip import router as vip_router  # Issue #27 — HA/VIP (Keepalived) management
+from routers.csr import router as csr_router  # v1.9.0 — CSR creation (in-app key+CSR generation, signed-cert import)
 
 # Production logging configuration
 from utils.logging_config import setup_production_logging
@@ -892,6 +893,7 @@ app.include_router(dashboard_stats_router)  # HAProxy stats dashboard
 app.include_router(agent_router)
 app.include_router(waf_router)
 app.include_router(ssl_router)
+app.include_router(csr_router)  # v1.9.0: CSR creation (in-app key+CSR generation, signed-cert import)
 app.include_router(security_router)
 app.include_router(configuration_router)
 app.include_router(settings_router)

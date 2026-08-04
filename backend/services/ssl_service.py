@@ -40,10 +40,12 @@ flow.
   (callers translate to wizard step-jumpback toasts).
 """
 
+import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from fastapi import HTTPException
 
@@ -106,23 +108,22 @@ def _recompute_status_from_expiry(
         return cert_info_status or "valid", cert_info_days or 0
 
 
-async def create_cert_row(
-    conn,
-    payload: Any,
-    cluster_id: int,
-) -> int:
-    """Insert a row into ssl_certificates (always cluster_id=NULL) + junction
-    binding to the given cluster_id. Returns new ssl_certificate_id.
+def _prepare_cert_fields(payload: Any) -> dict:
+    """Parse + validate the PEM material on `payload` and derive every
+    ssl_certificates column value from it (v1.9.0 extraction — shared by
+    `create_cert_row` and the CSR import flow in services/csr_service.py,
+    byte-identical to the former inline body of `create_cert_row`).
 
     payload is expected to expose:
       name, certificate_content, private_key_content, chain_content,
       usage_type (optional, default 'frontend').
 
-    All cert metadata (primary_domain, all_domains, expiry_date,
-    issuer, fingerprint, status, days_until_expiry) is now parsed
-    FROM the PEM content via `parse_ssl_certificate` — operator-
-    supplied values on the payload are accepted as a graceful
-    fallback only when parsing fails (which itself raises 400).
+    Raises HTTPException(400) on any parse/validation failure (invalid PEM,
+    bad private key, cert/key mismatch, bad chain, already-expired cert).
+
+    Returns a dict with keys: cert_content, private_key_content,
+    chain_content, cert_info, primary_domain, all_domains, expiry_date,
+    issuer, fingerprint, status, days_until_expiry, usage_type.
     """
     cert_content = getattr(payload, "certificate_content", None) or ""
     if not cert_content.strip():
@@ -212,6 +213,53 @@ async def create_cert_row(
         cert_info.get("days_until_expiry", 0),
     )
     usage_type = getattr(payload, "usage_type", "frontend") or "frontend"
+
+    return {
+        "cert_content": cert_content,
+        "private_key_content": private_key_content,
+        "chain_content": chain_content,
+        "cert_info": cert_info,
+        "primary_domain": primary_domain,
+        "all_domains": all_domains,
+        "expiry_date": expiry_date,
+        "issuer": issuer,
+        "fingerprint": fingerprint,
+        "status": status,
+        "days_until_expiry": days_until_expiry,
+        "usage_type": usage_type,
+    }
+
+
+async def create_cert_row(
+    conn,
+    payload: Any,
+    cluster_id: int,
+) -> int:
+    """Insert a row into ssl_certificates (always cluster_id=NULL) + junction
+    binding to the given cluster_id. Returns new ssl_certificate_id.
+
+    payload is expected to expose:
+      name, certificate_content, private_key_content, chain_content,
+      usage_type (optional, default 'frontend').
+
+    All cert metadata (primary_domain, all_domains, expiry_date,
+    issuer, fingerprint, status, days_until_expiry) is now parsed
+    FROM the PEM content via `parse_ssl_certificate` — operator-
+    supplied values on the payload are accepted as a graceful
+    fallback only when parsing fails (which itself raises 400).
+    """
+    fields = _prepare_cert_fields(payload)
+    cert_content = fields["cert_content"]
+    private_key_content = fields["private_key_content"]
+    chain_content = fields["chain_content"]
+    expiry_date = fields["expiry_date"]
+    primary_domain = fields["primary_domain"]
+    all_domains = fields["all_domains"]
+    issuer = fields["issuer"]
+    fingerprint = fields["fingerprint"]
+    status = fields["status"]
+    days_until_expiry = fields["days_until_expiry"]
+    usage_type = fields["usage_type"]
 
     existing = await conn.fetchrow(
         """
@@ -408,3 +456,81 @@ async def validate_server_ca_bundle_eligibility(
         cluster_id,
     )
     return row is not None
+
+
+async def stage_ssl_config_versions(
+    conn,
+    cert_id: int,
+    cluster_ids: List[int],
+    action: str = "create",
+    created_by: Optional[int] = None,
+) -> List[dict]:
+    """Stage one PENDING config version per affected cluster after an SSL
+    certificate mutation (v1.9.0 — distilled from the routers/ssl.py POST
+    /certificates staging loop; used by the CSR import flow).
+
+    Uses the EXACT `ssl-{cert_id}-{action}-{timestamp}` version-name scheme of
+    the manual SSL flow so Apply Management, the `has_pending_config`
+    LIKE-filter ('ssl-' || id || '-%'), and the agent delivery predicates
+    treat CSR-imported certificates identically to manually uploaded ones.
+    Agents are NOT notified here — the operator applies manually.
+
+    Per-cluster failures are caught and reported in the returned
+    sync_results list (the DB save has already succeeded — same semantics as
+    the manual flow, where a config-generation failure never rolls back the
+    certificate row).
+    """
+    # Local import: keeps services/haproxy_config free to import ssl helpers
+    # without a module-level cycle.
+    from services.haproxy_config import generate_haproxy_config_for_cluster
+
+    sync_results: List[dict] = []
+    for cluster_id in cluster_ids:
+        try:
+            config_content = await generate_haproxy_config_for_cluster(cluster_id)
+            config_hash = hashlib.sha256(config_content.encode()).hexdigest()
+            version_name = f"ssl-{cert_id}-{action}-{int(time.time())}"
+
+            version_created_by = created_by
+            if version_created_by is None:
+                version_created_by = await conn.fetchval(
+                    "SELECT id FROM users WHERE username = 'admin' LIMIT 1"
+                ) or 1
+
+            await conn.fetchval(
+                """
+                INSERT INTO config_versions
+                (cluster_id, version_name, config_content, checksum, created_by, is_active, status)
+                VALUES ($1, $2, $3, $4, $5, FALSE, 'PENDING')
+                RETURNING id
+                """,
+                cluster_id,
+                version_name,
+                config_content,
+                config_hash,
+                version_created_by,
+            )
+            logger.info(
+                f"APPLY WORKFLOW: Created PENDING config version {version_name} "
+                f"for cluster {cluster_id} (ssl_service.stage_ssl_config_versions)"
+            )
+            sync_results.append({
+                'node': 'pending',
+                'success': True,
+                'cluster_id': cluster_id,
+                'version': version_name,
+                'status': 'PENDING',
+                'message': 'SSL certificate staged. Click Apply to activate.',
+            })
+        except Exception as e:
+            logger.error(
+                f"Cluster config staging failed for SSL certificate {cert_id} "
+                f"on cluster {cluster_id}: {e}"
+            )
+            sync_results.append({
+                'node': 'cluster',
+                'success': False,
+                'cluster_id': cluster_id,
+                'error': str(e),
+            })
+    return sync_results
