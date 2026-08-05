@@ -1,5 +1,5 @@
 {
-  "version": "1.8.10",
-  "releaseName": "Security hardening — RCE, missing-auth and SSRF advisories (GHSA-7rhv/3p5c/3vh4)",
-  "releaseDate": "2026-07-20"
+  "version": "1.9.0",
+  "releaseName": "CSR creation — in-app key+CSR generation and signed-certificate import",
+  "releaseDate": "2026-08-04"
 }

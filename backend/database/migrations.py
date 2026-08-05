@@ -1753,7 +1753,12 @@ async def ensure_agent_activity_logs_table():
 # bump, already-deployed databases (version >= 8) skip the whole migration run and never gain
 # the columns, so the frontends SELECT/INSERT would fail. Additive + idempotent + nullable;
 # existing rows stay NULL and render byte-identical.
-SCHEMA_VERSION = 9
+# v1.9.0 (CSR creation): bumped 9 -> 10 for the brand-new `ssl_csrs` table
+# (ensure_ssl_csrs_table step). Holds a locally generated private key + CSR PEM
+# until the operator imports the CA-signed certificate; the import creates a
+# normal ssl_certificates row and NULLs the key copy here. Additive + idempotent;
+# no existing table is altered, agents never read this table.
+SCHEMA_VERSION = 10
 
 
 async def run_all_migrations():
@@ -1890,10 +1895,82 @@ async def _run_all_migrations_inner():
     await ensure_mfa_columns()
 
     # Issue #27 — HA/VIP Keepalived management (v1.7.0): two brand-new tables.
-    # MUST stay last: FK-references haproxy_cluster_pools/agents/users, all created above.
+    # MUST run after its FK targets (haproxy_cluster_pools/agents/users), all created above.
     await ensure_vip_tables()
 
+    # v1.9.0 — CSR creation: brand-new ssl_csrs table. FK-references
+    # ssl_certificates/users, both created above.
+    await ensure_ssl_csrs_table()
+
     logger.info("Database migrations completed successfully.")
+
+
+async def ensure_ssl_csrs_table():
+    """v1.9.0 — CSR (Certificate Signing Request) creation. Additive only:
+    one brand-new table (ssl_csrs) + indexes. No ALTER of any existing table,
+    so the entire current fleet is byte-identical. Fully idempotent
+    (CREATE TABLE/INDEX IF NOT EXISTS). FK targets (ssl_certificates, users)
+    are created earlier in the sequence.
+
+    A CSR row holds a locally generated private key + CSR PEM until the
+    operator imports the CA-signed certificate. The import creates a normal
+    ssl_certificates row (source='csr', last_config_status='PENDING') and
+    NULLs the private_key_pem copy here — the key then lives only on the
+    certificate row, like every other key in the system. Agents never read
+    this table: the agent SSL delivery endpoint selects from
+    ssl_certificates only, so a pending CSR can never leak to an agent.
+    """
+    conn = None
+    try:
+        conn = await get_database_connection()
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS ssl_csrs (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                common_name VARCHAR(253) NOT NULL,
+                subject JSONB NOT NULL DEFAULT '{}'::jsonb,
+                sans JSONB NOT NULL DEFAULT '[]'::jsonb,
+                key_algorithm VARCHAR(20) NOT NULL DEFAULT 'rsa-2048',
+                csr_pem TEXT NOT NULL,
+                private_key_pem TEXT,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                ssl_certificate_id INTEGER REFERENCES ssl_certificates(id) ON DELETE SET NULL,
+                completed_at TIMESTAMP,
+                created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT ssl_csrs_status_check CHECK (status IN ('pending', 'completed'))
+            );
+        """)
+
+        # Only PENDING CSRs reserve their name: the name becomes the
+        # ssl_certificates.name (and thus /etc/ssl/haproxy/{name}.pem on every
+        # agent) at import time, so two open CSRs must not target the same
+        # cert name. Completed CSRs are history and may share a name across
+        # reissues — mirrors the uq_vip_name_active partial-index rationale.
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_ssl_csrs_name_pending ON ssl_csrs(name) WHERE status = 'pending';"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ssl_csrs_status ON ssl_csrs(status);"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ssl_csrs_cert ON ssl_csrs(ssl_certificate_id);"
+        )
+
+        logger.info("ssl_csrs table ensured (v1.9.0 CSR creation)")
+    except Exception as e:
+        logger.error(f"Error ensuring ssl_csrs table: {e}")
+        # Re-raise (ensure_ssl_cluster_junction_table precedent): this step is
+        # part of the SCHEMA_VERSION=10 bump, and run_all_migrations() records
+        # the marker only after the inner sequence completes cleanly. Swallowing
+        # a failure here would stamp version 10 with no ssl_csrs table, and the
+        # version gate would then skip every future retry — permanently.
+        raise
+    finally:
+        if conn:
+            await close_database_connection(conn)
 
 
 async def ensure_mfa_columns():

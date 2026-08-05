@@ -13,7 +13,7 @@ import {
   PlayCircleOutlined, EditOutlined,
   CloudServerOutlined, CheckCircleOutlined, SyncOutlined,
   ExclamationCircleOutlined, CloseCircleOutlined, ClockCircleOutlined,
-  ThunderboltOutlined
+  ThunderboltOutlined, FileProtectOutlined
 } from '@ant-design/icons';
 import axios from 'axios';
 import { useSearchParams } from 'react-router-dom';
@@ -22,6 +22,7 @@ import { useProgress } from '../contexts/ProgressContext';
 import { formatEntityForSync } from '../utils/agentSync';
 import { extractApiError } from '../utils/apiError';
 import ACMEAutomation from './ACMEAutomation';
+import CSRManagement from './CSRManagement';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -643,12 +644,21 @@ const SSLManagement = () => {
       title: 'Source',
       dataIndex: 'source',
       key: 'source',
-      render: (source) => (
-        <Tag color={source === 'letsencrypt' ? 'green' : 'default'}
-             icon={source === 'letsencrypt' ? <SafetyCertificateOutlined /> : null}>
-          {source === 'letsencrypt' ? 'Auto (ACME)' : 'Manual'}
-        </Tag>
-      ),
+      render: (source) => {
+        if (source === 'csr') {
+          return (
+            <Tag color="blue" icon={<FileProtectOutlined />}>
+              CSR
+            </Tag>
+          );
+        }
+        return (
+          <Tag color={source === 'letsencrypt' ? 'green' : 'default'}
+               icon={source === 'letsencrypt' ? <SafetyCertificateOutlined /> : null}>
+            {source === 'letsencrypt' ? 'Auto (ACME)' : 'Manual'}
+          </Tag>
+        );
+      },
     },
     {
       title: 'Sync Status',
@@ -1019,6 +1029,11 @@ const SSLManagement = () => {
             key: 'acme',
             label: <span><ThunderboltOutlined /> ACME Automation</span>,
             children: <ACMEAutomation />,
+          },
+          {
+            key: 'csr',
+            label: <span><FileProtectOutlined /> CSR</span>,
+            children: <CSRManagement onCertificateImported={fetchCertificates} />,
           },
         ]}
       />
