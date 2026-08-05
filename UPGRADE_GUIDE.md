@@ -6,9 +6,28 @@ clusters/agents until you create a CSR:
 - **Schema:** `SCHEMA_VERSION` bumps to `10`, so on first start the (idempotent)
   migration sequence re-runs once and adds **one new table** (`ssl_csrs`) plus its
   indexes. **No existing table is altered**, existing rows are untouched, and the
-  **admin password is not reset**. No new permission strings are introduced — all CSR
-  endpoints are governed by the existing `ssl.create` / `ssl.read` / `ssl.delete`
-  permissions, so custom roles need no changes.
+  **admin password is not reset** (the default-user seeding is guarded by an
+  existence check, not an upsert). No new permission strings are introduced — all
+  CSR endpoints are governed by the existing `ssl.create` / `ssl.read` /
+  `ssl.delete` permissions.
+- **⚠️ Built-in roles are re-seeded to their defaults (pre-existing behaviour of
+  every `SCHEMA_VERSION` bump — verified in a v1.8.10 → v1.9.0 upgrade drill).**
+  Because the version gate re-runs the whole sequence, `update_system_roles_to_enterprise_rbac()`
+  issues an unconditional `UPDATE roles SET … permissions = <defaults> WHERE name = …`
+  for the four **built-in** roles (`super_admin`, `operator`, `security_admin`,
+  `viewer`). **Any customization you made to a built-in role is reverted.** In the
+  drill, an `operator` role that had been narrowed by removing `apply.execute` and
+  `config.bulk_import` came back with both restored (57 → 59 permissions).
+  - **Roles you created yourself are NOT affected** — the re-seed matches on the four
+    built-in names only.
+  - This is not new in v1.9.0: it happens on every release that bumps
+    `SCHEMA_VERSION` (v1.7.0, v1.8.0, v1.8.8 …). It is documented as intentional at
+    `backend/database/migrations.py` (the "BUMP THIS … OR seeded/role data" note) —
+    the migration is treated as the authority on built-in-role contents.
+  - **If you have hardened a built-in role, do this:** export it before upgrading
+    (`GET /api/roles`), then re-apply your changes after the first start
+    (`PUT /api/roles/{id}`) — or, preferably, move your customization into a
+    purpose-made custom role, which survives every upgrade.
 - **Key storage:** CSR private keys are stored in the database like every other key
   in the system (`ssl_certificates.private_key_content` and the ACME order keys).
   The key is never returned by any CSR API endpoint, and after a successful import
