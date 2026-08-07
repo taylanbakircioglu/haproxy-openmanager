@@ -1,5 +1,5 @@
 {
-  "version": "1.10.0",
-  "releaseName": "GoDaddy DNS provider for ACME DNS-01",
-  "releaseDate": "2026-08-07"
+  "version": "1.10.1",
+  "releaseName": "CSR private key encrypted at rest",
+  "releaseDate": "2026-08-08"
 }

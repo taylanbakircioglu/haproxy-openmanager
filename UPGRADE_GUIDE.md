@@ -1,3 +1,42 @@
+# Upgrade Notes — v1.10.1 (CSR private key encrypted at rest)
+
+**Backward compatible.** Nothing to do on upgrade, and nothing changes for existing clusters,
+agents or certificates:
+
+- **Schema:** **no `SCHEMA_VERSION` bump and no migration.** The Fernet token replaces the PEM
+  inside the *existing* `ssl_csrs.private_key_pem` TEXT column. As in v1.10.0, this means the
+  four built-in roles are **not** re-seeded, so any customization of `super_admin` / `operator` /
+  `security_admin` / `viewer` survives.
+- **Existing pending CSRs keep working.** Rows written before this release hold a raw PEM and are
+  still read transparently, so a CSR that is already out for signature can be imported normally
+  after the upgrade. There is no data migration and no downtime step. Those rows stay plaintext
+  until they are imported (which NULLs the key) — if you want everything encrypted immediately,
+  delete and re-create any long-pending CSRs.
+- **Scope:** this covers the PENDING CSR key only. It is the one key in the system that sits idle
+  for the whole signing window and is never transmitted. `ssl_certificates.private_key_content`
+  and the ACME order keys are unchanged, because agents must receive those in plaintext on every
+  poll.
+- **Optional env:** `CSR_ENCRYPTION_KEY` (see `.env.template`). If unset, the key is derived from
+  `SECRET_KEY` via HKDF with its own info string, so it is independent of the VIP, MFA and DNS
+  provider keys.
+  - **⚠️ Rotating `SECRET_KEY` while `CSR_ENCRYPTION_KEY` is unset makes pending CSR keys
+    unrecoverable.** Import then fails with an explicit "delete this CSR and create a new one"
+    error rather than a misleading key-mismatch. Set an explicit `CSR_ENCRYPTION_KEY` if you
+    rotate `SECRET_KEY`. Certificates already imported are unaffected — their key lives on the
+    certificate row.
+- **API / UI / agents:** unchanged. No CSR endpoint ever returned the private key before or now,
+  and nothing about the CSR tab changes.
+- **Rollback:** the application downgrades cleanly — 1.10.0 starts normally against the same
+  database and every other feature is unaffected. The one casualty is a CSR **created on 1.10.1
+  and still pending**: 1.10.0 has no decrypt step, so it hands the Fernet token straight to the
+  key-pairing check. Measured on a real downgrade, the import then fails with
+  `HTTP 500 — Could not verify the certificate/key pair: key parse failed (encrypted?)`; it does
+  **not** silently pair the wrong key, and it does not corrupt anything. Import or delete CSRs
+  created on 1.10.1 before downgrading. Certificates already imported are unaffected, since their
+  key lives on the certificate row, and CSRs created before 1.10.1 are plaintext and still work.
+
+---
+
 # Upgrade Notes — v1.10.0 (GoDaddy DNS-01 provider)
 
 **Backward compatible & additive.** Nothing changes unless you select **GoDaddy** as an ACME

@@ -19,8 +19,14 @@ subject instead of CN-only, ECDSA support, same PKCS8/NoEncryption key
 serialisation (the agent concatenates cert+key+chain into one PEM and HAProxy
 cannot read passphrase-protected keys).
 
-Private keys are stored PLAINTEXT, consistent with every other key in the
-system (ssl_certificates.private_key_content, letsencrypt_orders.cert_private_key).
+Private keys are ENCRYPTED AT REST from v1.10.1 (Issue #53): the Fernet token
+replaces the PEM in the same `ssl_csrs.private_key_pem` column, so there is no
+schema change and no SCHEMA_VERSION bump. Rows written earlier hold a raw PEM
+and are still read transparently — see utils/csr_key_crypto.py for the format
+discriminator and the key-rotation caveat. The pending CSR key is the one key
+in the system worth encrypting: it sits idle for the whole signing window and
+is never transmitted, unlike ssl_certificates.private_key_content and the ACME
+order keys, which agents must receive in plaintext on every poll.
 The key is NEVER returned by any CSR API response — `csr_row_to_dict` strips
 it unconditionally.
 """
@@ -39,6 +45,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 
 from services import ssl_service
+from utils.csr_key_crypto import decrypt_csr_private_key, encrypt_csr_private_key
 
 logger = logging.getLogger(__name__)
 
@@ -186,8 +193,14 @@ async def assert_csr_name_available(conn, name: str) -> None:
 
 
 async def insert_csr_row(conn, payload: Any, bundle: Dict[str, Any], user_id: Optional[int]) -> int:
-    """Persist a freshly generated CSR bundle. Returns the new csr id."""
+    """Persist a freshly generated CSR bundle. Returns the new csr id.
+
+    Issue #53 (v1.10.1): the private key is Fernet-encrypted before it is stored. The token goes
+    into the SAME private_key_pem TEXT column — no schema change — and is only ever decrypted
+    in-process by import_signed_certificate. No CSR endpoint returns the column either way.
+    """
     await assert_csr_name_available(conn, payload.name)
+    stored_key = encrypt_csr_private_key(bundle['private_key_pem'])
     try:
         csr_id = await conn.fetchval(
             """
@@ -203,7 +216,7 @@ async def insert_csr_row(conn, payload: Any, bundle: Dict[str, Any], user_id: Op
             json.dumps(bundle['sans']),
             payload.key_algorithm,
             bundle['csr_pem'],
-            bundle['private_key_pem'],
+            stored_key,
             user_id,
         )
     except asyncpg.exceptions.UniqueViolationError:
@@ -243,13 +256,29 @@ async def import_signed_certificate(conn, csr_id: int, imp: Any, user_id: Option
                     "Create a new CSR to reissue."
                 ),
             )
-        stored_key = row['private_key_pem']
-        if not stored_key:
+        if not row['private_key_pem']:
             raise HTTPException(
                 status_code=500,
                 detail=(
                     "Stored CSR private key is missing — the CSR row is "
                     "corrupt. Delete it and create a new CSR."
+                ),
+            )
+        # Issue #53: the column holds a Fernet token from v1.10.1 on, and a raw PEM for rows
+        # written before it. decrypt_csr_private_key accepts both, so no data migration is
+        # needed. A None here means the token cannot be decrypted — SECRET_KEY was rotated
+        # without CSR_ENCRYPTION_KEY set. Fail loudly: the key is gone, so the CA's certificate
+        # can never be paired with it, and silently falling through would surface as the far
+        # more confusing "certificate does not match this CSR's private key".
+        stored_key = decrypt_csr_private_key(row['private_key_pem'])
+        if not stored_key:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"The stored private key for CSR '{row['name']}' cannot be decrypted. This "
+                    "happens when SECRET_KEY was rotated while CSR_ENCRYPTION_KEY was not set. "
+                    "The key is unrecoverable, so this CSR can no longer be completed — delete "
+                    "it and create a new one (then have the new CSR signed)."
                 ),
             )
 
