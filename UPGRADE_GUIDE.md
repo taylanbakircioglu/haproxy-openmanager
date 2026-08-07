@@ -1,3 +1,41 @@
+# Upgrade Notes — v1.10.0 (GoDaddy DNS-01 provider)
+
+**Backward compatible & additive.** Nothing changes unless you select **GoDaddy** as an ACME
+account's DNS provider:
+
+- **Schema:** **no `SCHEMA_VERSION` bump.** The GoDaddy credentials (API Key + Secret) are stored
+  as two keys inside the *existing* encrypted
+  `letsencrypt_account_dns_credentials.credentials_encrypted` blob — no new table, no new column,
+  no migration.
+- **✅ Built-in roles are NOT re-seeded.** The re-seed warning in the v1.9.0 notes below is
+  triggered by a `SCHEMA_VERSION` bump. This release does not bump it, so any customization you
+  made to `super_admin` / `operator` / `security_admin` / `viewer` survives untouched.
+- **Permissions / API shape:** unchanged. `GET /api/letsencrypt/dns-providers` simply returns one
+  extra entry in its `providers` array; every request and response shape is identical, and the
+  credential form is rendered from that schema, so there is no frontend behaviour change either.
+- **Environment:** no new variable. GoDaddy credentials use the same Fernet-at-rest path as
+  Cloudflare (`DNS_PROVIDER_ENCRYPTION_KEY`, falling back to a key derived from `SECRET_KEY`).
+- **Agents:** zero agent changes. DNS-01 is invisible to agents; an issued certificate follows the
+  normal PENDING → Apply Management → agent pull pipeline exactly as before.
+- **Using it:** the API Key must be a **Production** key from `developer.godaddy.com/keys` (the
+  first key that dashboard issues is an OTE/test key and is rejected), the zone must be in the same
+  GoDaddy account, and that account needs at least one registered domain before GoDaddy permits DNS
+  API access. A Personal Access Token also works — paste it as the Key and leave the Secret blank.
+  Credentials are checked against the GoDaddy API before they are stored, so an invalid, OTE or
+  ineligible key fails at save time. Note the check is a **read**: a Personal Access Token that has
+  `domains.domain:read` but not `domains.dns:update` saves successfully and only fails at the first
+  publish, with a 403 in the order timeline.
+- **Rollback:** don't select GoDaddy. Existing Manual and Cloudflare accounts and all HTTP-01
+  issuance are untouched. **Downgrading after adopting GoDaddy is not a no-op**: on 1.9.0
+  `godaddy` is not a known provider, so any account still set to it degrades to the manual-confirm
+  path (in-flight DNS-01 orders wait for a confirmation nobody can give and expire after 48h, and
+  renewals stop), and the cleanup sweep marks published TXT records cleaned without removing them.
+  Before downgrading, switch affected accounts back to Manual or Cloudflare and let the reconcile
+  sweep remove outstanding `_acme-challenge` records first. The stored credential row itself is
+  inert — an encrypted blob for an unknown provider.
+
+---
+
 # Upgrade Notes — v1.9.0 (CSR creation)
 
 **Backward compatible & additive.** Upgrading to v1.9.0 changes nothing for existing

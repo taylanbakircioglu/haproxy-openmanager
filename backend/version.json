@@ -1,5 +1,5 @@
 {
-  "version": "1.9.0",
-  "releaseName": "CSR creation — in-app key+CSR generation and signed-certificate import",
-  "releaseDate": "2026-08-04"
+  "version": "1.10.0",
+  "releaseName": "GoDaddy DNS provider for ACME DNS-01",
+  "releaseDate": "2026-08-07"
 }
