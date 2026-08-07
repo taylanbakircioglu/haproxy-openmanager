@@ -484,12 +484,30 @@ function AppContent() {
 
 function ThemedApp() {
   const { isDarkMode } = useTheme();
+  const antdTheme = {
+    algorithm: isDarkMode ? theme.darkAlgorithm : theme.defaultAlgorithm,
+  };
+
+  // Ant Design 5: the STATIC message/notification/Modal.confirm APIs render into their own
+  // detached root, so they do not see this ConfigProvider and always fall back to the light
+  // algorithm — a confirm dialog came up white while the app was in dark mode. `holderRender`
+  // wraps that detached root in the same ConfigProvider, which fixes every static call in the
+  // app at once (12 components use Modal.confirm) instead of migrating each one to
+  // App.useApp(). In an effect rather than during render: ConfigProvider.config() mutates
+  // antd module state, and effects still run long before a user can click anything that opens
+  // a static modal. Re-registered on theme change so the toggle takes effect immediately.
+  React.useEffect(() => {
+    ConfigProvider.config({
+      holderRender: (children) => (
+        <ConfigProvider theme={{ algorithm: isDarkMode ? theme.darkAlgorithm : theme.defaultAlgorithm }}>
+          {children}
+        </ConfigProvider>
+      ),
+    });
+  }, [isDarkMode]);
+
   return (
-    <ConfigProvider
-      theme={{
-        algorithm: isDarkMode ? theme.darkAlgorithm : theme.defaultAlgorithm,
-      }}
-    >
+    <ConfigProvider theme={antdTheme}>
       <AuthProvider>
         <ClusterProvider>
           <ProgressProvider>

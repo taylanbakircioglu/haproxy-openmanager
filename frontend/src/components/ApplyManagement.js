@@ -1092,7 +1092,7 @@ const ApplyManagement = () => {
           style={{ 
             marginBottom: 24, 
             borderRadius: 8,
-            border: '1px solid #ffccc7',
+            border: `1px solid ${token.colorErrorBorder}`,
             boxShadow: '0 2px 8px rgba(255, 77, 79, 0.15)'
           }}
           message={
@@ -1348,7 +1348,7 @@ const ApplyManagement = () => {
                         HA / VIP Changes ({pendingChanges.vips.length})
                       </Title>
                       {pendingChanges.vips.map(item => (
-                        <div key={`vip-${item.id}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', marginBottom: 6, border: item.pending_delete ? '1px solid #ffccc7' : '1px solid #f0f0f0', borderRadius: 6, background: item.pending_delete ? '#fff1f0' : undefined }}>
+                        <div key={`vip-${item.id}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', marginBottom: 6, border: `1px solid ${item.pending_delete ? token.colorErrorBorder : token.colorBorderSecondary}`, borderRadius: 6, background: item.pending_delete ? token.colorErrorBg : undefined }}>
                           <CloudServerOutlined style={{ color: item.pending_delete ? '#cf1322' : '#13c2c2' }} />
                           <span style={{ fontWeight: 500 }}>{item.name}</span>
                           <Tag>{item.virtual_ip}/{item.prefix_length}</Tag>
@@ -1374,8 +1374,8 @@ const ApplyManagement = () => {
                         const isEnable = /^cluster-\d+-acme-enable-/.test(v.version_name);
                         return (
                           <div key={v.id} style={{
-                            padding: 10, border: '1px dashed #1890ff', borderRadius: 6, marginBottom: 8,
-                            display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#f0f8ff'
+                            padding: 10, border: `1px dashed ${token.colorPrimary}`, borderRadius: 6, marginBottom: 8,
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: token.colorInfoBg
                           }}>
                             <span style={{ fontFamily: 'monospace' }}>{v.version_name}</span>
                             <span>
@@ -1419,7 +1419,7 @@ const ApplyManagement = () => {
                                     display: 'flex',
                                     alignItems: 'center',
                                     justifyContent: 'space-between',
-                                    backgroundColor: '#f0f8ff'
+                                    backgroundColor: token.colorInfoBg
                                   }}>
                                     <span style={{ fontFamily: 'monospace' }}>{v.version_name}</span>
                                     <Tag color="orange">PENDING</Tag>
@@ -1443,7 +1443,7 @@ const ApplyManagement = () => {
                                     display: 'flex',
                                     alignItems: 'center',
                                     justifyContent: 'space-between',
-                                    backgroundColor: '#f6ffed'
+                                    backgroundColor: token.colorSuccessBg
                                   }}>
                                     <span style={{ fontFamily: 'monospace' }}>{v.version_name}</span>
                                     <Tag color="orange">PENDING</Tag>
@@ -1518,9 +1518,13 @@ const ApplyManagement = () => {
               </Descriptions>
             </div>
 
-            {/* Pending Versions Section */}
+            {/* Pending Versions Section.
+                Theme tokens, not the light-mode literals #fffbe6/#ffe58f: in dark mode those
+                produced a cream panel with light text on it, so the version name, timestamp
+                and "View Change" link were unreadable. colorWarningBg/Border track the
+                algorithm, so the "pending" tint survives in both themes. */}
             {pendingVersions.length > 0 && (
-              <div style={{ marginBottom: 24, background: '#fffbe6', borderRadius: 8, border: '1px solid #ffe58f', padding: '16px 16px 8px' }}>
+              <div style={{ marginBottom: 24, background: token.colorWarningBg, borderRadius: 8, border: `1px solid ${token.colorWarningBorder}`, padding: '16px 16px 8px' }}>
                 <Title level={5} style={{ marginTop: 0 }}>
                   <ClockCircleOutlined style={{ marginRight: 8, color: '#faad14' }} />
                   Pending Changes ({pendingVersions.length})
@@ -1765,8 +1769,8 @@ const ApplyManagement = () => {
                             <div>
                               {/* Parsed suggestion */}
                               {agentSync.parsed_error?.suggestion && (
-                                <div style={{ marginBottom: 12, padding: '8px 12px', background: '#fff7e6', borderRadius: 4, border: '1px solid #ffd591' }}>
-                                  <Text strong style={{ color: '#ad4e00' }}>Recommendation: </Text>
+                                <div style={{ marginBottom: 12, padding: '8px 12px', background: token.colorWarningBg, borderRadius: 4, border: `1px solid ${token.colorWarningBorder}` }}>
+                                  <Text strong style={{ color: token.colorWarningText }}>Recommendation: </Text>
                                   <Text>{agentSync.parsed_error.suggestion}</Text>
                                 </div>
                               )}
@@ -1951,13 +1955,17 @@ const ApplyManagement = () => {
                     {diffData.changes && diffData.changes.length > 0 ? (
                       diffData.changes.map((change, index) => (
                         <div key={index} style={{ marginBottom: '4px' }}>
+                          {/* Token-based, not the light literals #f6ffed/#fff2f0: those stayed
+                              near-white in dark mode, so the added/removed rows glared against
+                              the dark diff panel around them. colorSuccessBg/colorErrorBg darken
+                              with the algorithm while keeping the green/red semantics. */}
                           {change.type === 'added' && (
-                            <div style={{ backgroundColor: '#f6ffed', color: '#52c41a', padding: '2px 8px', borderLeft: '3px solid #52c41a' }}>
+                            <div style={{ backgroundColor: token.colorSuccessBg, color: token.colorSuccessText, padding: '2px 8px', borderLeft: `3px solid ${token.colorSuccess}` }}>
                               + {change.line}
                             </div>
                           )}
                           {change.type === 'removed' && (
-                            <div style={{ backgroundColor: '#fff2f0', color: '#ff4d4f', padding: '2px 8px', borderLeft: '3px solid #ff4d4f' }}>
+                            <div style={{ backgroundColor: token.colorErrorBg, color: token.colorErrorText, padding: '2px 8px', borderLeft: `3px solid ${token.colorError}` }}>
                               - {change.line}
                             </div>
                           )}

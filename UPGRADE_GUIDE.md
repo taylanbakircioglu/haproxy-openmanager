@@ -1,3 +1,25 @@
+# Upgrade Notes — v1.10.2 (Dark mode fixes on Apply Management)
+
+**Frontend only. Nothing to do on upgrade.** No schema, no `SCHEMA_VERSION` bump, no API change,
+no environment variable, zero agent impact. Light mode is byte-identical: every colour swapped in
+this release resolves, under the default algorithm, to exactly the literal it replaced
+(`colorWarningBg` → `#fffbe6`, `colorSuccessBg` → `#f6ffed`, `colorErrorBg` → `#fff2f0`, …), so
+only dark mode changes.
+
+- **Apply Management panels** were painted with light-mode colour literals, so in dark mode the
+  "Pending Changes" box rendered as a cream panel with light text on it. Measured contrast was
+  **1.03:1** — effectively invisible. It is now **11.50:1**. The same class of bug affected the
+  diff rows in *View Change* (2.21:1 and 2.99:1, now 5.49:1 and 4.01:1), the ACME/pending version
+  panels, the VIP pending-delete row and the agent-error recommendation box.
+- **Static confirm dialogs came up white in dark mode.** In Ant Design 5 the static
+  `Modal.confirm` / `message` / `notification` APIs render into their own detached root and never
+  see the app's `ConfigProvider`, so they always used the light algorithm. This release registers
+  `ConfigProvider.config({ holderRender })` once at the app root, which fixes **every** static
+  dialog in the app (12 components use them), not just Apply Management.
+- **Rollback:** downgrade freely. This release changes rendering only.
+
+---
+
 # Upgrade Notes — v1.10.1 (CSR private key encrypted at rest)
 
 **Backward compatible.** Nothing to do on upgrade, and nothing changes for existing clusters,
