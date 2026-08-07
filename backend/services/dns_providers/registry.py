@@ -10,11 +10,13 @@ from typing import Dict, List, Type
 
 from .base import DnsProvider
 from .cloudflare import CloudflareDNSProvider
+from .godaddy import GoDaddyDNSProvider
 from .manual import ManualDNSProvider
 
 _PROVIDERS: Dict[str, Type[DnsProvider]] = {
     ManualDNSProvider.name: ManualDNSProvider,
     CloudflareDNSProvider.name: CloudflareDNSProvider,
+    GoDaddyDNSProvider.name: GoDaddyDNSProvider,
 }
 
 

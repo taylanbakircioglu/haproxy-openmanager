@@ -5,8 +5,8 @@ A small adapter layer so DNS-01 challenges can publish/clean up the
 additive at the RRset level (add/remove a single value by name+content, never
 overwrite-by-name) so multiple coexisting values at one name (wildcard + apex) work.
 
-MVP providers: manual (user publishes the TXT themselves) and Cloudflare. New providers
-plug in via the registry without touching the orchestration.
+Providers: manual (user publishes the TXT themselves), Cloudflare, and GoDaddy (v1.10.0). New
+providers plug in via the registry without touching the orchestration.
 """
 from .base import DnsProvider, DnsProviderError
 from .registry import get_provider, list_providers, is_supported
