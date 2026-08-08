@@ -1,3 +1,29 @@
+# Upgrade Notes — v1.10.3 (Multi-account ACME wizard fix)
+
+**Frontend only. Nothing to do on upgrade.** No schema, no `SCHEMA_VERSION` bump, no API change, no
+environment variable, zero agent impact. Installations with a single ACME account behave exactly as
+before.
+
+- **What was broken:** with **more than one** ACME account registered, the *Request ACME
+  Certificate* wizard did not honour the account you selected. Choosing an HTTP-01 account still
+  submitted a DNS-01 request, which the API rejected with
+  `The selected ACME account has no DNS provider configured for DNS-01.` The *Review* step also
+  named the default account rather than the chosen one, so the mismatch was invisible before
+  submitting.
+- **Default account:** the wizard previously previewed the **oldest** valid account while the
+  backend uses the **newest** (`ORDER BY created_at DESC`). If you never picked an account
+  explicitly and have several, requests were already going to the newest one — only the preview was
+  wrong. The wizard now previews that same account, marks it `(default)`, and sends `account_id`
+  explicitly so the two can no longer diverge.
+- **Wildcard guard:** the client-side "wildcard requires a DNS-01 account" block silently stopped
+  applying on the *Review* step. Requests were still rejected by the backend, so nothing incorrect
+  was ever issued — you now get the warning before submitting instead of an error after.
+- **No action needed on existing certificates or orders.** Nothing about issuance, renewal or the
+  stored accounts changes; only how the wizard resolves which account a new request uses.
+- **Rollback:** downgrade freely. This release changes frontend behaviour only.
+
+---
+
 # Upgrade Notes — v1.10.2 (Dark mode fixes on Apply Management)
 
 **Frontend only. Nothing to do on upgrade.** No schema, no `SCHEMA_VERSION` bump, no API change,
