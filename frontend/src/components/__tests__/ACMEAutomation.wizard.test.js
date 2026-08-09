@@ -13,6 +13,11 @@ import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import axios from 'axios';
 import ACMEAutomation from '../ACMEAutomation';
 
+// These render the whole ACMEAutomation tree (antd Steps + Form + Select) three times per test and
+// take 4-7s each, so jest's default 5s per-test limit fails two of them. Raise it here rather than
+// relying on the runner being invoked with --testTimeout, so `npm test` passes as shipped.
+jest.setTimeout(30000);
+
 jest.mock('axios');
 jest.mock('react-router-dom', () => ({ useNavigate: () => jest.fn() }));
 jest.mock('../../contexts/ClusterContext', () => ({
