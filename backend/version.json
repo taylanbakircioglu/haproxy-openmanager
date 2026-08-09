@@ -1,5 +1,5 @@
 {
-  "version": "1.10.2",
-  "releaseName": "Dark mode fixes on Apply Management",
+  "version": "1.10.3",
+  "releaseName": "Multi-account ACME — the wizard honours the selected account",
   "releaseDate": "2026-08-08"
 }

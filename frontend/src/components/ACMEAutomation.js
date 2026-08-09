@@ -107,8 +107,14 @@ const ACMEAutomation = () => {
   const [confirming, setConfirming] = useState(false);
   const regChallengeType = Form.useWatch('challenge_type', registerForm);
   const regDnsProvider = Form.useWatch('dns_provider', registerForm);
-  const wizardAccountId = Form.useWatch('account_id', wizardForm);
-  const wizardDomains = Form.useWatch('domains', wizardForm);
+  // `preserve: true` is load-bearing, not a nicety. Each wizard step renders only its own fields —
+  // the domain list on Domains, the account Select on Configuration — and a plain useWatch reports
+  // only fields that are currently REGISTERED, so every one of these read `undefined` from the
+  // Review step onward even though the values were still in the form store. That is what made
+  // Review (and the request it submits) silently fall back to the default ACME account, and it
+  // disabled the wildcard guard at exactly the step where Submit lives.
+  const wizardAccountId = Form.useWatch('account_id', { form: wizardForm, preserve: true });
+  const wizardDomains = Form.useWatch('domains', { form: wizardForm, preserve: true });
   const selectedDnsProvider = dnsProviders.find(p => p.name === regDnsProvider) || null;
 
   // Issue #35: per-account DNS credential management (view/replace/clear after creation).
@@ -217,7 +223,16 @@ const ACMEAutomation = () => {
   const pendingOrders = orders.filter(o =>
     o.status === 'pending' || o.status === 'processing' || o.status === 'ready' || isOrderStuck(o)
   );
-  const activeAccount = accounts.find(a => a.status === 'valid') || null;
+  // The account a request lands on when it carries no explicit account_id. This MUST match the
+  // backend, which takes `ORDER BY created_at DESC LIMIT 1` (routers/letsencrypt.py). The list
+  // arrives ORDER BY id, so picking the first valid entry would preview the OLDEST account — the
+  // opposite one. With two accounts of different challenge methods that made the wizard describe
+  // DNS-01 while the request would actually have gone to an HTTP-01 account.
+  const activeAccount = accounts.filter(a => a.status === 'valid').reduce((best, a) => {
+    if (!best) return a;
+    const delta = new Date(a.created_at) - new Date(best.created_at);
+    return delta > 0 || (delta === 0 && a.id > best.id) ? a : best;
+  }, null);
   const acmeAccount = activeAccount || (accounts.length > 0 ? accounts[accounts.length - 1] : null);
   const acmeEnabledClusters = clusters.filter(c => c.acme_enabled && c.is_active);
   // Issue #35: the cert wizard adapts to the selected account's challenge method.
@@ -260,18 +275,26 @@ const ACMEAutomation = () => {
         return;
       }
       setSubmitting(true);
-      // Resolve the chosen account's challenge method so DNS-01/wildcard requests are explicit.
-      // Use the same resolution as the wizard description (wizardAccount) so what the user reviewed
-      // matches what is sent.
-      const challengeType = wizardAccount?.challenge_type;  // 'http-01' | 'dns-01' | undefined
+      // Resolve the account ONCE and derive everything else from that single object. The id and the
+      // challenge method used to come from different places — account_id from the form store,
+      // challenge_type from wizardAccount — so whenever those two disagreed the request asked for
+      // DNS-01 validation on an HTTP-01 account and the backend answered "The selected ACME account
+      // has no DNS provider configured for DNS-01."
+      const selectedAccountId = values.account_id ?? wizardAccount?.id ?? null;
+      const account = accounts.find(a => a.id === selectedAccountId) || wizardAccount || null;
+      const challengeType = account?.challenge_type;  // 'http-01' | 'dns-01' | undefined
       // Manual DNS-01 can't auto-renew (the wizard shows the switch off+disabled). Send false to
       // match the displayed state rather than relying only on the backend to override it.
-      const autoRenew = wizardDnsManual ? false : (values.auto_renew !== false);
+      const isManualDns01 = challengeType === 'dns-01' && (account?.dns_provider || 'manual') === 'manual';
+      const autoRenew = isManualDns01 ? false : (values.auto_renew !== false);
       const res = await axios.post('/api/letsencrypt/certificates', {
         domains: values.domains,
         cluster_ids: values.cluster_ids || [],
         auto_renew: autoRenew,
-        account_id: values.account_id || null,
+        // Always explicit: sending the resolved id removes the frontend/backend "default account"
+        // guess, which disagreed (the UI previewed the oldest valid account, the backend used the
+        // newest) and made the Review step describe an account the request never went to.
+        account_id: account?.id ?? null,
         challenge_type: challengeType || undefined,
       });
       message.success(res.data?.message || 'Certificate request submitted');
@@ -1092,7 +1115,17 @@ const ACMEAutomation = () => {
             message="Prerequisite Check"
             description={
               <ul style={{ margin: 0, paddingLeft: 20 }}>
-                <li>ACME Account: {activeAccount ? <Tag color="success">Active ({activeAccount.email})</Tag> : <Tag color="error">No active account</Tag>}</li>
+                {/* The account the request will actually use — NOT `activeAccount`, which is only
+                    the default and would name a different account whenever the user picked one. */}
+                <li>ACME Account: {wizardAccount
+                  ? <Tag color={wizardAccount.status === 'valid' ? 'success' : 'error'}>
+                      {wizardAccount.email}{wizardAccount.status !== 'valid' ? ` (${wizardAccount.status})` : ''}
+                    </Tag>
+                  : <Tag color="error">No active account</Tag>}
+                  {wizardAccount && accounts.length > 1 && !wizardAccountId && (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}> (default)</Typography.Text>
+                  )}
+                </li>
                 {wizardIsDns01 ? (
                   <>
                     <li>Challenge Method: <Tag>DNS-01</Tag> (TXT record; no port 80 / ACME routing needed)</li>
@@ -1324,8 +1357,11 @@ const ACMEAutomation = () => {
               Next
             </Button>
           )}
+          {/* Gate on the account the request will actually use, and on its status: with no valid
+              account wizardAccount falls back to the newest (deactivated) one, and the Select lists
+              deactivated accounts too, so a bare null-check would leave Submit enabled. */}
           {wizardStep === wizardSteps.length - 1 && (
-            <Button type="primary" onClick={handleRequestCert} loading={submitting} disabled={!activeAccount || wizardWildcardBlocked || wizardDns01Disabled || (!wizardIsDns01 && acmeEnabledClusters.length === 0)}>
+            <Button type="primary" onClick={handleRequestCert} loading={submitting} disabled={wizardAccount?.status !== 'valid' || wizardWildcardBlocked || wizardDns01Disabled || (!wizardIsDns01 && acmeEnabledClusters.length === 0)}>
               Submit Request
             </Button>
           )}
