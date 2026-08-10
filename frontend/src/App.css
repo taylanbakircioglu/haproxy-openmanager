@@ -210,3 +210,23 @@
 [data-theme='dark'] .agent-offline:hover > td {
   background-color: #321518 !important;
 }
+
+/* v1.11.0 — Request Log: failed exchanges (4xx/5xx and transport errors) are
+   tinted so a page of traffic reads at a glance. Defined for BOTH themes here
+   rather than as an inline style, so the dark variant is not forgotten (the
+   v1.10.2 regression class). */
+.request-log-error-row > td {
+  background-color: #fff2f0;
+}
+
+.request-log-error-row:hover > td {
+  background-color: #ffe7e5 !important;
+}
+
+[data-theme='dark'] .request-log-error-row > td {
+  background-color: #2a1215 !important;
+}
+
+[data-theme='dark'] .request-log-error-row:hover > td {
+  background-color: #321518 !important;
+}

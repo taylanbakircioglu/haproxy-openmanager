@@ -398,12 +398,23 @@ async def check_port80(domains: List[str], *, http_timeout: float = 5.0) -> Dict
                 continue
             url = f"http://{d}/.well-known/acme-challenge/diagnostic-probe"
             try:
-                async with session.head(url, allow_redirects=False) as resp:
-                    targets.append({
-                        "domain": d,
-                        "status": resp.status,
-                        "ok": resp.status in (200, 404),
-                    })
+                # v1.11.0: recorded as an outbound row so a failing port-80 probe
+                # is diagnosable after the fact, not only while the panel is open.
+                # HEAD, so there is no request body to capture.
+                from utils.http_instrumentation import outbound_span, TARGET_ACME_DIAG
+
+                async with outbound_span(
+                    target=TARGET_ACME_DIAG, method="HEAD", url=url, capture_body=False
+                ) as span:
+                    async with session.head(url, allow_redirects=False) as resp:
+                        # getattr, not resp.headers: this probe is driven in tests
+                        # by a minimal fake response that only exposes `.status`.
+                        span.set_response(resp.status, getattr(resp, "headers", None))
+                        targets.append({
+                            "domain": d,
+                            "status": resp.status,
+                            "ok": resp.status in (200, 404),
+                        })
             except asyncio.TimeoutError:
                 targets.append({"domain": d, "error": "egress timeout", "warn": True})
                 skip_reason = "egress timeout"

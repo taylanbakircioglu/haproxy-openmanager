@@ -73,26 +73,42 @@ class CloudflareDNSProvider(DnsProvider):
         """One Cloudflare API call. Returns the parsed JSON body. Raises a SANITIZED
         DnsProviderError on transport/HTTP/API error (never echoes the token or raw headers)."""
         url = f"{CLOUDFLARE_API_BASE}{path}"
+        # v1.11.0: single funnel for every Cloudflare call, so instrumenting here
+        # covers all five logical endpoints. `safe_error_only=True` records only
+        # the exception TYPE — the same stance the handlers below already take,
+        # because a raw message can carry the request URL and through it the zone
+        # identifier. The Authorization header is dropped to a presence marker by
+        # the header allowlist.
+        from utils.http_instrumentation import outbound_span, TARGET_DNS_CLOUDFLARE
+
         try:
-            async with session.request(
-                method, url, headers=self._headers(), allow_redirects=False, **kwargs
-            ) as resp:
-                try:
-                    body = await resp.json()
-                except Exception:  # noqa: BLE001
-                    body = {}
-                if resp.status in (401, 403):
-                    raise DnsProviderError("Cloudflare rejected the API token (check it has Zone:DNS:Edit + Zone:Read).")
-                if resp.status >= 400 or not body.get("success", False):
-                    # Cloudflare returns {"errors":[{"code":..,"message":..}]} — surface only the
-                    # human message text, never the request (which carries the token header).
-                    msgs = "; ".join(
-                        str(e.get("message")) for e in (body.get("errors") or []) if e.get("message")
-                    )
-                    raise DnsProviderError(
-                        f"Cloudflare API error (HTTP {resp.status}){': ' + msgs if msgs else ''}"
-                    )
-                return body
+            async with outbound_span(
+                target=TARGET_DNS_CLOUDFLARE,
+                method=method,
+                url=url,
+                request_body=kwargs.get("json"),
+                safe_error_only=True,
+            ) as span:
+                async with session.request(
+                    method, url, headers=self._headers(), allow_redirects=False, **kwargs
+                ) as resp:
+                    try:
+                        body = await resp.json()
+                    except Exception:  # noqa: BLE001
+                        body = {}
+                    span.set_response(resp.status, getattr(resp, "headers", None), body)
+                    if resp.status in (401, 403):
+                        raise DnsProviderError("Cloudflare rejected the API token (check it has Zone:DNS:Edit + Zone:Read).")
+                    if resp.status >= 400 or not body.get("success", False):
+                        # Cloudflare returns {"errors":[{"code":..,"message":..}]} — surface only the
+                        # human message text, never the request (which carries the token header).
+                        msgs = "; ".join(
+                            str(e.get("message")) for e in (body.get("errors") or []) if e.get("message")
+                        )
+                        raise DnsProviderError(
+                            f"Cloudflare API error (HTTP {resp.status}){': ' + msgs if msgs else ''}"
+                        )
+                    return body
         except DnsProviderError:
             raise
         except aiohttp.ClientError as exc:

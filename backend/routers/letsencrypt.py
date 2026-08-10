@@ -926,12 +926,22 @@ async def import_le_ca_chain(authorization: str = Header(None)):
         ("https://letsencrypt.org/certs/r11.pem", "R11 Intermediate"),
     ]
     chain_parts = []
+    # v1.11.0: each download is recorded as an outbound row. The bodies are
+    # public CA certificates, not secrets, and the 8 KB body cap truncates them —
+    # what matters here is which URL failed, with what status.
+    from utils.http_instrumentation import outbound_span, TARGET_LETSENCRYPT_CA
+
     async with aiohttp.ClientSession() as session:
         for url, name in ca_urls:
             try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status == 200:
-                        chain_parts.append(await resp.text())
+                async with outbound_span(
+                    target=TARGET_LETSENCRYPT_CA, method="GET", url=url
+                ) as span:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        text = await resp.text() if resp.status == 200 else None
+                        span.set_response(resp.status, getattr(resp, "headers", None), text)
+                        if resp.status == 200:
+                            chain_parts.append(text)
             except Exception as e:
                 logger.warning(f"Failed to download {name}: {e}")
 

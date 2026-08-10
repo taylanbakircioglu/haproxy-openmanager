@@ -343,30 +343,45 @@ class GoDaddyDNSProvider(DnsProvider):
         request, never a response body verbatim.
         """
         url = f"{GODADDY_API_BASE}{path}"
+        # v1.11.0: single funnel for every GoDaddy call. `safe_error_only=True`
+        # keeps the recorded error to the exception TYPE, matching the stance the
+        # handlers below already take — a raw message can carry the request URL.
+        # The `Authorization: sso-key <key>:<secret>` header never reaches the log:
+        # the header allowlist reduces it to a presence marker.
+        from utils.http_instrumentation import outbound_span, TARGET_DNS_GODADDY
+
         try:
-            async with session.request(
-                method, url, headers=self._headers(), allow_redirects=False, **kwargs
-            ) as resp:
-                try:
-                    # content_type=None: every GoDaddy write answers 200/204 with an EMPTY body, and
-                    # aiohttp would otherwise raise on the missing/other content type before parsing.
-                    body = await resp.json(content_type=None)
-                except ValueError:
-                    # ONLY a decode failure (JSONDecodeError subclasses ValueError) is swallowed —
-                    # an empty write body, or an HTML error page on a >=400. A transport failure
-                    # mid-read (ClientPayloadError, TimeoutError) must NOT land here: it would look
-                    # identical to "empty body", and a caller that reads an RRset would then see
-                    # None and could mistake it for an empty RRset. Those propagate to the handlers
-                    # below and become a real DnsProviderError.
-                    body = None
-                # 2xx only. Redirects are deliberately not followed (aiohttp would forward the
-                # Authorization header), so a 3xx is a failed call — treating `< 400` as success
-                # would report a redirected write as a silent no-op.
-                if 200 <= resp.status < 300:
-                    return body
-                code, message = _error_fields(body)
-                retry_after = _retry_after_seconds(resp.headers, body) if resp.status == 429 else None
-                raise self._http_error(resp.status, code, message, retry_after)
+            async with outbound_span(
+                target=TARGET_DNS_GODADDY,
+                method=method,
+                url=url,
+                request_body=kwargs.get("json"),
+                safe_error_only=True,
+            ) as span:
+                async with session.request(
+                    method, url, headers=self._headers(), allow_redirects=False, **kwargs
+                ) as resp:
+                    try:
+                        # content_type=None: every GoDaddy write answers 200/204 with an EMPTY body, and
+                        # aiohttp would otherwise raise on the missing/other content type before parsing.
+                        body = await resp.json(content_type=None)
+                    except ValueError:
+                        # ONLY a decode failure (JSONDecodeError subclasses ValueError) is swallowed —
+                        # an empty write body, or an HTML error page on a >=400. A transport failure
+                        # mid-read (ClientPayloadError, TimeoutError) must NOT land here: it would look
+                        # identical to "empty body", and a caller that reads an RRset would then see
+                        # None and could mistake it for an empty RRset. Those propagate to the handlers
+                        # below and become a real DnsProviderError.
+                        body = None
+                    span.set_response(resp.status, getattr(resp, "headers", None), body)
+                    # 2xx only. Redirects are deliberately not followed (aiohttp would forward the
+                    # Authorization header), so a 3xx is a failed call — treating `< 400` as success
+                    # would report a redirected write as a silent no-op.
+                    if 200 <= resp.status < 300:
+                        return body
+                    code, message = _error_fields(body)
+                    retry_after = _retry_after_seconds(resp.headers, body) if resp.status == 429 else None
+                    raise self._http_error(resp.status, code, message, retry_after)
         except DnsProviderError:
             raise
         except aiohttp.ClientError as exc:

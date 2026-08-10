@@ -1,3 +1,52 @@
+# Upgrade Notes — v1.11.0 (Unified request/response log)
+
+**Adds one new table and bumps `SCHEMA_VERSION` 10 → 11. The migration runs automatically on the
+first backend start.** No agent impact, no rendered-config change, no change to any existing API
+shape or response body.
+
+- **New table `request_logs`** (BIGSERIAL primary key, 9 indexes). Created empty and starts filling
+  immediately. Budget for it as **one row per API call**. The shipped defaults keep 7 days of
+  successful requests, 30 days of failed ones, and at most 500 000 rows — whichever limit is reached
+  first. Change any of it in *Settings → Request Log*.
+- **New permissions `requestlog.read` and `requestlog.manage`.** Both are granted to `super_admin`
+  and `security_admin`; `operator` gets `requestlog.read` only; `viewer` gets neither, because
+  captured request/response bodies are a broader disclosure surface than the read-only configuration
+  views a viewer is meant to have. Custom roles can be granted either from **Users → Roles**.
+- **⚠️ Built-in roles are re-seeded to their defaults.** This is the pre-existing behaviour of every
+  `SCHEMA_VERSION` bump, not something new in this release, but it bites here because this release
+  bumps: the version gate re-runs the whole sequence and
+  `update_system_roles_to_enterprise_rbac()` issues an unconditional
+  `UPDATE roles SET … permissions = <defaults> WHERE name = …` for the four **built-in** roles
+  (`super_admin`, `operator`, `security_admin`, `viewer`). **Any customisation you made to a
+  built-in role is reverted.** Roles you created yourself are untouched (the update matches on
+  name). To preserve customisation, export with `GET /api/roles` before upgrading and re-apply with
+  `PUT /api/roles/{id}`, or move the customisation into a custom role.
+- **Bodies are captured, redacted and capped at 8 KB.** Passwords, tokens, API keys, private-key
+  PEMs, JWT-shaped values, `Authorization` / `Cookie` headers, ACME JWS payloads and DNS-provider
+  credentials are never stored. Headers use an allowlist — anything not on it is dropped rather than
+  saved. Review *Settings → Request Log* before enabling body capture in a regulated environment;
+  `capture_bodies` can be turned off while still recording who called what, with what result.
+- **Excluded by default:** health checks, the API docs, the ACME HTTP-01 challenge endpoint (it
+  returns `key_authorization`), the agent heartbeat (the highest-volume POST in the system), static
+  assets, and the log viewer's own endpoints. The list is editable, except the log viewer itself,
+  which is a hard floor so the page cannot end up logging you reading it.
+- **Disk growth is the main operational consideration.** On a busy install, in order of bluntness:
+  lower `sample_rate` (errors are always kept at 100 %), turn off `capture_get`, turn off
+  `capture_bodies`, or shorten `success_retention_days`.
+- **New environment variables**, all optional: `REQUEST_LOG_ENABLED` (default `true`),
+  `REQUEST_LOG_QUEUE_MAX` (2000), `REQUEST_LOG_BATCH_SIZE` (100), `REQUEST_LOG_FLUSH_MS` (500). See
+  `.env.template`.
+- **To disable entirely:** set `REQUEST_LOG_ENABLED=false` in the backend environment and restart —
+  the middleware is then not registered at all and costs nothing, not even a settings lookup. The
+  `enabled` toggle in Settings is the no-restart equivalent (it takes effect immediately).
+- **Default admin password is not reset** by this bump; user seeding is guarded by an existence
+  check, not an upsert.
+- **Rollback:** downgrade the backend image freely. `request_logs` is purely additive and is simply
+  ignored by v1.10.x. Drop the table manually if you want the space back:
+  `DROP TABLE IF EXISTS request_logs;`
+
+---
+
 # Upgrade Notes — v1.10.3 (Multi-account ACME wizard fix)
 
 **Frontend only. Nothing to do on upgrade.** No schema, no `SCHEMA_VERSION` bump, no API change, no

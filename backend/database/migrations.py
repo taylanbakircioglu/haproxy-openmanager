@@ -1365,6 +1365,10 @@ async def update_system_roles_to_enterprise_rbac():
                     'roles.read', 'roles.create', 'roles.update', 'roles.delete', 'roles.permissions',
                     'statistics.read', 'statistics.performance', 'statistics.agents', 'statistics.health', 'statistics.export',
                     'activity.read', 'activity.all', 'activity.export',
+                    # v1.11.0 — request/response log. `read` browses the log,
+                    # `manage` edits retention/capture settings and triggers a
+                    # manual purge.
+                    'requestlog.read', 'requestlog.manage',
                     'settings.read', 'settings.update', 'settings.system', 'settings.security',
                     'system.restart', 'system.logs', 'system.database', 'system.services', 'system.emergency'
                 ]
@@ -1384,7 +1388,11 @@ async def update_system_roles_to_enterprise_rbac():
                     'vip.read', 'vip.create', 'vip.update', 'vip.delete', 'vip.apply',
                     'config.read', 'config.update', 'config.download', 'config.history', 'config.bulk_import', 'config.view_request', 'config.download_request',
                     'statistics.read', 'statistics.performance', 'statistics.agents', 'statistics.health',
-                    'activity.read'
+                    'activity.read',
+                    # v1.11.0 — operators debug failing applies and ACME orders,
+                    # so they get read access to the request log; retention and
+                    # purge stay with the admins.
+                    'requestlog.read'
                 ]
             },
             'security_admin': {
@@ -1403,9 +1411,16 @@ async def update_system_roles_to_enterprise_rbac():
                     'config.read', 'config.history', 'config.view_request', 'config.download_request',
                     'statistics.read', 'statistics.performance', 'statistics.agents', 'statistics.health',
                     'activity.read', 'activity.all', 'activity.export',
+                    # v1.11.0 — the request log is a security-forensics surface,
+                    # so the security admin gets both read and retention control.
+                    'requestlog.read', 'requestlog.manage',
                     'settings.read', 'settings.security'
                 ]
             },
+            # NOTE (v1.11.0): `viewer` deliberately gets NEITHER requestlog
+            # permission. Even redacted, captured request/response bodies are a
+            # far broader disclosure surface than the read-only configuration
+            # views a viewer is meant to have.
             'viewer': {
                 'display_name': 'Viewer',
                 'description': 'Read-only access to view configurations, statistics, and monitor system status',
@@ -1758,7 +1773,15 @@ async def ensure_agent_activity_logs_table():
 # until the operator imports the CA-signed certificate; the import creates a
 # normal ssl_certificates row and NULLs the key copy here. Additive + idempotent;
 # no existing table is altered, agents never read this table.
-SCHEMA_VERSION = 10
+# v1.11.0 (unified request/response log): bumped 10 -> 11 for the brand-new
+# `request_logs` table (ensure_request_logs_table), its retention-settings seed
+# (ensure_request_log_settings), and the new `requestlog.read` /
+# `requestlog.manage` permissions added to the built-in roles in
+# update_system_roles_to_enterprise_rbac(). Without the bump, already-deployed
+# databases (version >= 10) skip the whole run and neither the table nor the
+# permissions ever land. Additive + idempotent; no existing table is altered,
+# agents never read this table.
+SCHEMA_VERSION = 11
 
 
 async def run_all_migrations():
@@ -1902,6 +1925,12 @@ async def _run_all_migrations_inner():
     # ssl_certificates/users, both created above.
     await ensure_ssl_csrs_table()
 
+    # v1.11.0 — unified request/response log: brand-new request_logs table
+    # (no FK targets) plus the seed for its operator-tunable retention
+    # settings. Both are additive and idempotent.
+    await ensure_request_logs_table()
+    await ensure_request_log_settings()
+
     logger.info("Database migrations completed successfully.")
 
 
@@ -1967,6 +1996,161 @@ async def ensure_ssl_csrs_table():
         # the marker only after the inner sequence completes cleanly. Swallowing
         # a failure here would stamp version 10 with no ssl_csrs table, and the
         # version gate would then skip every future retry — permanently.
+        raise
+    finally:
+        if conn:
+            await close_database_connection(conn)
+
+
+async def ensure_request_logs_table():
+    """v1.11.0 — unified inbound/outbound request/response log.
+
+    Additive only: one brand-new table (request_logs) + indexes. No ALTER of
+    any existing table; agents never read this table.
+
+    Deliberately has NO foreign key on user_id. This is the highest-volume
+    table in the system — one row per API call — and per-insert FK validation
+    is not worth it here; `username` is a denormalized snapshot so a row stays
+    readable after the user who made the request is deleted. That is also the
+    correct audit semantics: the record should outlive the account.
+
+    Fully idempotent (CREATE TABLE/INDEX IF NOT EXISTS). Uses only PostgreSQL
+    9.5+ features (BIGSERIAL, JSONB, partial indexes, varchar_pattern_ops) so
+    there is no server-version floor beyond what the rest of the schema needs.
+    """
+    conn = None
+    try:
+        conn = await get_database_connection()
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS request_logs (
+                id                  BIGSERIAL PRIMARY KEY,
+                request_id          VARCHAR(64) NOT NULL,
+                direction           VARCHAR(8)  NOT NULL,
+                target              VARCHAR(32),
+                method              VARCHAR(10) NOT NULL,
+                url                 TEXT        NOT NULL,
+                path                VARCHAR(512),
+                query_params        JSONB,
+                status_code         INTEGER,
+                status_class        SMALLINT    NOT NULL DEFAULT 0,
+                duration_ms         INTEGER     NOT NULL DEFAULT 0,
+                user_id             INTEGER,
+                username            VARCHAR(50),
+                client_ip           INET,
+                user_agent          TEXT,
+                request_headers     JSONB,
+                request_body        JSONB,
+                request_body_bytes  INTEGER     NOT NULL DEFAULT 0,
+                response_headers    JSONB,
+                response_body       JSONB,
+                response_body_bytes INTEGER     NOT NULL DEFAULT 0,
+                error               TEXT,
+                truncated           BOOLEAN     NOT NULL DEFAULT FALSE,
+                created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                CONSTRAINT request_logs_direction_check
+                    CHECK (direction IN ('inbound', 'outbound'))
+            );
+        """)
+
+        # Indexes run UNCONDITIONALLY on every startup, not only on first
+        # creation (the R16-2 rule established for acme_order_events): an older
+        # deploy that raced ahead of an index would otherwise be stuck doing
+        # sequential scans forever. All are IF NOT EXISTS, so re-running is free.
+
+        # --- read paths: the filters the log viewer actually issues ---
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_created_at "
+            "ON request_logs(created_at DESC);"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_dir_created "
+            "ON request_logs(direction, created_at DESC);"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_status_created "
+            "ON request_logs(status_class, created_at DESC);"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_user_created "
+            "ON request_logs(user_id, created_at DESC) WHERE user_id IS NOT NULL;"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_target_created "
+            "ON request_logs(target, created_at DESC) WHERE target IS NOT NULL;"
+        )
+        # Correlates one inbound row with the outbound calls it caused — this is
+        # what makes "which request went where" readable as a single trace.
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_request_id "
+            "ON request_logs(request_id);"
+        )
+        # Prefix search on path (LIKE 'x%') needs pattern_ops to be usable under
+        # a non-C collation.
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_path_prefix "
+            "ON request_logs(path varchar_pattern_ops);"
+        )
+
+        # --- prune paths: the TTL delete is split by outcome, so a plain
+        # (status_class, created_at) index would still range-scan the half it
+        # is not interested in.
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_prune_ok "
+            "ON request_logs(created_at) WHERE status_class BETWEEN 1 AND 3;"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_prune_err "
+            "ON request_logs(created_at) WHERE status_class = 0 OR status_class >= 4;"
+        )
+
+        logger.info("request_logs table ensured (v1.11.0 request/response log)")
+    except Exception as e:
+        logger.error(f"Error ensuring request_logs table: {e}")
+        # Re-raise (ssl_csrs precedent): this step is part of the
+        # SCHEMA_VERSION=11 bump and the version marker is written only after
+        # the inner sequence completes cleanly. Swallowing here would stamp
+        # version 11 with no request_logs table, and the version gate would
+        # then skip every future retry — permanently.
+        raise
+    finally:
+        if conn:
+            await close_database_connection(conn)
+
+
+async def ensure_request_log_settings():
+    """v1.11.0 — seed the request/response-log retention defaults.
+
+    Runs UNCONDITIONALLY rather than inside an `if not table_exists:` branch,
+    so an install that already has `system_settings` picks the rows up too.
+    ON CONFLICT DO NOTHING means an operator's tuning is never overwritten by a
+    later upgrade.
+
+    Defaults are mirrored in utils/request_log_settings.py; the pair is pinned
+    by backend/tests/test_request_log_settings.py so they cannot drift apart.
+    """
+    conn = None
+    try:
+        conn = await get_database_connection()
+        await conn.execute("""
+            INSERT INTO system_settings (key, value, category, description) VALUES
+            ('requestlog.enabled', 'true', 'requestlog', 'Master switch for the request/response log'),
+            ('requestlog.capture_inbound', 'true', 'requestlog', 'Log inbound API calls'),
+            ('requestlog.capture_outbound', 'true', 'requestlog', 'Log outbound HTTP calls made by the backend'),
+            ('requestlog.capture_bodies', 'true', 'requestlog', 'Capture redacted, size-capped request/response bodies'),
+            ('requestlog.capture_get', 'true', 'requestlog', 'Log inbound GET requests'),
+            ('requestlog.max_body_bytes', '8192', 'requestlog', 'Per-body capture cap in bytes'),
+            ('requestlog.sample_rate', '1.0', 'requestlog', 'Sampling rate for successful inbound requests (errors always 1.0)'),
+            ('requestlog.exclude_paths', '["/api/request-logs","/api/health","/api/docs","/api/redoc","/api/openapi.json","/.well-known/acme-challenge","/api/agents/heartbeat","/static","/favicon.ico"]', 'requestlog', 'Path prefixes that are never logged'),
+            ('requestlog.success_retention_days', '7', 'requestlog', 'Retention for 1xx/2xx/3xx rows, in days'),
+            ('requestlog.error_retention_days', '30', 'requestlog', 'Retention for 4xx/5xx/transport-error rows, in days'),
+            ('requestlog.max_rows', '500000', 'requestlog', 'Hard row cap; oldest rows are pruned beyond this'),
+            ('requestlog.prune_interval_minutes', '60', 'requestlog', 'Minimum interval between retention prune passes')
+            ON CONFLICT (key) DO NOTHING
+        """)
+        logger.info("request_log retention settings seeded (v1.11.0)")
+    except Exception as e:
+        logger.error(f"Error seeding request_log settings: {e}")
         raise
     finally:
         if conn:
@@ -2303,19 +2487,19 @@ async def create_initial_system_data(conn):
                 'name': 'super_admin',
                 'display_name': 'Super Administrator', 
                 'description': 'Full system access with all permissions',
-                'permissions': ["dashboard.read","dashboard.statistics","frontends.read","frontends.create","frontends.update","frontends.delete","backends.read","backends.create","backends.update","backends.delete","waf.read","waf.create","waf.update","waf.delete","ssl.read","ssl.create","ssl.update","ssl.delete","apply.read","apply.execute","agents.read","agents.create","agents.update","agents.delete","clusters.read","clusters.create","clusters.update","clusters.delete","config.read","config.update","config.bulk_import","config.view_request","config.download_request","users.read","users.create","users.update","users.delete","roles.read","roles.create","roles.update","roles.delete"]
+                'permissions': ["dashboard.read","dashboard.statistics","frontends.read","frontends.create","frontends.update","frontends.delete","backends.read","backends.create","backends.update","backends.delete","waf.read","waf.create","waf.update","waf.delete","ssl.read","ssl.create","ssl.update","ssl.delete","apply.read","apply.execute","agents.read","agents.create","agents.update","agents.delete","clusters.read","clusters.create","clusters.update","clusters.delete","config.read","config.update","config.bulk_import","config.view_request","config.download_request","users.read","users.create","users.update","users.delete","roles.read","roles.create","roles.update","roles.delete","requestlog.read","requestlog.manage"]
             },
             {
                 'name': 'operator',
                 'display_name': 'Operator',
                 'description': 'Daily operational access for managing HAProxy configurations',
-                'permissions': ["dashboard.read","dashboard.statistics","frontends.read","frontends.create","frontends.update","backends.read","backends.create","backends.update","waf.read","waf.create","waf.update","ssl.read","ssl.create","ssl.update","apply.read","apply.execute","agents.read","clusters.read","config.read","config.update","config.bulk_import","config.view_request","config.download_request"]
+                'permissions': ["dashboard.read","dashboard.statistics","frontends.read","frontends.create","frontends.update","backends.read","backends.create","backends.update","waf.read","waf.create","waf.update","ssl.read","ssl.create","ssl.update","apply.read","apply.execute","agents.read","clusters.read","config.read","config.update","config.bulk_import","config.view_request","config.download_request","requestlog.read"]
             },
             {
                 'name': 'security_admin',
                 'display_name': 'Security Administrator',
                 'description': 'Security-focused access for WAF rules and SSL certificates',
-                'permissions': ["dashboard.read","frontends.read","backends.read","waf.read","waf.create","waf.update","waf.delete","ssl.read","ssl.create","ssl.update","ssl.delete","apply.read","apply.execute","agents.read","clusters.read","config.read","config.view_request","config.download_request"]
+                'permissions': ["dashboard.read","frontends.read","backends.read","waf.read","waf.create","waf.update","waf.delete","ssl.read","ssl.create","ssl.update","ssl.delete","apply.read","apply.execute","agents.read","clusters.read","config.read","config.view_request","config.download_request","requestlog.read","requestlog.manage"]
             },
             {
                 'name': 'viewer',
