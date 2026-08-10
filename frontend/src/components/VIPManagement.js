@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Table, Button, Space, Modal, Form, Input, InputNumber, Select, Tag, message,
-  Switch, Typography, Card, Alert, Tooltip, Spin
+  Switch, Typography, Card, Alert, Tooltip, Spin, Checkbox
 } from 'antd';
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, WarningOutlined,
@@ -46,6 +46,23 @@ const parseArr = (v) => {
   return [];
 };
 
+// v1.10.4 — adoption blockers come back as prose from the parser. Two classes are resolvable by
+// the operator and the rest are not, so the modal has to tell them apart:
+//   * `loss`   — "our renderer cannot reproduce this, so adopting would delete it". A deliberate
+//                choice, waivable with an explicit tick.
+//   * `prefix` — the address has no explicit prefix length. Supplying it resolves the blocker;
+//                we never guess a netmask for a live VIP.
+//   * `hard`   — an unknown VRID, a fractional advert_int, an unsupported auth_type. Not losses
+//                but impossibilities; nothing in the UI may override them.
+const splitBlockers = (blockers) => {
+  const list = blockers || [];
+  return {
+    loss: list.filter((b) => b.includes('would delete it')),
+    prefix: list.filter((b) => b.includes('no explicit prefix length')),
+    hard: list.filter((b) => !b.includes('would delete it') && !b.includes('no explicit prefix length')),
+  };
+};
+
 // This component uses raw fetch(), but extractApiError expects an axios-shaped error
 // (err.response.data). Read the fetch Response body and reuse the envelope-aware extractor
 // so backend messages — e.g. the 409 "node already in VIP X" — actually reach the user.
@@ -67,6 +84,12 @@ const VIPManagement = () => {
   // Delete confirmation (with opt-in package uninstall) + diagnostics modal state.
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [showL2Note, setShowL2Note] = useState(false);
+  // v1.10.4 — VIP adoption from what the agents found on their nodes.
+  const [discoveries, setDiscoveries] = useState([]);
+  const [adoptTarget, setAdoptTarget] = useState(null);   // { discovery, candidate }
+  const [adoptAcceptLoss, setAdoptAcceptLoss] = useState(false);
+  const [adopting, setAdopting] = useState(false);
+  const [adoptForm] = Form.useForm();
   const [diagVip, setDiagVip] = useState(null);
   const [diagData, setDiagData] = useState(null);
   const [diagLoading, setDiagLoading] = useState(false);
@@ -98,11 +121,77 @@ const VIPManagement = () => {
     }
   }, []);
 
+  // v1.10.4 — keepalived configs the agents found on their nodes but do NOT manage. This is why
+  // the page could be empty on a fleet that already runs keepalived: the flow was one-way, so
+  // nothing ever read what was already there.
+  const fetchDiscoveries = useCallback(async () => {
+    try {
+      const res = await fetch('/api/vip/discoveries', { headers: authHeaders() });
+      if (!res.ok) { setDiscoveries([]); return; }
+      const data = await res.json();
+      setDiscoveries((data.discoveries || []).filter((d) => !d.is_managed && !d.adopted_vip_id));
+    } catch (e) {
+      console.error('fetchDiscoveries failed', e);
+    }
+  }, []);
+
   useEffect(() => {
     fetchVips();
-    const t = setInterval(fetchVips, 30000); // live MASTER/BACKUP via existing detection pipeline
+    fetchDiscoveries();
+    const t = setInterval(() => { fetchVips(); fetchDiscoveries(); }, 30000); // live MASTER/BACKUP via existing detection pipeline
     return () => clearInterval(t);
-  }, [fetchVips]);
+  }, [fetchVips, fetchDiscoveries]);
+
+  const openAdopt = (discovery, candidate) => {
+    setAdoptTarget({ discovery, candidate });
+    setAdoptAcceptLoss(false);
+    adoptForm.setFieldsValue({
+      name: `${discovery.agent_name}-${candidate?.vip?.virtual_ip || 'vip'}`,
+      prefix_length: candidate?.vip?.prefix_length ?? undefined,
+    });
+  };
+
+  const submitAdopt = async () => {
+    if (!adoptTarget) return;
+    let values;
+    try { values = await adoptForm.validateFields(); } catch { return; }
+    setAdopting(true);
+    try {
+      const res = await fetch('/api/vip/adopt', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          agent_id: adoptTarget.discovery.agent_id,
+          instance_name: adoptTarget.candidate.instance_name,
+          name: values.name,
+          description: values.description || undefined,
+          prefix_length: values.prefix_length ?? undefined,
+          accept_data_loss: adoptAcceptLoss || undefined,
+        }),
+      });
+      if (!res.ok) {
+        message.error(await fetchApiError(res, 'Adoption failed'), 8);
+        return;
+      }
+      const data = await res.json();
+      message.success(data.message || 'VIP adopted', 8);
+      if ((data.peers_to_add || []).length > 0) {
+        // The adopted node's peers keep their own keepalived.conf, so the VIP is not a complete
+        // VRRP group until they are members too.
+        message.info(
+          `This instance has ${data.peers_to_add.length} unicast peer(s) (${data.peers_to_add.join(', ')}). `
+          + 'Adopt or add those nodes as members before applying, or the rendered config will have no peers.',
+          12);
+      }
+      setAdoptTarget(null);
+      fetchVips();
+      fetchDiscoveries();
+    } catch (e) {
+      message.error('Adoption failed');
+    } finally {
+      setAdopting(false);
+    }
+  };
 
   // Build the participating-nodes table from the pool's EXISTING agents (installed via the
   // standard Agent Management process). On edit, pre-select the VIP's current members.
@@ -409,6 +498,174 @@ const VIPManagement = () => {
         </div>
         <Table rowKey="id" columns={columns} dataSource={vips} loading={loading} pagination={{ pageSize: 10 }} />
       </Card>
+
+      {/* v1.10.4 — keepalived that already exists on a node. Shown separately from managed VIPs
+          because OpenManager is NOT managing these: the agent found them, reported them, and
+          deliberately left them untouched. */}
+      {discoveries.length > 0 && (
+        <Card style={{ marginTop: 16 }} title={
+          <Space>
+            <FileSearchOutlined />
+            <span>Unmanaged keepalived detected on {discoveries.length} node(s)</span>
+          </Space>
+        }>
+          <Alert
+            type="info" showIcon style={{ marginBottom: 12 }}
+            message="These nodes already run keepalived, configured outside OpenManager"
+            description={
+              <span>
+                The agent read each <Text code>keepalived.conf</Text> and left it untouched — nothing
+                on these nodes has been changed. Adopting one creates a managed VIP from the values
+                in that file, and the node's config is only handed over when you apply it from
+                Apply Management. Adoption replaces the file with OpenManager's render, so anything
+                it cannot reproduce is listed as a blocker rather than silently dropped.
+              </span>
+            }
+          />
+          <Table
+            rowKey={(r) => `${r.agent_id}:${r.instance_name}`}
+            size="small"
+            pagination={false}
+            dataSource={discoveries.flatMap((d) => {
+              const cands = (d.analysis?.candidates || []);
+              if (cands.length === 0) {
+                return [{ agent_id: d.agent_id, discovery: d, instance_name: '—', candidate: null }];
+              }
+              return cands.map((c) => ({
+                agent_id: d.agent_id, discovery: d, instance_name: c.instance_name, candidate: c,
+              }));
+            })}
+            columns={[
+              { title: 'Node', dataIndex: ['discovery', 'agent_name'], key: 'agent',
+                render: (_v, r) => (
+                  <Space direction="vertical" size={0}>
+                    <Text strong>{r.discovery.agent_name}</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>{r.discovery.pool_name || 'no pool'}</Text>
+                  </Space>
+                ) },
+              { title: 'Instance', dataIndex: 'instance_name', key: 'instance' },
+              { title: 'Virtual IP', key: 'vip',
+                render: (_v, r) => (r.candidate?.vip?.virtual_ip
+                  ? <Text code>{r.candidate.vip.virtual_ip}
+                      {r.candidate.vip.prefix_length != null ? `/${r.candidate.vip.prefix_length}` : ''}</Text>
+                  : <Text type="secondary">—</Text>) },
+              { title: 'VRID', key: 'vrid',
+                render: (_v, r) => (r.candidate?.vip?.virtual_router_id ?? <Text type="secondary">—</Text>) },
+              { title: 'This node', key: 'member',
+                render: (_v, r) => (r.candidate ? (
+                  <Space size={4}>
+                    <Tag color={r.candidate.member.role === 'MASTER' ? 'green' : 'default'}>
+                      {r.candidate.member.role}
+                    </Tag>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      prio {r.candidate.member.priority} · {r.candidate.member.network_interface}
+                    </Text>
+                  </Space>
+                ) : <Text type="secondary">—</Text>) },
+              { title: 'Adoptable', key: 'adoptable',
+                render: (_v, r) => {
+                  if (r.discovery.parse_error) {
+                    return <Tooltip title={r.discovery.parse_error}><Tag color="red">unparseable</Tag></Tooltip>;
+                  }
+                  if (!r.candidate) return <Tag>no vrrp_instance</Tag>;
+                  if (r.candidate.adoptable) return <Tag color="green">yes</Tag>;
+                  const { hard } = splitBlockers(r.candidate.blockers);
+                  return (
+                    <Tooltip title={(r.candidate.blockers || []).join(' · ')}>
+                      <Tag color={hard.length ? 'red' : 'gold'}>
+                        {hard.length ? `${hard.length} blocker(s)` : 'needs review'}
+                      </Tag>
+                    </Tooltip>
+                  );
+                } },
+              { title: 'Actions', key: 'actions',
+                render: (_v, r) => (
+                  <Button size="small" type="primary" ghost
+                    disabled={!r.candidate || !!r.discovery.parse_error
+                      || splitBlockers(r.candidate.blockers).hard.length > 0}
+                    onClick={() => openAdopt(r.discovery, r.candidate)}>
+                    Adopt
+                  </Button>
+                ) },
+            ]}
+          />
+        </Card>
+      )}
+
+      {/* Adopt modal — shows what will be taken over, what was assumed, and what would be lost. */}
+      <Modal
+        title={adoptTarget ? `Adopt ${adoptTarget.candidate.instance_name} from ${adoptTarget.discovery.agent_name}` : 'Adopt VIP'}
+        open={!!adoptTarget}
+        onCancel={() => setAdoptTarget(null)}
+        onOk={submitAdopt}
+        confirmLoading={adopting}
+        okText="Adopt as PENDING"
+        width={720}
+        okButtonProps={{
+          disabled: !!adoptTarget && (() => {
+            const { loss, hard } = splitBlockers(adoptTarget.candidate.blockers);
+            return hard.length > 0 || (loss.length > 0 && !adoptAcceptLoss);
+          })(),
+        }}
+      >
+        {adoptTarget && (() => {
+          const cand = adoptTarget.candidate;
+          const { loss, prefix, hard } = splitBlockers(cand.blockers);
+          return (
+            <>
+              {hard.length > 0 && (
+                <Alert type="error" showIcon style={{ marginBottom: 12 }}
+                  message="This config cannot be adopted"
+                  description={<ul style={{ margin: 0, paddingLeft: 18 }}>
+                    {hard.map((b, i) => <li key={i}>{b}</li>)}
+                  </ul>} />
+              )}
+              {loss.length > 0 && (
+                <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+                  message="Adopting would delete these directives from the node's config"
+                  description={
+                    <>
+                      <ul style={{ margin: '0 0 8px', paddingLeft: 18 }}>
+                        {loss.map((b, i) => <li key={i}>{b}</li>)}
+                      </ul>
+                      <Checkbox checked={adoptAcceptLoss} onChange={(e) => setAdoptAcceptLoss(e.target.checked)}>
+                        I understand these will be lost when the config is handed over
+                      </Checkbox>
+                    </>
+                  } />
+              )}
+              {(cand.defaulted || []).length > 0 && (
+                <Alert type="info" showIcon style={{ marginBottom: 12 }}
+                  message={`Assumed from keepalived's defaults (absent from the file): ${cand.defaulted.join(', ')}`} />
+              )}
+              <Form form={adoptForm} layout="vertical">
+                <Form.Item name="name" label="VIP name"
+                  rules={[{ required: true, message: 'Give the managed VIP a name' }]}>
+                  <Input placeholder="e.g. dmz-web-vip" />
+                </Form.Item>
+                {prefix.length > 0 && (
+                  <Form.Item name="prefix_length" label="Prefix length"
+                    extra="The file has no explicit prefix, and guessing one would change this VIP's netmask on takeover. State it here."
+                    rules={[{ required: true, message: 'Required — the file does not state one' }]}>
+                    <InputNumber min={1} max={32} style={{ width: 160 }} />
+                  </Form.Item>
+                )}
+                <Form.Item name="description" label="Description (optional)">
+                  <Input placeholder={`Adopted from ${adoptTarget.discovery.agent_name}`} />
+                </Form.Item>
+              </Form>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Config found at <Text code>{adoptTarget.discovery.config_path}</Text> — the VRRP
+                password is masked below and is carried over encrypted.
+              </Text>
+              <pre style={{ marginTop: 8, maxHeight: 220, overflow: 'auto', fontSize: 12,
+                            background: 'rgba(127,127,127,0.08)', padding: 8, borderRadius: 4 }}>
+                {adoptTarget.discovery.config_preview || '(not available)'}
+              </pre>
+            </>
+          );
+        })()}
+      </Modal>
 
       <Modal
         title={editing ? `Edit VIP — ${editing.name}` : 'Create VIP'}
