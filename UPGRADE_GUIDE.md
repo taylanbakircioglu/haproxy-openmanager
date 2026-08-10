@@ -1,3 +1,52 @@
+# Upgrade Notes — v1.10.4 (Adopt an existing keepalived VIP)
+
+**Additive, but this release DOES bump the schema — read the role warning below.** Nothing on any
+node changes until you adopt a VIP and apply it.
+
+- **Schema:** `SCHEMA_VERSION` bumps to `11`, so on first start the (idempotent) migration
+  sequence re-runs once and adds **one new table** (`vip_discoveries`) plus two additive columns
+  (`vip_instances.adopted_at`, `vip_members.takeover_expected_hash`). **No existing table is
+  altered**, no existing row changes, and the admin password is not reset.
+- **⚠️ Built-in roles are re-seeded to their defaults** — the pre-existing behaviour of every
+  `SCHEMA_VERSION` bump. If you customised `super_admin` / `operator` / `security_admin` /
+  `viewer`, **re-apply those changes after upgrading**. (The three previous releases did not bump
+  the version, so this is the first re-seed since v1.9.0.) No new permission strings are
+  introduced: discovery and adoption are governed by the existing `vip.read` / `vip.create`.
+- **⚠️ The Linux agent script changed, and discovery does not start until nodes run it.** The
+  fallback latest Linux agent version moves `2.0.0` → `2.1.0`, so nodes will pull the new script
+  through the normal agent-upgrade path. The addition is **read-only**: the agent reads the
+  `keepalived.conf` it does not own and reports it, rate-limited to once per content change. It
+  writes nothing new to the node. Until a node has upgraded, it simply never appears under
+  *Unmanaged keepalived detected*.
+- **Nothing is taken over implicitly.** The agent still refuses to overwrite a `keepalived.conf`
+  that lacks OpenManager's ownership marker. Adoption authorises exactly **one** takeover of
+  exactly the file that was analysed, pinned to its md5: if the file changes between adoption and
+  Apply, the agent refuses again and reports `externally_managed` rather than clobbering your
+  edit. Re-adopt to pick up the current file.
+- **Adoption can refuse, on purpose.** It replaces the file with OpenManager's render, so anything
+  the renderer cannot reproduce would be destroyed. Those directives are listed as blockers —
+  `notify_*` failover hooks, `vrrp_sync_group`, LVS `virtual_server` sections, a second address in
+  one instance, a custom `track_script`, extra `global_defs`. You can accept that loss explicitly
+  with a tick, but a value that is *unknown* rather than lost (an absent `virtual_router_id`, or
+  an address with no prefix length) cannot be waived — the VRID is fatal to guess and the prefix
+  has to be supplied, because picking a netmask for a live VIP would change its routing.
+- **Multi-node VIPs need every node.** Adoption covers the node that reported. Its unicast peers
+  hold their own `keepalived.conf`, so adopt or add them as members before applying — otherwise
+  the render has no peers. The UI says so after a successful adopt.
+- **Secrets:** the reported config may contain the VRRP `auth_pass`. It is split at ingest — the
+  password is Fernet-encrypted into its own column (same key path as `vip_instances`,
+  `VIP_ENCRYPTION_KEY` falling back to a key derived from `SECRET_KEY`) and the stored copy of the
+  file has it masked, so nothing readable through the API, the UI preview or a DB dump carries it
+  in cleartext.
+- **Rollback:** downgrading to 1.10.3 leaves `vip_discoveries` as an unused table and the two new
+  columns unread; managed VIPs keep working. One caveat: a VIP adopted on 1.10.4 but **not yet
+  applied** loses its takeover authorisation on downgrade, so the node's original config stays in
+  place and the VIP sits PENDING — harmless, but re-adopt after upgrading again. Agents already on
+  script 2.1.0 keep reporting discoveries to an endpoint that no longer exists; the report fails
+  quietly and nothing on the node is affected.
+
+---
+
 # Upgrade Notes — v1.10.3 (Multi-account ACME wizard fix)
 
 **Frontend only. Nothing to do on upgrade.** No schema, no `SCHEMA_VERSION` bump, no API change, no
