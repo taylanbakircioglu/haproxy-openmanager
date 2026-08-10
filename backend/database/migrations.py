@@ -1758,7 +1758,13 @@ async def ensure_agent_activity_logs_table():
 # until the operator imports the CA-signed certificate; the import creates a
 # normal ssl_certificates row and NULLs the key copy here. Additive + idempotent;
 # no existing table is altered, agents never read this table.
-SCHEMA_VERSION = 10
+# v1.10.4 (VIP adoption): bumped 10 -> 11 for the new `vip_discoveries` table plus two
+# additive columns (`vip_instances.adopted_at`, `vip_members.takeover_expected_hash`).
+# Holds the keepalived.conf an agent found already on a node so an existing VIP can be
+# adopted instead of retyped. Additive + idempotent; no existing table is altered and no
+# existing row changes. NOTE for the upgrade notes: a SCHEMA_VERSION bump re-seeds the four
+# built-in roles to their defaults, so role customizations are lost on this upgrade.
+SCHEMA_VERSION = 11
 
 
 async def run_all_migrations():
@@ -2160,6 +2166,45 @@ async def ensure_vip_tables():
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_vip_members_agent ON vip_members(agent_id);"
         )
+
+        # ── v1.10.4 — VIP adoption: what the agent found already on the node ──────────
+        # A node with a hand-maintained keepalived.conf reports it here so an existing VIP can
+        # be adopted instead of retyped. One row per agent (the file is per-node); the agent
+        # only reports a config it does NOT own, and only when the content changed.
+        #
+        # SECRETS: `raw_config` is stored MASKED (auth_pass replaced) because it is served to
+        # the UI. The real VRRP password is Fernet-encrypted in auth_pass_encrypted, mirroring
+        # vip_instances, so adoption can carry it into the managed VIP without it ever being
+        # readable through the API or a DB dump. `analysis` is the parser output with auth_pass
+        # stripped out.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS vip_discoveries (
+                id SERIAL PRIMARY KEY,
+                agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                config_path VARCHAR(500) NOT NULL,
+                config_hash VARCHAR(64) NOT NULL,
+                is_managed BOOLEAN NOT NULL DEFAULT FALSE,
+                raw_config_masked TEXT,
+                auth_pass_encrypted TEXT,
+                analysis JSONB,
+                parse_error TEXT,
+                adopted_vip_id INTEGER REFERENCES vip_instances(id) ON DELETE SET NULL,
+                reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT vip_discovery_agent_unique UNIQUE (agent_id)
+            );
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vip_discoveries_agent ON vip_discoveries(agent_id);"
+        )
+        # Adoption provenance + the one-shot takeover authorisation. The agent refuses to
+        # overwrite a keepalived.conf that lacks our ownership marker, which is exactly the
+        # guard adoption has to pass. Rather than weaken it, an adopted VIP carries the hash of
+        # the file we analysed: the agent takes over ONLY if the file on disk still hashes to
+        # that value, so a config that changed after adoption is never clobbered.
+        await conn.execute(
+            "ALTER TABLE vip_instances ADD COLUMN IF NOT EXISTS adopted_at TIMESTAMP;")
+        await conn.execute(
+            "ALTER TABLE vip_members ADD COLUMN IF NOT EXISTS takeover_expected_hash VARCHAR(64);")
 
         logger.info("✅ VIP tables ensured (Issue #27 — HA/VIP Keepalived management)")
     except Exception as e:
