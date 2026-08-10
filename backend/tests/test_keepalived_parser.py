@@ -282,3 +282,60 @@ def test_our_own_render_round_trips_with_zero_blockers():
     assert cand2["adoptable"] is True, cand2["blockers"]
     assert cand2["vip"]["use_unicast"] is False and cand2["vip"]["track_haproxy"] is False
     assert cand2["vip"]["auth_pass"] is None
+
+
+# --- v1.10.4 adoption gate: which blockers an operator may resolve --------------------------
+
+
+def test_only_prefix_and_data_loss_are_waivable():
+    from services.keepalived_parser import remaining_blockers
+
+    loss = "line 9: `notify_master \"/x.sh\"` — OpenManager's renderer cannot reproduce this, so adopting would delete it"
+    prefix = "`10.0.0.5` has no explicit prefix length; state it during adoption so the netmask cannot change on takeover"
+    hard_vrid = "no virtual_router_id — it cannot be guessed: a wrong VRID puts the nodes in separate VRRP domains"
+    hard_auth = "auth_type AH is not supported (only PASS is rendered)"
+    all_four = [loss, prefix, hard_vrid, hard_auth]
+
+    # Nothing waived: everything survives.
+    assert remaining_blockers(all_four) == all_four
+    # A supplied prefix resolves ONLY the prefix blocker.
+    assert remaining_blockers(all_four, prefix_supplied=True) == [loss, hard_vrid, hard_auth]
+    # Accepting data loss resolves ONLY the loss blocker.
+    assert remaining_blockers(all_four, accept_data_loss=True) == [prefix, hard_vrid, hard_auth]
+    # Both together still cannot wave through an impossibility — this is the property that stops
+    # a UI flag from destroying a VIP whose VRID or auth_type we could not reproduce.
+    assert remaining_blockers(all_four, prefix_supplied=True, accept_data_loss=True) == \
+        [hard_vrid, hard_auth]
+    # And an adoptable candidate stays adoptable.
+    assert remaining_blockers([]) == []
+
+
+def test_waiver_markers_match_the_messages_the_parser_actually_emits():
+    # The gate matches on substrings of the blocker prose, so a reworded message would silently
+    # stop being waivable. Pin both directions against real parser output.
+    from services.keepalived_parser import remaining_blockers
+
+    no_prefix = HANDWRITTEN.replace("10.0.0.100/24 dev eth0", "10.0.0.100 dev eth0")
+    blockers = _only_candidate(no_prefix)["blockers"]
+    assert blockers, "expected a prefix blocker"
+    assert remaining_blockers(blockers, prefix_supplied=True) == []
+
+    with_hook = HANDWRITTEN.replace(
+        "    track_script {", '    notify_master "/usr/local/bin/promote.sh"\n    track_script {')
+    blockers = _only_candidate(with_hook)["blockers"]
+    assert blockers, "expected a data-loss blocker"
+    assert remaining_blockers(blockers, accept_data_loss=True) == []
+
+
+def test_auth_pass_masking_leaves_no_trace_of_the_secret():
+    # The discovered config is stored and served to the UI, so the ingest endpoint masks the VRRP
+    # password. Reuse the router's own regex so the test breaks if it is loosened.
+    from routers.agent import _AUTH_PASS_MASK_RE
+
+    secret = "s3cr3t with spaces"
+    text = HANDWRITTEN.replace("auth_pass s3cr3t", f"auth_pass {secret}")
+    masked = _AUTH_PASS_MASK_RE.sub(r"\1********", text)
+    assert secret not in masked and "s3cr3t" not in masked
+    assert "auth_pass ********" in masked
+    # Everything else survives, so the preview is still useful.
+    assert "virtual_router_id 51" in masked and "10.0.0.100/24 dev eth0" in masked
