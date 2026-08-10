@@ -985,3 +985,218 @@ async def vip_status(vip_id: int, authorization: str = Header(None)):
 # endpoint (cluster.py get_config_version_diff, vip-* branch) via render_vip_config_masked
 # above — there is no bespoke VIP preview endpoint, so VIP changes use the product's
 # standard "View Change" like every other entity (issue #27 follow-up).
+
+
+# ---------------------------------------------------------------------------
+# v1.10.4 — Adoption of a keepalived setup that already exists on the nodes
+# ---------------------------------------------------------------------------
+# The HA/VIP page starts empty on a fleet that already runs keepalived, because the flow is
+# one-way: VIPs are declared here and pushed to the node, and nothing read what was already
+# there. The agent now reports the keepalived.conf it found (read-only) into vip_discoveries;
+# these two endpoints list those findings and turn one into a managed VIP.
+#
+# Adoption REPLACES the operator's file with our render, so it is gated hard: the parser
+# reports every directive we cannot reproduce and every value we cannot know, and adoption
+# refuses while any remain. See services/keepalived_parser.py for the reasoning.
+
+
+def _discovery_row_to_api(row) -> dict:
+    """Shape a vip_discoveries row for the UI. Never includes the VRRP password: the stored
+    config copy is masked and the analysis has the secret replaced by a boolean."""
+    analysis = row["analysis"]
+    if isinstance(analysis, str):
+        try:
+            analysis = json.loads(analysis)
+        except (json.JSONDecodeError, TypeError):
+            analysis = None
+    return {
+        "agent_id": row["agent_id"],
+        "agent_name": row["agent_name"],
+        "pool_id": row["pool_id"],
+        "pool_name": row["pool_name"],
+        "config_path": row["config_path"],
+        "config_hash": row["config_hash"],
+        "is_managed": row["is_managed"],
+        "parse_error": row["parse_error"],
+        "adopted_vip_id": row["adopted_vip_id"],
+        "reported_at": row["reported_at"].isoformat() if row["reported_at"] else None,
+        "config_preview": row["raw_config_masked"],
+        "analysis": analysis,
+    }
+
+
+@router.get("/discoveries")
+async def list_vip_discoveries(authorization: str = Header(None)):
+    """Unmanaged keepalived configs the agents found on their nodes.
+
+    Read-only and safe to poll: this is what the HA/VIP page shows so an existing VIP is
+    visible before anyone adopts it.
+    """
+    await _require(authorization, "read")
+    conn = await get_database_connection()
+    try:
+        try:
+            rows = await conn.fetch("""
+                SELECT d.*, a.name AS agent_name, a.pool_id, p.name AS pool_name
+                FROM vip_discoveries d
+                JOIN agents a ON a.id = d.agent_id
+                LEFT JOIN haproxy_cluster_pools p ON p.id = a.pool_id
+                ORDER BY d.reported_at DESC, d.id DESC
+            """)
+        except Exception as exc:  # noqa: BLE001 — a missing relation degrades to empty (B-7)
+            logger.debug(f"vip_discoveries unavailable: {exc}")
+            return {"discoveries": []}
+        return {"discoveries": [_discovery_row_to_api(r) for r in rows]}
+    finally:
+        await close_database_connection(conn)
+
+
+def _find_candidate(analysis: Optional[dict], instance_name: str) -> Optional[dict]:
+    for cand in ((analysis or {}).get("candidates") or []):
+        if cand.get("instance_name") == instance_name:
+            return cand
+    return None
+
+
+@router.post("/adopt")
+async def adopt_vip(payload: dict, request: Request, authorization: str = Header(None)):
+    """Turn one discovered vrrp_instance into a managed VIP.
+
+    Body: agent_id, instance_name, name, [description], [prefix_length], [accept_data_loss].
+
+    Refuses while the parser reports blockers. Two of them are resolvable by the operator
+    rather than fatal:
+      * a missing prefix length can be supplied as `prefix_length` (we never guess a netmask
+        for a live VIP);
+      * "we would delete this directive" can be accepted with `accept_data_loss: true`, which
+        is an explicit choice to lose e.g. a notify hook. Everything else — an unknown VRID, a
+        fractional advert_int, an unsupported auth_type — is not a loss but an impossibility,
+        and no flag overrides it.
+
+    The VIP is created PENDING like any other, so nothing reaches the node until the operator
+    applies it from Apply Management.
+    """
+    current_user = await _require(authorization, "create")
+    agent_id = payload.get("agent_id")
+    instance_name = (payload.get("instance_name") or "").strip()
+    name = (payload.get("name") or "").strip()
+    if not agent_id or not instance_name or not name:
+        raise HTTPException(status_code=400, detail="agent_id, instance_name and name are required")
+
+    conn = await get_database_connection()
+    try:
+        disc = await conn.fetchrow("""
+            SELECT d.*, a.name AS agent_name, a.pool_id
+            FROM vip_discoveries d JOIN agents a ON a.id = d.agent_id
+            WHERE d.agent_id = $1
+        """, int(agent_id))
+        if not disc:
+            raise HTTPException(status_code=404, detail="No discovered keepalived config for that agent")
+        if disc["adopted_vip_id"]:
+            raise HTTPException(status_code=409, detail="This discovery has already been adopted")
+        if not disc["pool_id"]:
+            raise HTTPException(status_code=400, detail="The agent is not in a pool; assign it first")
+        if disc["parse_error"]:
+            raise HTTPException(status_code=422,
+                                detail=f"Config could not be parsed: {disc['parse_error']}")
+
+        analysis = disc["analysis"]
+        if isinstance(analysis, str):
+            analysis = json.loads(analysis)
+        cand = _find_candidate(analysis, instance_name)
+        if not cand:
+            raise HTTPException(status_code=404,
+                                detail=f"No vrrp_instance '{instance_name}' in the report")
+
+        vip_fields = dict(cand.get("vip") or {})
+        member = dict(cand.get("member") or {})
+
+        # The operator may supply the one value we refuse to guess.
+        supplied_prefix = payload.get("prefix_length")
+        if vip_fields.get("prefix_length") is None and supplied_prefix is not None:
+            try:
+                vip_fields["prefix_length"] = int(supplied_prefix)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="prefix_length must be an integer")
+
+        # One source of truth for which blockers an operator may resolve (see the docstring on
+        # remaining_blockers): a supplied prefix, and an explicit acceptance of directives our
+        # renderer would delete. Nothing else is waivable.
+        from services.keepalived_parser import remaining_blockers
+        blockers = remaining_blockers(
+            list(cand.get("blockers") or []),
+            prefix_supplied=vip_fields.get("prefix_length") is not None,
+            accept_data_loss=bool(payload.get("accept_data_loss")),
+        )
+        if blockers:
+            raise HTTPException(status_code=422, detail={
+                "message": "This keepalived config cannot be adopted as-is",
+                "blockers": blockers,
+            })
+
+        vrid = vip_fields.get("virtual_router_id")
+        virtual_ip = vip_fields.get("virtual_ip")
+        if vrid is None or not virtual_ip or not member.get("network_interface"):
+            raise HTTPException(status_code=422,
+                                detail="Incomplete candidate (vrid/address/interface)")
+
+        # Adoption must keep the VRRP identity it found. A different VRID would create a second
+        # VRRP domain on the wire, so a collision inside the pool is a hard conflict, never an
+        # auto-reallocation the way create_vip does it.
+        clash = await conn.fetchrow("""
+            SELECT id, name FROM vip_instances
+            WHERE pool_id = $1 AND is_active = TRUE AND virtual_router_id = $2
+        """, disc["pool_id"], int(vrid))
+        if clash:
+            raise HTTPException(status_code=409, detail=(
+                f"VRID {vrid} is already used by VIP '{clash['name']}' in this pool; the adopted "
+                f"config must keep its VRID, so resolve the collision first"))
+
+        async with conn.transaction():
+            vip_id = await conn.fetchval("""
+                INSERT INTO vip_instances
+                  (name, description, pool_id, virtual_ip, prefix_length, virtual_router_id,
+                   advert_int, auth_pass_encrypted, use_unicast, track_haproxy,
+                   is_active, last_config_status, adopted_at, created_by)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,'PENDING',CURRENT_TIMESTAMP,$11)
+                RETURNING id
+            """, name, payload.get("description") or f"Adopted from {disc['agent_name']}",
+                disc["pool_id"], virtual_ip, int(vip_fields["prefix_length"]), int(vrid),
+                int(vip_fields.get("advert_int") or 1),
+                disc["auth_pass_encrypted"],           # already Fernet-encrypted at ingest
+                bool(vip_fields.get("use_unicast")), bool(vip_fields.get("track_haproxy")),
+                current_user["id"])
+            # The reporting node becomes a member with the role/priority its own file declares,
+            # and carries the one-shot takeover authorisation pinned to the hash we analysed.
+            await conn.execute("""
+                INSERT INTO vip_members
+                    (vip_id, agent_id, network_interface, role, priority, takeover_expected_hash)
+                VALUES ($1,$2,$3,$4,$5,$6)
+            """, vip_id, int(agent_id), member["network_interface"],
+                member.get("role") or "BACKUP", int(member.get("priority") or 100),
+                disc["config_hash"])
+            await conn.execute(
+                "UPDATE vip_discoveries SET adopted_vip_id = $2 WHERE agent_id = $1",
+                int(agent_id), vip_id)
+
+        await _stage_vip_version(conn, vip_id, "adopt", current_user["id"])
+        await log_user_activity(
+            user_id=current_user["id"], action="adopt", resource_type="vip",
+            resource_id=str(vip_id),
+            details={"name": name, "virtual_ip": virtual_ip, "vrid": vrid,
+                     "adopted_from_agent": disc["agent_name"],
+                     "accepted_data_loss": bool(payload.get("accept_data_loss"))},
+            ip_address=_client_ip(request), user_agent=_user_agent(request))
+
+        peers = list(cand.get("peers") or [])
+        return {
+            "id": vip_id,
+            "message": ("VIP adopted (PENDING — review it in Apply Management, then apply to hand "
+                        "the node's keepalived.conf over to OpenManager)"),
+            # Adoption covers the node that reported. Its peers hold their own keepalived.conf,
+            # so they must be added as members (or adopted from their own report) before the VIP
+            # renders a complete unicast group.
+            "peers_to_add": peers,
+        }
+    finally:
+        await close_database_connection(conn)

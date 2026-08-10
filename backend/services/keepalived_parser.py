@@ -489,6 +489,39 @@ def build_adoption_candidate(parsed: Dict[str, Any], instance: Dict[str, Any]) -
     return candidate
 
 
+# Substrings that identify the two blocker classes an operator is allowed to resolve. They are
+# matched rather than typed because the blocker text is what the UI shows; keeping the marker in
+# the sentence means the message and the rule cannot drift apart.
+_LOSS_MARKER = "would delete it"
+_PREFIX_MARKER = "no explicit prefix length"
+
+
+def remaining_blockers(blockers: List[str], *, prefix_supplied: bool = False,
+                       accept_data_loss: bool = False) -> List[str]:
+    """Blockers that survive what the operator is permitted to resolve.
+
+    Exactly two classes are resolvable, and the distinction is the whole safety argument:
+
+      * a missing prefix length is *unknown*, and the operator can supply it — we refuse to pick
+        a netmask for a live VIP ourselves;
+      * "our renderer cannot reproduce this, so adopting would delete it" is a *loss*, and losing
+        it can be an informed choice.
+
+    Everything else — an unknown virtual_router_id, a fractional advert_int, an unsupported
+    auth_type, an address on a different interface — is neither unknown nor a loss but an
+    impossibility, and no flag may wave it through. This is the single source of truth for that
+    rule; the endpoint and the UI both derive from it.
+    """
+    out: List[str] = []
+    for b in blockers or []:
+        if prefix_supplied and _PREFIX_MARKER in b:
+            continue
+        if accept_data_loss and _LOSS_MARKER in b:
+            continue
+        out.append(b)
+    return out
+
+
 def analyse_keepalived_conf(text: str) -> Dict[str, Any]:
     """Parse + map in one call: the shape the discovery endpoint stores and the UI renders."""
     parsed = parse_keepalived_conf(text)
