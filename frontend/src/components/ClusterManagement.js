@@ -160,7 +160,8 @@ const ClusterManagement = () => {
       agent_pool_id: cluster.pool_id || undefined,
       haproxy_user: cluster.haproxy_user || '',
       haproxy_group: cluster.haproxy_group || '',
-      acme_enabled: cluster.acme_enabled || false
+      acme_enabled: cluster.acme_enabled || false,
+      acme_backend_url: cluster.acme_backend_url || ''
     };
     
     console.log('🔍 CLUSTER EDIT DEBUG - Form values being set:', formValues);
@@ -202,7 +203,11 @@ const ClusterManagement = () => {
         pool_id: values.agent_pool_id || null,
         haproxy_user: values.haproxy_user || null,
         haproxy_group: values.haproxy_group || null,
-        acme_enabled: values.acme_enabled || false
+        acme_enabled: values.acme_enabled || false,
+        // Send null, not '', when cleared: null means "inherit the global setting",
+        // and the backend validator treats empty as inherit too. Omitting the key
+        // entirely would make the field look saved while silently discarding it.
+        acme_backend_url: (values.acme_backend_url || '').trim() || null
       };
       
       // For new clusters, explicitly set is_active to true
@@ -765,6 +770,47 @@ const ClusterManagement = () => {
             tooltip="Enable automatic ACME HTTP-01 challenge routing through this cluster's HTTP frontends for automated SSL certificate management"
           >
             <Switch checkedChildren="Enabled" unCheckedChildren="Disabled" />
+          </Form.Item>
+
+          <Form.Item
+            label="ACME Challenge Backend URL"
+            name="acme_backend_url"
+            tooltip="Where this cluster's HAProxy nodes reach OpenManager to fetch HTTP-01 challenge tokens. Leave empty to use the global setting under Settings > ACME."
+            extra="This address is resolved on the HAProxy node, not here — localhost would mean the HAProxy box itself. Include the port: without one, 8080 is assumed. Example: http://10.90.1.4:80"
+            rules={[
+              {
+                validator: (_, value) => {
+                  const v = (value || '').trim();
+                  if (!v) return Promise.resolve();
+                  if (!/^https?:\/\//i.test(v)) {
+                    return Promise.reject(new Error(
+                      'Start with http:// or https:// — without a scheme the value cannot be parsed as an address.'
+                    ));
+                  }
+                  if (/\s/.test(v)) {
+                    return Promise.reject(new Error('Must not contain spaces or line breaks.'));
+                  }
+                  let parsed;
+                  try {
+                    parsed = new URL(v);
+                  } catch (e) {
+                    return Promise.reject(new Error('Not a valid URL.'));
+                  }
+                  if (parsed.pathname !== '/' && parsed.pathname !== '') {
+                    return Promise.reject(new Error('Enter only scheme, host and port — no path.'));
+                  }
+                  const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+                  if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0') {
+                    return Promise.reject(new Error(
+                      'Loopback cannot work here: HAProxy resolves this address on the node, so it would mean the node itself. Use the management server\u2019s routable address.'
+                    ));
+                  }
+                  return Promise.resolve();
+                }
+              }
+            ]}
+          >
+            <Input placeholder="http://10.90.1.4:80" />
           </Form.Item>
 
         </Form>

@@ -6,6 +6,7 @@ import json
 import urllib.parse
 from typing import Optional, List, Dict, Any
 from database.connection import get_database_connection, close_database_connection
+from utils.acme_backend_url import resolve_acme_backend_target
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,33 @@ def is_config_generation_error(config_content: Optional[str]) -> bool:
     if not config_content:
         return True
     return config_content.lstrip().startswith(CONFIG_GENERATION_ERROR_PREFIXES)
+
+
+def extract_acme_backend_target(config_content: Optional[str]) -> Optional[str]:
+    """Return the `server _acme_mgmt` argument string from a rendered config.
+
+    e.g. ``"10.90.1.4:80"`` or ``"mgmt.internal:443 ssl verify none"``; ``None`` when
+    the cluster renders no ACME challenge backend at all.
+
+    Used to decide whether an ACME-related edit actually CHANGES the shipped
+    configuration. Comparing whole config texts would report a difference on every
+    unrelated pending edit; comparing this one line answers the only question that
+    matters here — "would the HAProxy nodes start talking to a different address?"
+    """
+    if not config_content:
+        return None
+    in_section = False
+    for line in config_content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("backend "):
+            in_section = stripped == "backend _acme_challenge_backend"
+            continue
+        if stripped.startswith(("frontend ", "listen ", "defaults", "global")):
+            in_section = False
+            continue
+        if in_section and stripped.startswith("server _acme_mgmt "):
+            return stripped[len("server _acme_mgmt "):].strip()
+    return None
 
 
 def _format_redirect_rule(rule: Any) -> Optional[str]:
@@ -906,7 +934,15 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                         f"    bind {frontend['bind_address']}:{frontend['bind_port']}"
                     )
             
-            config_lines.append(f"    mode {frontend['mode']}")
+            # `frontends.mode` is `VARCHAR(10) DEFAULT 'http'` but NULLABLE, and rows
+            # can arrive with it unset via agent sync or config import. Interpolating
+            # the raw value then emits a literal `mode None`, which HAProxy rejects —
+            # taking down the whole cluster config, not just this frontend. Normalise
+            # once here and use the result everywhere below, so the ACME gate, the
+            # backend-mode check and the rendered line can never disagree with each
+            # other about what mode this frontend is in.
+            frontend_mode = (frontend.get('mode') or 'http').strip().lower()
+            config_lines.append(f"    mode {frontend_mode}")
 
             # ─────────────────────────────────────────────────────────────────
             # R2.3 / R3.3 (PR-1 hotfix): emit ordering buckets.
@@ -1018,7 +1054,7 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 _fe_buckets[cat].append(line)
 
             # ACME HTTP-01 Challenge routing (auto-managed)
-            if frontend['mode'] == 'http' and cluster_info.get('acme_enabled', False):
+            if frontend_mode == 'http' and cluster_info.get('acme_enabled', False):
                 _emit_fe("    acl is_acme_challenge path_beg /.well-known/acme-challenge/")
                 _emit_fe("    http-request allow if is_acme_challenge")
                 _emit_fe("    use_backend _acme_challenge_backend if is_acme_challenge")
@@ -1048,14 +1084,14 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 if default_backend_name and default_backend_name not in ('[]', '{}', 'null', 'None'):
                     backend_mode = backend_modes.get(default_backend_name)
 
-                    if backend_mode and backend_mode != frontend['mode']:
-                        logger.error(f"CONFIG ERROR: Frontend '{frontend['name']}' mode '{frontend['mode']}' does not match backend '{default_backend_name}' mode '{backend_mode}'")
+                    if backend_mode and backend_mode != frontend_mode:
+                        logger.error(f"CONFIG ERROR: Frontend '{frontend['name']}' mode '{frontend_mode}' does not match backend '{default_backend_name}' mode '{backend_mode}'")
                         # FIX-10 marker: 'BACKEND-MODE-WARNING' keyword in
                         # the comment body routes it to the 'default_be'
                         # bucket via _categorize_haproxy_directive, so the
                         # warning emits next to the actual default_backend
                         # directive instead of at the top of the block.
-                        _emit_fe(f"    # BACKEND-MODE-WARNING: Backend '{default_backend_name}' has mode '{backend_mode}' but frontend has mode '{frontend['mode']}'")
+                        _emit_fe(f"    # BACKEND-MODE-WARNING: Backend '{default_backend_name}' has mode '{backend_mode}' but frontend has mode '{frontend_mode}'")
                         _emit_fe(f"    # BACKEND-MODE-WARNING: HAProxy will reject this configuration! Please fix the mode mismatch in UI.")
 
                     _emit_fe(f"    default_backend {default_backend_name}")
@@ -1646,36 +1682,49 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     from config import MANAGEMENT_BASE_URL
                     acme_url = MANAGEMENT_BASE_URL
 
-                parsed = urllib.parse.urlparse(acme_url)
-                host = parsed.hostname or 'localhost'
-                port = parsed.port or (443 if parsed.scheme == 'https' else 8080)
-                ssl_flag = ' ssl verify none' if parsed.scheme == 'https' else ''
+                # Resolution never rejects: the shipped defaults are themselves
+                # loopback, so refusing to render would make every acme_enabled
+                # cluster unappliable — including for changes unrelated to ACME.
+                # Problems are reported, not enforced. See utils/acme_backend_url.
+                target = resolve_acme_backend_target(acme_url)
 
                 config_lines.append("# ACME Challenge Backend (auto-managed by HAProxy OpenManager)")
                 config_lines.append("backend _acme_challenge_backend")
                 config_lines.append("    mode http")
-                config_lines.append(f"    server _acme_mgmt {host}:{port}{ssl_flag}")
-                config_lines.append("")
-
-                # One greppable line per render. `ACME-BACKEND` is the support keyword:
-                # it answers "what address did we actually ship, and who chose it?"
-                # without shell access to the node.
-                logger.info(
-                    f"ACME-BACKEND: cluster {cluster_id} challenge backend rendered as "
-                    f"{host}:{port}{ssl_flag or ''} (source={acme_source}, url={acme_url!r})"
-                )
-                # This address is resolved ON THE HAPROXY NODE, not here. A loopback
-                # value therefore means "the HAProxy box itself", which is only ever
-                # correct for an all-in-one install — and it is what the shipped
-                # defaults produce, so warn rather than reject.
-                if host in ('localhost', '127.0.0.1', '::1', '0.0.0.0'):
-                    logger.warning(
-                        f"ACME-BACKEND: cluster {cluster_id} points at loopback "
-                        f"'{host}:{port}' (source={acme_source}). HAProxy resolves this on "
-                        f"the node, not on the management host, so HTTP-01 validation will "
-                        f"fail on any split deployment. Set a routable management address "
-                        f"in Cluster Management > ACME Challenge Backend URL."
+                if target.error_code:
+                    # The value cannot produce an address. Emit the section without a
+                    # `server` line rather than guessing: every HTTP frontend already
+                    # carries `use_backend _acme_challenge_backend`, and a use_backend
+                    # with no matching backend is fatal to `haproxy -c`. The operator's
+                    # raw value is deliberately NOT echoed into the file — a value
+                    # containing a newline would inject directives into a config pushed
+                    # to every node. It goes to the log instead.
+                    config_lines.append(
+                        f"    # ACME challenge backend unavailable ({target.error_code}) — "
+                        f"see Cluster Management > ACME Challenge Backend URL"
                     )
+                    logger.error(
+                        f"ACME-BACKEND: cluster {cluster_id} has an unusable challenge backend "
+                        f"URL (source={acme_source}, reason={target.error_code}): "
+                        f"{target.error_message} value={acme_url!r}"
+                    )
+                else:
+                    config_lines.append(
+                        f"    server _acme_mgmt {target.host}:{target.port}{target.ssl_flag}"
+                    )
+                    # One greppable line per render. `ACME-BACKEND` is the support
+                    # keyword: it answers "what address did we actually ship, and who
+                    # chose it?" without shell access to the node.
+                    logger.info(
+                        f"ACME-BACKEND: cluster {cluster_id} challenge backend rendered as "
+                        f"{target.host}:{target.port}{target.ssl_flag} "
+                        f"(source={acme_source}, url={acme_url!r})"
+                    )
+                for _warning in target.warnings:
+                    logger.warning(
+                        f"ACME-BACKEND: cluster {cluster_id} (source={acme_source}): {_warning}"
+                    )
+                config_lines.append("")
 
         # Only close the connection if it was created within this function
         if not conn:

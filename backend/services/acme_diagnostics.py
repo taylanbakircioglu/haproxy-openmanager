@@ -27,6 +27,8 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
+from services.haproxy_config import extract_acme_backend_target
+
 logger = logging.getLogger(__name__)
 
 
@@ -330,6 +332,33 @@ async def check_dns(domains: List[str]) -> Dict[str, Any]:
     )
 
 
+# Enough to classify a response without turning the diagnostic into a way to pull
+# arbitrary amounts of a third party's content into our JSON.
+_PROBE_BODY_LIMIT = 65536
+
+
+def _classify_probe_body(body: bytes, content_type: str) -> str:
+    """Coarse shape of a probe response: html | json | text | empty | binary.
+
+    The body itself is deliberately NOT retained anywhere — the shape is all that is
+    needed to tell "served me a web page" from "served me a token", and keeping the
+    bytes would open a new read surface onto whatever is behind the address.
+    """
+    if not body:
+        return "empty"
+    ct = (content_type or "").lower()
+    head = body[:512].lstrip().lower()
+    if ct.startswith("text/html") or head.startswith((b"<!doctype", b"<html")):
+        return "html"
+    if ct.startswith("application/json") or head[:1] in (b"{", b"["):
+        return "json"
+    try:
+        body.decode("utf-8")
+    except UnicodeDecodeError:
+        return "binary"
+    return "text"
+
+
 async def check_port80(domains: List[str], *, http_timeout: float = 5.0) -> Dict[str, Any]:
     """Probe HTTP-01 readiness on port 80 with a HEAD request to a synthetic
     challenge URL. Success on 200 OR 404 (404 means the well-known path is
@@ -398,12 +427,43 @@ async def check_port80(domains: List[str], *, http_timeout: float = 5.0) -> Dict
                 continue
             url = f"http://{d}/.well-known/acme-challenge/diagnostic-probe"
             try:
-                async with session.head(url, allow_redirects=False) as resp:
-                    targets.append({
+                # GET, not HEAD: the status code alone cannot tell a working challenge
+                # endpoint from a SPA. A reverse proxy that has lost its
+                # /.well-known/acme-challenge/ location falls through to its catch-all
+                # and serves index.html with HTTP 200 — which the old
+                # `status in (200, 404)` rule accepted as healthy while every real
+                # validation failed. Only the body distinguishes them.
+                async with session.get(url, allow_redirects=False) as resp:
+                    body = await resp.content.read(_PROBE_BODY_LIMIT)
+                    content_type = (resp.headers.get("content-type") or "").split(";")[0].strip()
+                    body_class = _classify_probe_body(body, content_type)
+                    target = {
                         "domain": d,
                         "status": resp.status,
-                        "ok": resp.status in (200, 404),
-                    })
+                        "content_type": content_type or None,
+                        "body_len": len(body),
+                        "body_class": body_class,
+                    }
+                    if resp.status == 200 and body_class == "html":
+                        # Reachable, wrong responder. Reported as a warning rather than
+                        # a failure: this check probes the PUBLIC domain and cannot see
+                        # the challenge backend, so it is evidence, not a verdict — and
+                        # a new `fail` here would block the site wizard on upgrade day
+                        # for every install.
+                        target["warn"] = True
+                        target["diagnosis"] = (
+                            "responded 200 with an HTML page, not a challenge token — "
+                            "the request is reaching a web UI instead of the ACME endpoint"
+                        )
+                    elif resp.status in (301, 302, 303, 307, 308):
+                        target["warn"] = True
+                        target["redirect_location"] = resp.headers.get("location")
+                        target["diagnosis"] = (
+                            "redirected instead of serving the challenge path"
+                        )
+                    else:
+                        target["ok"] = resp.status in (200, 404)
+                    targets.append(target)
             except asyncio.TimeoutError:
                 targets.append({"domain": d, "error": "egress timeout", "warn": True})
                 skip_reason = "egress timeout"
@@ -425,7 +485,11 @@ async def check_port80(domains: List[str], *, http_timeout: float = 5.0) -> Dict
             details={"targets": targets},
             duration_ms=duration_ms,
         )
-    if warns and not [t for t in targets if t.get("ok")]:
+    # Surface warnings even when OTHER domains answered correctly. The old condition
+    # ("warn only if nothing succeeded") hid the single most diagnostic outcome there
+    # is: a multi-domain certificate where one name reaches a web UI instead of the
+    # challenge endpoint reported a clean pass.
+    if warns:
         # R18b audit fix (round 7): branch the rollup message on the
         # actual cause. Pre-fix the message was always "Egress to
         # port 80 appears blocked" — even when every target was
@@ -435,6 +499,36 @@ async def check_port80(domains: List[str], *, http_timeout: float = 5.0) -> Dict
         # corporate firewall logs while the real cause was an
         # internal-only DNS A record. Also harden against
         # `skip_reason=None` so the message never reads "(None)".
+        # Wrong-responder warnings take priority over every other cause: they are the
+        # only ones that mean "your server answered, and answered wrong", which is a
+        # different problem from "we could not test".
+        wrong_responder = [t for t in targets if t.get("diagnosis")]
+        if wrong_responder:
+            first = wrong_responder[0]
+            if first.get("body_class") == "html":
+                human = (
+                    f"{first['domain']} answered HTTP {first.get('status')} with an HTML "
+                    f"page ({first.get('content_type') or 'unknown type'}, "
+                    f"{first.get('body_len')} bytes) instead of a challenge token. The "
+                    "path is reaching a web interface, not the ACME endpoint — check "
+                    "that the reverse proxy in front of OpenManager routes "
+                    "/.well-known/acme-challenge/ to the API."
+                )
+            else:
+                human = (
+                    f"{first['domain']} answered HTTP {first.get('status')} "
+                    f"({first.get('diagnosis')})"
+                )
+            return _check_result(
+                "port80",
+                "Port 80 reachability",
+                "warn",
+                human,
+                severity="warn",
+                details={"targets": targets},
+                duration_ms=duration_ms,
+            )
+
         ssrf_skip = any(
             "non-public" in (t.get("skip") or "")
             or "SSRF" in (t.get("skip") or "")
@@ -491,11 +585,17 @@ async def check_routing(conn, domains: List[str], cluster_ids: List[int]) -> Dic
             duration_ms=int((time.time() - started) * 1000),
         )
 
+    # `mode` is nullable and the renderer treats NULL as http, so normalise here the
+    # same way rather than filtering it out. A tcp-mode frontend on port 80 cannot
+    # carry the challenge ACL at all, which the old query happily counted as routing.
     rows = await conn.fetch(
         """
-        SELECT id, name, bind_address, bind_port, mode, default_backend
-        FROM frontends
-        WHERE cluster_id = ANY($1::int[]) AND is_active = TRUE AND bind_port = 80
+        SELECT f.id, f.name, f.bind_address, f.bind_port, f.mode, f.default_backend,
+               f.cluster_id, c.acme_enabled
+        FROM frontends f
+        JOIN haproxy_clusters c ON c.id = f.cluster_id
+        WHERE f.cluster_id = ANY($1::int[]) AND f.is_active = TRUE AND f.bind_port = 80
+          AND LOWER(COALESCE(f.mode, 'http')) = 'http'
         """,
         cluster_ids,
     )
@@ -510,13 +610,88 @@ async def check_routing(conn, domains: List[str], cluster_ids: List[int]) -> Dic
             details={"cluster_ids": cluster_ids},
             duration_ms=duration_ms,
         )
+
+    # A frontend row proves only that the DATABASE describes port-80 routing. The
+    # renderer gates the challenge ACL on `acme_enabled`, and the nodes run whatever
+    # config was last APPLIED — so the row said "ok" during an incident where the
+    # live config had no usable challenge route at all. Check the two things the row
+    # cannot tell us. Both report `warn`, never `fail`: the site wizard blocks submit
+    # on any `fail`, so a new failing condition would lock every install on the day
+    # it ships.
+    acme_off = sorted({r["cluster_id"] for r in rows if not r["acme_enabled"]})
+    if acme_off:
+        return _check_result(
+            "routing",
+            "HAProxy routing",
+            "warn",
+            (
+                f"Cluster(s) {acme_off} have ACME Challenge Routing disabled, so the "
+                "generated config contains no /.well-known/acme-challenge/ route. "
+                "Enable it in Cluster Management, then apply the cluster."
+            ),
+            severity="warn",
+            details={"frontends": [dict(r) for r in rows], "acme_disabled_clusters": acme_off},
+            duration_ms=duration_ms,
+        )
+
+    missing_in_applied = []
+    challenge_backends = {}
+    for cluster_id in sorted({r["cluster_id"] for r in rows}):
+        applied = await conn.fetchval(
+            """
+            SELECT config_content FROM config_versions
+            WHERE cluster_id = $1 AND status = 'APPLIED'
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            cluster_id,
+        )
+        if not applied or "use_backend _acme_challenge_backend" not in applied:
+            missing_in_applied.append(cluster_id)
+            continue
+        challenge_backends[cluster_id] = extract_acme_backend_target(applied)
+
+    if missing_in_applied:
+        return _check_result(
+            "routing",
+            "HAProxy routing",
+            "warn",
+            (
+                f"Cluster(s) {missing_in_applied} have no applied configuration carrying "
+                "the challenge route. The change exists in the database but the nodes are "
+                "still running an older config — apply the cluster."
+            ),
+            severity="warn",
+            details={"frontends": [dict(r) for r in rows], "clusters_not_applied": missing_in_applied},
+            duration_ms=duration_ms,
+        )
+
+    loopback = {
+        cid: target for cid, target in challenge_backends.items()
+        if target and target.split(":")[0].strip("[]").lower()
+        in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+    }
+    if loopback:
+        return _check_result(
+            "routing",
+            "HAProxy routing",
+            "warn",
+            (
+                f"The applied config points the challenge backend at {sorted(loopback.values())}. "
+                "HAProxy resolves that on the HAProxy node, so it means the node itself, not "
+                "this management server. Set ACME Challenge Backend URL to a routable address."
+            ),
+            severity="warn",
+            details={"frontends": [dict(r) for r in rows], "challenge_backends": challenge_backends},
+            duration_ms=duration_ms,
+        )
+
     return _check_result(
         "routing",
         "HAProxy routing",
         "ok",
-        f"Found {len(rows)} HTTP frontend(s) on port 80",
+        f"Found {len(rows)} HTTP frontend(s) on port 80; challenge route present in applied config",
         severity="info",
-        details={"frontends": [dict(r) for r in rows]},
+        details={"frontends": [dict(r) for r in rows], "challenge_backends": challenge_backends},
         duration_ms=duration_ms,
     )
 

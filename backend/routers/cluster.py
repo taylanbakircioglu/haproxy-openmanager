@@ -111,6 +111,14 @@ router = APIRouter(prefix="/api/clusters", tags=["clusters"])
 logger = logging.getLogger(__name__)
 
 
+class _AcmeNoConfigChange(Exception):
+    """Internal signal: an ACME edit renders the same config, so mint nothing.
+
+    Control flow, not an error — it unwinds out of the version-minting block without
+    tripping the generic `except Exception` handler that would log it as a failure.
+    """
+
+
 class _ConcurrentlyDrained(Exception):
     """Sentinel raised inside ``apply_pending_changes`` when the
     advisory-lock-protected re-fetch shows that another caller
@@ -453,7 +461,13 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
             update_fields.append(f"acme_enabled = ${param_counter}")
             update_values.append(cluster.acme_enabled)
             param_counter += 1
-        if cluster.acme_backend_url is not None:
+        # Keyed on "was the field submitted?", not "is it non-None". With a plain
+        # `is not None` test there is no way to CLEAR the value: the validator maps an
+        # empty box to None, which is indistinguishable from "not supplied", so once an
+        # operator set a per-cluster URL they could never revert to the global setting —
+        # the field would accept the edit and silently keep the old value.
+        _acme_url_submitted = 'acme_backend_url' in cluster.model_fields_set
+        if _acme_url_submitted:
             update_fields.append(f"acme_backend_url = ${param_counter}")
             update_values.append(cluster.acme_backend_url)
             param_counter += 1
@@ -463,12 +477,25 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
             update_query = f"UPDATE haproxy_clusters SET {', '.join(update_fields)} WHERE id = $1"
             await conn.execute(update_query, *update_values)
 
-        # If acme_enabled actually changed, create a PENDING config version with entity snapshot
-        if cluster.acme_enabled is not None and cluster.acme_enabled != existing_cluster.get('acme_enabled', False):
+        # Create a PENDING config version when an ACME edit would change what the
+        # HAProxy nodes actually run.
+        #
+        # This used to trigger only on `acme_enabled` flipping. `acme_backend_url` is
+        # written to the DB a few lines above but minted nothing, so correcting a wrong
+        # challenge backend from the panel was a silent no-op: the value changed, no
+        # pending version existed, Apply answered "No pending changes to apply", and the
+        # nodes kept the old address indefinitely. That made the one field an operator
+        # needs to fix HTTP-01 impossible to actually apply.
+        _acme_toggled = (
+            cluster.acme_enabled is not None
+            and cluster.acme_enabled != existing_cluster.get('acme_enabled', False)
+        )
+        if _acme_toggled or _acme_url_submitted:
             try:
                 from services.haproxy_config import (
                     generate_haproxy_config_for_cluster,
                     is_config_generation_error,
+                    extract_acme_backend_target,
                 )
                 config_content = await generate_haproxy_config_for_cluster(cluster_id)
                 if is_config_generation_error(config_content):
@@ -487,9 +514,38 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
                             f"Generator reported: {config_content.strip()[:300]}"
                         ),
                     )
+                # A URL edit that renders the same `server _acme_mgmt` line changes
+                # nothing on the nodes, so minting a version would put a no-op pending
+                # change in front of the operator. Compare that one line rather than the
+                # whole config: the generator also renders unrelated PENDING entities,
+                # so a full-text diff reports a change on every edit anyone has queued.
+                _active_config = await conn.fetchval("""
+                    SELECT config_content FROM config_versions
+                    WHERE cluster_id = $1 AND is_active = TRUE
+                    ORDER BY created_at DESC LIMIT 1
+                """, cluster_id)
+                _new_target = extract_acme_backend_target(config_content)
+                _old_target = extract_acme_backend_target(_active_config)
+                if not _acme_toggled and _new_target == _old_target:
+                    logger.info(
+                        f"ACME-BACKEND: cluster {cluster_id} URL updated but the rendered "
+                        f"challenge backend is unchanged ({_new_target!r}); no config "
+                        f"version created."
+                    )
+                    raise _AcmeNoConfigChange()
+
                 import time as _time
                 import json as _json
-                version_name = f"cluster-{cluster_id}-acme-{'enable' if cluster.acme_enabled else 'disable'}-{int(_time.time())}"
+                if _acme_toggled:
+                    _acme_kind = 'enable' if cluster.acme_enabled else 'disable'
+                else:
+                    _acme_kind = 'backend'
+                version_name = f"cluster-{cluster_id}-acme-{_acme_kind}-{int(_time.time())}"
+                logger.info(
+                    f"ACME-BACKEND: cluster {cluster_id} pending config version "
+                    f"'{version_name}' created — challenge backend {_old_target!r} -> "
+                    f"{_new_target!r}. Apply the cluster for the nodes to pick it up."
+                )
 
                 from utils.entity_snapshot import save_entity_snapshot
                 snapshot_metadata = await save_entity_snapshot(
@@ -501,7 +557,14 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
                         "acme_backend_url": existing_cluster.get('acme_backend_url'),
                     },
                     new_values={
-                        "acme_enabled": cluster.acme_enabled,
+                        # `acme_enabled` is None when only the URL was submitted; the
+                        # snapshot must record the value that is actually in force, or a
+                        # rollback would write NULL over a working flag.
+                        "acme_enabled": (
+                            cluster.acme_enabled
+                            if cluster.acme_enabled is not None
+                            else existing_cluster.get('acme_enabled', False)
+                        ),
                         "acme_backend_url": getattr(cluster, 'acme_backend_url', None) or existing_cluster.get('acme_backend_url'),
                     },
                     operation="UPDATE"
@@ -516,6 +579,10 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
                     """, cluster_id, version_name, config_content, current_user.get('id', 1), metadata_json)
                 finally:
                     await close_database_connection(conn2)
+            except _AcmeNoConfigChange:
+                # Not an error: the edit was accepted and simply renders the same
+                # address, so there is nothing for the operator to apply.
+                pass
             except HTTPException:
                 # The sentinel guard above deliberately fails the request. Without this
                 # clause the generic handler below would swallow it and report success

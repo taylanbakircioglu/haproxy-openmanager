@@ -1,10 +1,12 @@
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from typing import Dict, Any
+import json
 import logging
 from datetime import datetime
 
 from database.connection import get_database_connection, close_database_connection
+from utils.acme_backend_url import AcmeBackendUrlError, validate_acme_backend_url
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,39 @@ async def get_settings_by_category(category: str, authorization: str = Header(No
         await close_database_connection(conn)
 
 
+def _validate_acme_challenge_backend_url(value):
+    """Validate `acme.challenge_backend_url` exactly as the config renderer reads it.
+
+    Settings values are stored as jsonb, so the renderer json.loads them before use
+    (services/haproxy_config.py). Validating the raw column text instead of the
+    decoded string would check the quoting rather than the URL.
+    """
+    decoded = value
+    if isinstance(decoded, str):
+        try:
+            decoded = json.loads(decoded)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if decoded is None:
+        return
+    try:
+        validate_acme_backend_url(str(decoded))
+    except AcmeBackendUrlError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"acme.challenge_backend_url: {exc}",
+        ) from None
+
+
+# Per-key validators for settings that end up in generated configuration or in
+# outbound requests. Everything else is still written through unchecked; this is a
+# deliberate allow-list of the keys where a bad value causes silent breakage rather
+# than an obvious one.
+_SETTING_VALIDATORS = {
+    "acme.challenge_backend_url": _validate_acme_challenge_backend_url,
+}
+
+
 @router.put("/{category}")
 async def update_settings_by_category(
     category: str,
@@ -59,6 +94,13 @@ async def update_settings_by_category(
     current_user = await _get_admin_user(authorization)
     conn = await get_database_connection()
     try:
+        # Validate the whole batch before writing any of it, so a rejected key cannot
+        # leave the category half-applied.
+        for key_suffix, value in body.settings.items():
+            validator = _SETTING_VALIDATORS.get(f"{category}.{key_suffix}")
+            if validator is not None:
+                validator(value)
+
         updated = []
         for key_suffix, value in body.settings.items():
             full_key = f"{category}.{key_suffix}"
