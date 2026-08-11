@@ -302,12 +302,14 @@ async def create_cluster(cluster: HAProxyClusterCreate, authorization: str = Hea
         cluster_id = await conn.fetchval("""
             INSERT INTO haproxy_clusters (name, description, connection_type, is_active,
                                         stats_socket_path, haproxy_config_path, haproxy_bin_path,
-                                        keepalived_config_path, pool_id)
-            VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8)
+                                        keepalived_config_path, pool_id,
+                                        acme_enabled, acme_backend_url)
+            VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, COALESCE($9, FALSE), $10)
             RETURNING id
         """, cluster.name, cluster.description, cluster.connection_type,
             cluster.stats_socket_path, cluster.haproxy_config_path, cluster.haproxy_bin_path,
-            cluster.keepalived_config_path, cluster.pool_id)
+            cluster.keepalived_config_path, cluster.pool_id,
+            cluster.acme_enabled, cluster.acme_backend_url)
         
         await close_database_connection(conn)
         
@@ -397,7 +399,8 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
         # Check if cluster exists and get current values
         existing_cluster = await conn.fetchrow("""
             SELECT name, description, connection_type, is_active, stats_socket_path,
-                   haproxy_config_path, haproxy_bin_path, pool_id, acme_enabled
+                   haproxy_config_path, haproxy_bin_path, pool_id, acme_enabled,
+                   acme_backend_url
             FROM haproxy_clusters WHERE id = $1
         """, cluster_id)
         if not existing_cluster:

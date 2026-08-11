@@ -10,6 +10,7 @@ import pytest
 from services.haproxy_config import (
     extract_acme_backend_target,
     is_config_generation_error,
+    select_acme_backend_source,
 )
 from utils.acme_backend_url import (
     AcmeBackendUrlError,
@@ -201,7 +202,74 @@ def test_url_change_that_renders_the_same_target_is_not_a_change():
 
 
 # ---------------------------------------------------------------------------
-# 4. The generator's failure sentinel must never be mistaken for a config.
+# 4. Source selection — an unusable value must not shadow a usable one.
+# ---------------------------------------------------------------------------
+
+
+def test_prefers_the_most_specific_usable_source():
+    source, url, target, skipped = select_acme_backend_source([
+        ("cluster", "http://10.0.0.1:80"),
+        ("settings", "http://10.0.0.2:80"),
+        ("env", "http://10.0.0.3:80"),
+    ])
+    assert (source, url, target.host) == ("cluster", "http://10.0.0.1:80", "10.0.0.1")
+    assert skipped == []
+
+
+def test_skips_an_unusable_value_and_uses_the_next_source():
+    # The regression this guards: a scheme-less value left over from the era when the
+    # settings field was free text resolves to nothing. Stopping there would emit a
+    # backend section with no `server` line — `haproxy -c` passes, Apply succeeds, and
+    # every challenge request 503s with no visible cause.
+    source, url, target, skipped = select_acme_backend_source([
+        ("cluster", "10.90.1.4:8080"),
+        ("settings", ""),
+        ("env", "http://10.90.1.4:8080"),
+    ])
+    assert source == "env"
+    assert target.error_code is None and target.host == "10.90.1.4"
+    assert [s[0] for s in skipped] == ["cluster"]
+
+
+def test_empty_sources_are_skipped_without_being_reported():
+    source, _url, target, skipped = select_acme_backend_source([
+        ("cluster", ""),
+        ("settings", None),
+        ("env", "http://10.0.0.9:80"),
+    ])
+    assert source == "env" and target.error_code is None
+    assert skipped == []
+
+
+def test_reports_the_last_attempted_value_when_nothing_resolves():
+    source, url, target, skipped = select_acme_backend_source([
+        ("cluster", "10.0.0.1:80"),
+        ("env", "not a url"),
+    ])
+    assert (source, url) == ("env", "not a url")
+    assert target.error_code, "the caller needs an error to render and log"
+    assert [s[0] for s in skipped] == ["cluster"]
+
+
+def test_all_sources_empty_yields_an_error_not_a_crash():
+    source, _url, target, skipped = select_acme_backend_source([
+        ("cluster", ""), ("settings", ""), ("env", ""),
+    ])
+    assert source == "cluster" and target.error_code == "empty" and skipped == []
+
+
+def test_loopback_is_usable_enough_to_render():
+    # Warned about, never skipped: the shipped defaults are loopback, so treating it as
+    # unusable would make the fallback chain fall off its own end on a stock install.
+    source, _url, target, _skipped = select_acme_backend_source([
+        ("env", "http://localhost:8080"),
+    ])
+    assert source == "env" and target.error_code is None
+    assert target.warnings
+
+
+# ---------------------------------------------------------------------------
+# 5. The generator's failure sentinel must never be mistaken for a config.
 # ---------------------------------------------------------------------------
 
 

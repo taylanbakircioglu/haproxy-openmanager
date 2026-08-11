@@ -8,9 +8,13 @@ suitable for an Antd Tabs/Steps display.
 Key constraints (Section 3.3 of the v1.5.0 plan):
 - DNS resolution uses stdlib socket.gethostbyname_ex via run_in_executor (we
   intentionally avoid pulling aiodns as a runtime dep for v1.5.0).
-- Port-80 probe is HEAD-only, target locked to the order's domains, success on
-  HTTP 200 OR 404, warns on egress timeout (don't fail-hard — corp egress
-  policies often blackhole outbound 80).
+- Port-80 probe is a GET (not HEAD) locked to the order's domains, because the
+  status code alone cannot tell a working challenge endpoint from a web UI: a
+  reverse proxy that has lost its /.well-known/acme-challenge/ location serves
+  its SPA with HTTP 200. The body's shape decides. Warns rather than fails on
+  egress timeout (corp egress policies often blackhole outbound 80) and on a
+  wrong responder (this probe sees the PUBLIC domain, not the challenge backend,
+  so it is evidence rather than a verdict).
 - All checks have hard wall-clock timeouts (asyncio.wait_for) to bound impact
   on the API event loop.
 - humanize_error_detail covers >= 11 RFC8555 problem types and is backwards
@@ -26,8 +30,6 @@ import time
 from typing import Any, Dict, List, Optional
 
 import aiohttp
-
-from services.haproxy_config import extract_acme_backend_target
 
 logger = logging.getLogger(__name__)
 
@@ -360,9 +362,13 @@ def _classify_probe_body(body: bytes, content_type: str) -> str:
 
 
 async def check_port80(domains: List[str], *, http_timeout: float = 5.0) -> Dict[str, Any]:
-    """Probe HTTP-01 readiness on port 80 with a HEAD request to a synthetic
-    challenge URL. Success on 200 OR 404 (404 means the well-known path is
-    served but no challenge yet — fine).
+    """Probe HTTP-01 readiness on port 80 with a GET to a synthetic challenge URL.
+
+    404 means the path is served but no challenge is outstanding, which is fine. A
+    200 is only fine if the body is NOT a web page: a proxy that has lost its
+    /.well-known/acme-challenge/ route falls through to its catch-all and answers
+    200 with index.html, which a status-code-only check accepts as healthy while
+    every real validation fails.
 
     On egress timeout we WARN rather than FAIL because many corporate egress
     policies blackhole port 80 outbound; that does not impair LE's ingress
@@ -585,9 +591,13 @@ async def check_routing(conn, domains: List[str], cluster_ids: List[int]) -> Dic
             duration_ms=int((time.time() - started) * 1000),
         )
 
-    # `mode` is nullable and the renderer treats NULL as http, so normalise here the
-    # same way rather than filtering it out. A tcp-mode frontend on port 80 cannot
-    # carry the challenge ACL at all, which the old query happily counted as routing.
+    # The WHERE clause is deliberately identical to the pre-existing one, so `not rows`
+    # still means exactly what it meant before and the `fail` branch below cannot fire
+    # in any situation where it previously passed. Narrowing it here (e.g. by adding a
+    # mode filter) would turn a tcp-only port-80 cluster from "ok" into "fail", and the
+    # site wizard blocks submit on any failing check — locking those installs the day
+    # this ships. Mode is examined afterwards, in Python, and only ever downgrades to
+    # `warn`.
     rows = await conn.fetch(
         """
         SELECT f.id, f.name, f.bind_address, f.bind_port, f.mode, f.default_backend,
@@ -595,7 +605,6 @@ async def check_routing(conn, domains: List[str], cluster_ids: List[int]) -> Dic
         FROM frontends f
         JOIN haproxy_clusters c ON c.id = f.cluster_id
         WHERE f.cluster_id = ANY($1::int[]) AND f.is_active = TRUE AND f.bind_port = 80
-          AND LOWER(COALESCE(f.mode, 'http')) = 'http'
         """,
         cluster_ids,
     )
@@ -610,6 +619,26 @@ async def check_routing(conn, domains: List[str], cluster_ids: List[int]) -> Dic
             details={"cluster_ids": cluster_ids},
             duration_ms=duration_ms,
         )
+
+    # Character-for-character the renderer's normalisation (services/haproxy_config.py),
+    # so this can never disagree with what actually gets emitted.
+    http_rows = [r for r in rows if (r["mode"] or "http").strip().lower() == "http"]
+    if not http_rows:
+        return _check_result(
+            "routing",
+            "HAProxy routing",
+            "warn",
+            (
+                "The only port-80 frontend(s) in the target cluster(s) are in tcp mode. "
+                "A tcp-mode frontend cannot carry the /.well-known/acme-challenge/ ACL, "
+                "so HTTP-01 cannot be served — use DNS-01, or add an http-mode frontend "
+                "on port 80."
+            ),
+            severity="warn",
+            details={"frontends": [dict(r) for r in rows]},
+            duration_ms=duration_ms,
+        )
+    rows = http_rows
 
     # A frontend row proves only that the DATABASE describes port-80 routing. The
     # renderer gates the challenge ACL on `acme_enabled`, and the nodes run whatever
@@ -637,18 +666,31 @@ async def check_routing(conn, domains: List[str], cluster_ids: List[int]) -> Dic
     missing_in_applied = []
     challenge_backends = {}
     for cluster_id in sorted({r["cluster_id"] for r in rows}):
-        applied = await conn.fetchval(
+        # Selector matched to the one the AGENT uses to fetch its config
+        # (routers/agent.py: status='APPLIED' AND is_active=TRUE), because the question
+        # here is "what are the nodes running right now?". Without `is_active` this can
+        # read a superseded row and report on a config that was never delivered.
+        # Extracting in SQL rather than pulling whole configs back per cluster: these
+        # files run to hundreds of KB on real installs.
+        applied = await conn.fetchrow(
             """
-            SELECT config_content FROM config_versions
-            WHERE cluster_id = $1 AND status = 'APPLIED'
+            SELECT position('use_backend _acme_challenge_backend' in config_content) > 0
+                       AS has_route,
+                   substring(config_content from 'server _acme_mgmt [^\\n]*') AS server_line
+            FROM config_versions
+            WHERE cluster_id = $1 AND status = 'APPLIED' AND is_active = TRUE
+              AND config_content IS NOT NULL
             ORDER BY created_at DESC LIMIT 1
             """,
             cluster_id,
         )
-        if not applied or "use_backend _acme_challenge_backend" not in applied:
+        if not applied or not applied["has_route"]:
             missing_in_applied.append(cluster_id)
             continue
-        challenge_backends[cluster_id] = extract_acme_backend_target(applied)
+        server_line = (applied["server_line"] or "").strip()
+        challenge_backends[cluster_id] = (
+            server_line[len("server _acme_mgmt "):].strip() if server_line else None
+        )
 
     if missing_in_applied:
         return _check_result(
@@ -662,6 +704,26 @@ async def check_routing(conn, domains: List[str], cluster_ids: List[int]) -> Dic
             ),
             severity="warn",
             details={"frontends": [dict(r) for r in rows], "clusters_not_applied": missing_in_applied},
+            duration_ms=duration_ms,
+        )
+
+    # A backend section with no `server` line: the route exists, `haproxy -c` passes,
+    # and every challenge request gets a 503 from an empty backend. Without this branch
+    # the falsy target slips past the loopback filter below and the check reports "ok".
+    serverless = sorted(cid for cid, target in challenge_backends.items() if not target)
+    if serverless:
+        return _check_result(
+            "routing",
+            "HAProxy routing",
+            "warn",
+            (
+                f"Cluster(s) {serverless} route the challenge path to a backend that has "
+                "no server line, so every request returns 503. The configured ACME "
+                "Challenge Backend URL could not be resolved into an address — check it "
+                "in Cluster Management, or Settings > ACME for the global value."
+            ),
+            severity="warn",
+            details={"frontends": [dict(r) for r in rows], "clusters_without_server": serverless},
             duration_ms=duration_ms,
         )
 

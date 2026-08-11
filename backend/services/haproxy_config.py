@@ -39,6 +39,39 @@ def is_config_generation_error(config_content: Optional[str]) -> bool:
     return config_content.lstrip().startswith(CONFIG_GENERATION_ERROR_PREFIXES)
 
 
+def select_acme_backend_source(candidates: List[tuple]):
+    """Pick the first candidate that resolves into a usable address.
+
+    `candidates` is an ordered list of ``(source_name, url)`` from most to least
+    specific. Returns ``(source_name, url, target, skipped)`` where ``skipped`` lists
+    the ``(source_name, url, target)`` of candidates that were rejected.
+
+    Falling through on UNUSABLE values, not just empty ones, is the point. Values
+    predating validation are common — the settings field was free text — and a
+    scheme-less ``10.90.1.4:8080`` cannot be resolved. Stopping at the first non-empty
+    candidate would emit a backend section with no ``server`` line: ``haproxy -c``
+    still passes because the section exists, Apply succeeds, and every challenge
+    request then 503s from an empty backend with nothing to show for it.
+    """
+    skipped = []
+    for source, url in candidates:
+        if not url:
+            continue
+        target = resolve_acme_backend_target(url)
+        if target.error_code:
+            skipped.append((source, url, target))
+            continue
+        return source, url, target, skipped
+
+    # Nothing usable. Report against the last non-empty candidate so the rendered
+    # comment and the log name a concrete value rather than an empty one.
+    if skipped:
+        source, url, target = skipped[-1]
+        return source, url, target, skipped[:-1]
+    source, url = candidates[0] if candidates else ('none', '')
+    return source, url, resolve_acme_backend_target(url), skipped
+
+
 def extract_acme_backend_target(config_content: Optional[str]) -> Optional[str]:
     """Return the `server _acme_mgmt` argument string from a rendered config.
 
@@ -1658,35 +1691,40 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 # this whole block emits no log line at all (contrast the skip branches
                 # above), so a wrong challenge backend is invisible until Let's Encrypt
                 # fails. `acme_source` is logged with the rendered host:port below.
-                acme_source = 'cluster.acme_backend_url'
-                acme_url = cluster_info.get('acme_backend_url') or ''
-                if not acme_url:
-                    acme_source = 'system_settings.acme.challenge_backend_url'
-                    try:
-                        acme_settings = await db_conn.fetchrow(
-                            "SELECT value FROM system_settings WHERE key = 'acme.challenge_backend_url'"
-                        )
-                        if acme_settings and acme_settings['value']:
-                            val = acme_settings['value']
-                            if isinstance(val, str):
-                                try:
-                                    val = json.loads(val)
-                                except (json.JSONDecodeError, TypeError):
-                                    pass
-                            if val:
-                                acme_url = str(val)
-                    except Exception:
-                        pass
-                if not acme_url:
-                    acme_source = 'config.MANAGEMENT_BASE_URL'
-                    from config import MANAGEMENT_BASE_URL
-                    acme_url = MANAGEMENT_BASE_URL
+                acme_candidates = [
+                    ('cluster.acme_backend_url', cluster_info.get('acme_backend_url') or '')
+                ]
+                _settings_url = ''
+                try:
+                    acme_settings = await db_conn.fetchrow(
+                        "SELECT value FROM system_settings WHERE key = 'acme.challenge_backend_url'"
+                    )
+                    if acme_settings and acme_settings['value']:
+                        val = acme_settings['value']
+                        if isinstance(val, str):
+                            try:
+                                val = json.loads(val)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        if val:
+                            _settings_url = str(val)
+                except Exception:
+                    pass
+                acme_candidates.append(
+                    ('system_settings.acme.challenge_backend_url', _settings_url)
+                )
+                from config import MANAGEMENT_BASE_URL
+                acme_candidates.append(('config.MANAGEMENT_BASE_URL', MANAGEMENT_BASE_URL))
 
-                # Resolution never rejects: the shipped defaults are themselves
-                # loopback, so refusing to render would make every acme_enabled
-                # cluster unappliable — including for changes unrelated to ACME.
-                # Problems are reported, not enforced. See utils/acme_backend_url.
-                target = resolve_acme_backend_target(acme_url)
+                acme_source, acme_url, target, _skipped = select_acme_backend_source(
+                    acme_candidates
+                )
+                for _s_source, _s_url, _s_target in _skipped:
+                    logger.warning(
+                        f"ACME-BACKEND: cluster {cluster_id} skipping unusable value from "
+                        f"{_s_source} (reason={_s_target.error_code}): "
+                        f"{_s_target.error_message} value={_s_url!r}"
+                    )
 
                 config_lines.append("# ACME Challenge Backend (auto-managed by HAProxy OpenManager)")
                 config_lines.append("backend _acme_challenge_backend")
