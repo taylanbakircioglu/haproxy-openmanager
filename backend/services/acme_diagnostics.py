@@ -440,14 +440,24 @@ async def check_port80(domains: List[str], *, http_timeout: float = 5.0) -> Dict
                 # `status in (200, 404)` rule accepted as healthy while every real
                 # validation failed. Only the body distinguishes them.
                 async with session.get(url, allow_redirects=False) as resp:
-                    body = await resp.content.read(_PROBE_BODY_LIMIT)
+                    # The body is EVIDENCE, not a precondition. If it cannot be read —
+                    # connection reset mid-response, a server that hangs after headers —
+                    # fall back to the status-only semantics this check has always had
+                    # rather than turning a healthy 404 into a hard failure. The stricter
+                    # rule below applies only when there is something to judge.
+                    try:
+                        body = await resp.content.read(_PROBE_BODY_LIMIT)
+                    except Exception:
+                        body = None
                     content_type = (resp.headers.get("content-type") or "").split(";")[0].strip()
-                    body_class = _classify_probe_body(body, content_type)
+                    body_class = (
+                        _classify_probe_body(body, content_type) if body is not None else "unread"
+                    )
                     target = {
                         "domain": d,
                         "status": resp.status,
                         "content_type": content_type or None,
-                        "body_len": len(body),
+                        "body_len": len(body) if body is not None else None,
                         "body_class": body_class,
                     }
                     if resp.status == 200 and body_class == "html":
@@ -647,7 +657,10 @@ async def check_routing(conn, domains: List[str], cluster_ids: List[int]) -> Dic
     # cannot tell us. Both report `warn`, never `fail`: the site wizard blocks submit
     # on any `fail`, so a new failing condition would lock every install on the day
     # it ships.
-    acme_off = sorted({r["cluster_id"] for r in rows if not r["acme_enabled"]})
+    # `.get()` rather than `[]`: the column gates a WARNING, so a row shape without
+    # it should not blow up the whole diagnostic. Absent means "assume enabled" —
+    # the applied-config check below is the authoritative one either way.
+    acme_off = sorted({r["cluster_id"] for r in rows if not r.get("acme_enabled", True)})
     if acme_off:
         return _check_result(
             "routing",
