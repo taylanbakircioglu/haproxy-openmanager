@@ -466,8 +466,27 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
         # If acme_enabled actually changed, create a PENDING config version with entity snapshot
         if cluster.acme_enabled is not None and cluster.acme_enabled != existing_cluster.get('acme_enabled', False):
             try:
-                from services.haproxy_config import generate_haproxy_config_for_cluster
+                from services.haproxy_config import (
+                    generate_haproxy_config_for_cluster,
+                    is_config_generation_error,
+                )
                 config_content = await generate_haproxy_config_for_cluster(cluster_id)
+                if is_config_generation_error(config_content):
+                    # Same sentinel-instead-of-exception contract as the apply path. A
+                    # PENDING version holding the sentinel is a landmine: the operator
+                    # sees a pending change and applies it, replacing the whole config.
+                    logger.error(
+                        f"ACME TOGGLE: config generation for cluster {cluster_id} returned an "
+                        f"error sentinel; no PENDING version created: {config_content!r}"
+                    )
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "ACME setting was saved, but a configuration could not be generated "
+                            "for this cluster, so no pending change was created. "
+                            f"Generator reported: {config_content.strip()[:300]}"
+                        ),
+                    )
                 import time as _time
                 import json as _json
                 version_name = f"cluster-{cluster_id}-acme-{'enable' if cluster.acme_enabled else 'disable'}-{int(_time.time())}"
@@ -497,9 +516,16 @@ async def update_cluster(cluster_id: int, cluster: HAProxyClusterUpdate, authori
                     """, cluster_id, version_name, config_content, current_user.get('id', 1), metadata_json)
                 finally:
                     await close_database_connection(conn2)
+            except HTTPException:
+                # The sentinel guard above deliberately fails the request. Without this
+                # clause the generic handler below would swallow it and report success
+                # while no PENDING version exists — the exact silent-success failure
+                # mode this change exists to remove.
+                await close_database_connection(conn)
+                raise
             except Exception as acme_err:
                 logger.error(f"Failed to create ACME config version for cluster {cluster_id}: {acme_err}")
-        
+
         await close_database_connection(conn)
         
         # Log activity
@@ -1914,6 +1940,28 @@ defaults
                 logger.info(f"🧩 APPLY: Generating fresh configuration from database for cluster {cluster_id}")
                 fresh_config_content = await generate_haproxy_config_for_cluster(cluster_id, conn)
             
+            # `generate_haproxy_config_for_cluster` reports failure by RETURNING a
+            # one-line comment instead of raising (haproxy_config.py outer `except`).
+            # Without this guard that sentinel is hashed, stored as an APPLIED version
+            # and shipped to every agent — silently replacing the cluster's entire
+            # configuration with a comment. Any generator exception (an out-of-range
+            # port in acme_backend_url is enough) triggers it. Refuse the apply instead;
+            # the previous APPLIED version stays in force.
+            from services.haproxy_config import is_config_generation_error
+            if is_config_generation_error(fresh_config_content):
+                logger.error(
+                    f"APPLY ABORTED: config generation for cluster {cluster_id} returned an "
+                    f"error sentinel instead of a configuration: {fresh_config_content!r}"
+                )
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Configuration could not be generated for this cluster, so nothing "
+                        "was applied and the running configuration is unchanged. "
+                        f"Generator reported: {fresh_config_content.strip()[:300]}"
+                    ),
+                )
+
             # Create a new consolidated config version with fresh content
             import hashlib
             import time

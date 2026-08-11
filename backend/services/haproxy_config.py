@@ -9,6 +9,34 @@ from database.connection import get_database_connection, close_database_connecti
 
 logger = logging.getLogger(__name__)
 
+# Sentinel prefixes returned by `generate_haproxy_config_for_cluster` INSTEAD of a
+# configuration when generation fails. They are plain strings (not exceptions) for
+# historical reasons: the function's outer `except` swallows everything and returns
+# a one-line comment as the "config".
+#
+# That is a data-loss primitive on its own: an exception anywhere in the generator —
+# e.g. `urllib.parse.urlparse('http://host:99999').port` raising ValueError for an
+# out-of-range port in `acme_backend_url` — collapses a whole cluster's haproxy.cfg
+# into a single comment line, which the apply path then stores as APPLIED and pushes
+# to every agent. Callers that PERSIST the returned text MUST reject it first; use
+# `is_config_generation_error()` rather than matching the string by hand.
+CONFIG_GENERATION_ERROR_PREFIXES = (
+    "# Error generating configuration:",
+    "# Error: Cluster not found",
+)
+
+
+def is_config_generation_error(config_content: Optional[str]) -> bool:
+    """True when `config_content` is a generator failure sentinel, not a configuration.
+
+    Persisting or shipping a sentinel silently destroys a cluster's configuration, so
+    every call site that writes the generator's output to `config_versions` (or hands
+    it to an agent) must guard with this.
+    """
+    if not config_content:
+        return True
+    return config_content.lstrip().startswith(CONFIG_GENERATION_ERROR_PREFIXES)
+
 
 def _format_redirect_rule(rule: Any) -> Optional[str]:
     """Render a single redirect rule into a HAProxy `redirect ...` line.
@@ -1589,8 +1617,15 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     f"frontend found (would create orphan backend section)."
                 )
             else:
+                # Track WHERE the effective URL came from. Support has no way today to
+                # tell an operator-set value from the shipped `localhost` default, and
+                # this whole block emits no log line at all (contrast the skip branches
+                # above), so a wrong challenge backend is invisible until Let's Encrypt
+                # fails. `acme_source` is logged with the rendered host:port below.
+                acme_source = 'cluster.acme_backend_url'
                 acme_url = cluster_info.get('acme_backend_url') or ''
                 if not acme_url:
+                    acme_source = 'system_settings.acme.challenge_backend_url'
                     try:
                         acme_settings = await db_conn.fetchrow(
                             "SELECT value FROM system_settings WHERE key = 'acme.challenge_backend_url'"
@@ -1607,6 +1642,7 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     except Exception:
                         pass
                 if not acme_url:
+                    acme_source = 'config.MANAGEMENT_BASE_URL'
                     from config import MANAGEMENT_BASE_URL
                     acme_url = MANAGEMENT_BASE_URL
 
@@ -1620,6 +1656,26 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 config_lines.append("    mode http")
                 config_lines.append(f"    server _acme_mgmt {host}:{port}{ssl_flag}")
                 config_lines.append("")
+
+                # One greppable line per render. `ACME-BACKEND` is the support keyword:
+                # it answers "what address did we actually ship, and who chose it?"
+                # without shell access to the node.
+                logger.info(
+                    f"ACME-BACKEND: cluster {cluster_id} challenge backend rendered as "
+                    f"{host}:{port}{ssl_flag or ''} (source={acme_source}, url={acme_url!r})"
+                )
+                # This address is resolved ON THE HAPROXY NODE, not here. A loopback
+                # value therefore means "the HAProxy box itself", which is only ever
+                # correct for an all-in-one install — and it is what the shipped
+                # defaults produce, so warn rather than reject.
+                if host in ('localhost', '127.0.0.1', '::1', '0.0.0.0'):
+                    logger.warning(
+                        f"ACME-BACKEND: cluster {cluster_id} points at loopback "
+                        f"'{host}:{port}' (source={acme_source}). HAProxy resolves this on "
+                        f"the node, not on the management host, so HTTP-01 validation will "
+                        f"fail on any split deployment. Set a routable management address "
+                        f"in Cluster Management > ACME Challenge Backend URL."
+                    )
 
         # Only close the connection if it was created within this function
         if not conn:

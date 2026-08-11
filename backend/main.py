@@ -1111,9 +1111,19 @@ async def get_version():
     return _version_info
 
 @app.get("/.well-known/acme-challenge/{token}")
-async def serve_acme_challenge(token: str):
+async def serve_acme_challenge(token: str, request: Request):
     """Serve ACME HTTP-01 challenge token. Public endpoint, no auth required."""
-    logger.info(f"ACME-CHALLENGE: Incoming request for token={token[:32]}...")
+    # Log who reached us. When HTTP-01 fails, the first question is always "did the
+    # request get here at all?" — and the answer separates a broken challenge-backend
+    # address (nothing arrives) from a wrong response (arrives, wrong body). The peer
+    # is normally the HAProxy node; X-Forwarded-For carries the CA when the frontend
+    # sets `option forwardfor`.
+    _peer = request.client.host if request.client else 'unknown'
+    _xff = request.headers.get('x-forwarded-for') or '-'
+    logger.info(
+        f"ACME-CHALLENGE: Incoming request for token={token[:32]}... "
+        f"peer={_peer} xff={_xff} host={request.headers.get('host') or '-'}"
+    )
     conn = None
     try:
         conn = await get_database_connection()
