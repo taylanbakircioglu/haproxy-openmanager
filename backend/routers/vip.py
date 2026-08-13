@@ -458,6 +458,38 @@ async def list_vips(cluster_id: Optional[int] = None, authorization: str = Heade
         await close_database_connection(conn)
 
 
+# ORDER MATTERS: every literal path under this router MUST be declared before the
+# `/{vip_id}` routes below. FastAPI matches in declaration order, so a literal placed after
+# `/{vip_id}` is swallowed by it and answered with 422 ("discoveries" is not an int) — the
+# handler never runs. That is not a visible failure either: the HA/VIP page treats any
+# non-OK response as "nothing to show", so the whole adoption feature silently disappears.
+# See the v1.10.4 adoption section further down for the endpoint's own documentation.
+@router.get("/discoveries")
+async def list_vip_discoveries(authorization: str = Header(None)):
+    """Unmanaged keepalived configs the agents found on their nodes.
+
+    Read-only and safe to poll: this is what the HA/VIP page shows so an existing VIP is
+    visible before anyone adopts it.
+    """
+    await _require(authorization, "read")
+    conn = await get_database_connection()
+    try:
+        try:
+            rows = await conn.fetch("""
+                SELECT d.*, a.name AS agent_name, a.pool_id, p.name AS pool_name
+                FROM vip_discoveries d
+                JOIN agents a ON a.id = d.agent_id
+                LEFT JOIN haproxy_cluster_pools p ON p.id = a.pool_id
+                ORDER BY d.reported_at DESC, d.id DESC
+            """)
+        except Exception as exc:  # noqa: BLE001 — a missing relation degrades to empty (B-7)
+            logger.debug(f"vip_discoveries unavailable: {exc}")
+            return {"discoveries": []}
+        return {"discoveries": [_discovery_row_to_api(r) for r in rows]}
+    finally:
+        await close_database_connection(conn)
+
+
 @router.get("/{vip_id}")
 async def get_vip(vip_id: int, authorization: str = Header(None)):
     await _require(authorization, "read")
@@ -1025,30 +1057,8 @@ def _discovery_row_to_api(row) -> dict:
     }
 
 
-@router.get("/discoveries")
-async def list_vip_discoveries(authorization: str = Header(None)):
-    """Unmanaged keepalived configs the agents found on their nodes.
-
-    Read-only and safe to poll: this is what the HA/VIP page shows so an existing VIP is
-    visible before anyone adopts it.
-    """
-    await _require(authorization, "read")
-    conn = await get_database_connection()
-    try:
-        try:
-            rows = await conn.fetch("""
-                SELECT d.*, a.name AS agent_name, a.pool_id, p.name AS pool_name
-                FROM vip_discoveries d
-                JOIN agents a ON a.id = d.agent_id
-                LEFT JOIN haproxy_cluster_pools p ON p.id = a.pool_id
-                ORDER BY d.reported_at DESC, d.id DESC
-            """)
-        except Exception as exc:  # noqa: BLE001 — a missing relation degrades to empty (B-7)
-            logger.debug(f"vip_discoveries unavailable: {exc}")
-            return {"discoveries": []}
-        return {"discoveries": [_discovery_row_to_api(r) for r in rows]}
-    finally:
-        await close_database_connection(conn)
+# NOTE: list_vip_discoveries lives above the `/{vip_id}` routes — see the ordering comment
+# there. `/adopt` below is a POST and no `POST /{vip_id}` exists, so it is not shadowed.
 
 
 def _find_candidate(analysis: Optional[dict], instance_name: str) -> Optional[dict]:

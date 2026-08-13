@@ -1,5 +1,5 @@
 {
-  "version": "1.10.4",
-  "releaseName": "Adopt an existing keepalived VIP into HA/VIP management",
-  "releaseDate": "2026-08-08"
+  "version": "1.10.6",
+  "releaseName": "VIP adoption panel was unreachable (route shadowing)",
+  "releaseDate": "2026-08-13"
 }

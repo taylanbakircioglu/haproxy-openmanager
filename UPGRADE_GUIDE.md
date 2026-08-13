@@ -1,3 +1,63 @@
+# Upgrade Notes — v1.10.6 (VIP adoption panel was unreachable)
+
+**One backend fix, no schema change.** No `SCHEMA_VERSION` bump, so the built-in roles are
+**not** re-seeded. No API-shape change, no frontend change and zero agent impact.
+
+- **v1.10.4's adoption panel never appeared.** `GET /discoveries` was declared after
+  `GET /{vip_id}` in `routers/vip.py`. FastAPI matches routes in declaration order, so the
+  discovery list was routed into the get-one-VIP handler, which declares `vip_id: int` and
+  answered **422** before the real handler ran. The HA/VIP page treats any non-OK response as
+  "nothing to show", so the feature was invisible with no error in any log.
+- **Nothing was lost.** The agent side always worked: discoveries were reported and stored in
+  `vip_discoveries`. Deploy this backend and the rows appear immediately — no agent upgrade, no
+  re-sync of the agent script, no re-report needed.
+- **If you are upgrading straight from 1.10.3 or earlier**, follow the v1.10.4 notes below as
+  well: that release does bump `SCHEMA_VERSION` (10 → 11), which re-seeds the four built-in
+  roles, and its agent script has to reach the nodes before discovery starts.
+- **Regression guard.** A static source scan now fails the build if any literal API path in any
+  router is declared after a parameterised route that would swallow it. The whole router tree is
+  clean as of this release.
+
+**Rollback:** safe and immediate. The change is a route declaration order plus a test; reverting
+to 1.10.5 restores the previous (broken-panel) behaviour and touches no data.
+
+---
+
+---
+
+# Upgrade Notes — v1.10.5 (HTTP-01 challenge backend on split deployments)
+
+**Bug fixes, no schema change.** No `SCHEMA_VERSION` bump, so the built-in roles are **not**
+re-seeded. No API-shape change and zero agent impact.
+
+- **HTTP-01 could fail silently when HAProxy runs on different hosts than the management stack.**
+  The rendered config wrote `server _acme_mgmt <mgmt>:8080` from a value that defaults to
+  loopback — and HAProxy resolves that address **on the HAProxy node**, so it pointed at the wrong
+  box. Every check still reported success. The per-cluster `acme_backend_url` now has a UI field
+  (Cluster Management), changing it actually mints a config version, and the value is validated at
+  the write boundary.
+- **A config-generation failure could be pushed to agents as the cluster's whole `haproxy.cfg`.**
+  The generator reported failure by *returning* `# Error ...` instead of raising, and the apply
+  path hashed that comment and stored it as an APPLIED version. Both persisting call sites now
+  refuse with 422 and leave the running config in force. **This is worth knowing even if you never
+  touch ACME**, since any exception in the generator could trigger it.
+- **`frontends.mode` is nullable and was interpolated raw**, emitting a literal `mode None` that
+  HAProxy rejects — which fails the whole cluster config, not just that frontend. Normalised now.
+- **Cluster creation ignored the ACME fields**: a cluster created with ACME switched on came back
+  switched off, with no error.
+- **`docker-compose.yml` hardcoded `PUBLIC_URL` / `MANAGEMENT_BASE_URL`**, so a value in your
+  `.env` or host environment was silently ignored. They are interpolated now, with the previous
+  literals as defaults, so behaviour is unchanged unless you actually set them.
+- **Diagnostics stop over-reporting health.** The port-80 check now reads the body, so a reverse
+  proxy answering 200 with a web page is no longer counted as a working challenge endpoint. Every
+  new condition is a **warning, never a failure** — the Site Wizard blocks submit on a failing
+  check, so a new failing condition would have locked installs on upgrade day.
+- **Rollback:** downgrade freely. No schema or data change.
+
+---
+
+---
+
 # Upgrade Notes — v1.10.4 (Adopt an existing keepalived VIP)
 
 **Additive, but this release DOES bump the schema — read the role warning below.** Nothing on any
