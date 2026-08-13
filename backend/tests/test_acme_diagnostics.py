@@ -104,13 +104,30 @@ async def test_check_dns_empty_ips_marks_failure(monkeypatch):
 
 
 # ----------------------------------------------------------------------------
-# Port-80 check (HEAD probe)
+# Port-80 check (GET probe)
+#
+# The probe is a GET, not a HEAD: a reverse proxy that has lost its
+# /.well-known/acme-challenge/ location falls through to its catch-all and serves
+# an SPA with HTTP 200, which a status-code-only check accepts as healthy while
+# every real validation fails. The fakes below therefore carry a body.
 # ----------------------------------------------------------------------------
 
 
-class _FakeHEADResp:
-    def __init__(self, status):
+class _FakeContent:
+    def __init__(self, body):
+        self._body = body
+
+    async def read(self, n=-1):
+        if self._body is None:
+            raise ConnectionResetError("reset mid-body")
+        return self._body if n is None or n < 0 else self._body[:n]
+
+
+class _FakeGETResp:
+    def __init__(self, status, body=b"", content_type="text/plain"):
         self.status = status
+        self.headers = {"content-type": content_type}
+        self.content = _FakeContent(body)
 
     async def __aenter__(self):
         return self
@@ -120,10 +137,13 @@ class _FakeHEADResp:
 
 
 class _FakeSession:
-    def __init__(self, *, statuses=None, raise_timeout=False, raise_client_error=False):
+    def __init__(self, *, statuses=None, raise_timeout=False, raise_client_error=False,
+                 bodies=None, content_types=None):
         self._statuses = list(statuses or [])
         self._raise_timeout = raise_timeout
         self._raise_client_error = raise_client_error
+        self._bodies = list(bodies or [])
+        self._content_types = list(content_types or [])
 
     async def __aenter__(self):
         return self
@@ -131,14 +151,16 @@ class _FakeSession:
     async def __aexit__(self, *args):
         return False
 
-    def head(self, url, allow_redirects=False):
+    def get(self, url, allow_redirects=False):
         if self._raise_timeout:
             raise asyncio.TimeoutError()
         if self._raise_client_error:
             import aiohttp
             raise aiohttp.ClientError("connection refused")
         status = self._statuses.pop(0) if self._statuses else 200
-        return _FakeHEADResp(status)
+        body = self._bodies.pop(0) if self._bodies else b""
+        ctype = self._content_types.pop(0) if self._content_types else "text/plain"
+        return _FakeGETResp(status, body, ctype)
 
 
 def _mock_public_dns(monkeypatch, ip="93.184.216.34"):
@@ -176,6 +198,65 @@ async def test_check_port80_ok_on_404(monkeypatch):
 
     out = await check_port80(["a.example.com"])
     assert out["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_check_port80_warns_when_200_carries_a_web_page(monkeypatch):
+    """The failure that motivated the GET probe.
+
+    A reverse proxy whose /.well-known/acme-challenge/ location has drifted away
+    falls through to its catch-all and serves the SPA. The status is 200, so the old
+    `status in (200, 404)` rule called the install healthy while every validation
+    failed. Only the body distinguishes them.
+    """
+    _mock_public_dns(monkeypatch)
+    spa = b'<!doctype html><html><head><title>HAProxy OpenManager</title></head>'
+
+    def _ctor(*args, **kwargs):
+        return _FakeSession(statuses=[200], bodies=[spa], content_types=["text/html"])
+
+    monkeypatch.setattr("aiohttp.ClientSession", _ctor)
+
+    out = await check_port80(["a.example.com"])
+    assert out["status"] == "warn"
+    target = out["details"]["targets"][0]
+    assert target["body_class"] == "html"
+    assert not target.get("ok")
+    assert "HTML" in out["message"]
+
+
+@pytest.mark.asyncio
+async def test_check_port80_falls_back_to_status_when_the_body_cannot_be_read(monkeypatch):
+    """A body that cannot be read is missing evidence, not a verdict.
+
+    Turning a connection reset mid-response into a hard failure would make a healthy
+    404 fail intermittently, so the check keeps its original status-only semantics
+    whenever there is nothing to judge.
+    """
+    _mock_public_dns(monkeypatch)
+
+    def _ctor(*args, **kwargs):
+        return _FakeSession(statuses=[404], bodies=[None])
+
+    monkeypatch.setattr("aiohttp.ClientSession", _ctor)
+
+    out = await check_port80(["a.example.com"])
+    assert out["status"] == "ok"
+    assert out["details"]["targets"][0]["body_class"] == "unread"
+
+
+@pytest.mark.asyncio
+async def test_check_port80_warns_on_a_redirect(monkeypatch):
+    _mock_public_dns(monkeypatch)
+
+    def _ctor(*args, **kwargs):
+        return _FakeSession(statuses=[301])
+
+    monkeypatch.setattr("aiohttp.ClientSession", _ctor)
+
+    out = await check_port80(["a.example.com"])
+    assert out["status"] == "warn"
+    assert out["details"]["targets"][0]["diagnosis"]
 
 
 @pytest.mark.asyncio
@@ -337,16 +418,92 @@ async def test_check_routing_fail_when_no_port80_frontend():
     assert "No HTTP frontend" in out["message"]
 
 
+def _routing_row(**over):
+    row = {"id": 1, "name": "fe-http", "bind_address": "0.0.0.0", "bind_port": 80,
+           "mode": "http", "default_backend": "be", "cluster_id": 1, "acme_enabled": True}
+    row.update(over)
+    return row
+
+
+def _applied(has_route=True, server_line="server _acme_mgmt 10.90.1.4:80"):
+    return {"has_route": has_route, "server_line": server_line}
+
+
 @pytest.mark.asyncio
-async def test_check_routing_ok_when_port80_frontend_present():
+async def test_check_routing_ok_when_challenge_route_is_in_the_applied_config():
+    # A port-80 frontend row alone is NOT enough. It describes what the database
+    # wants; the nodes run whatever was last applied. During the incident this
+    # function reported "ok" from the row count while the live config had no usable
+    # challenge route at all.
     conn = AsyncMock()
-    conn.fetch.return_value = [
-        {"id": 1, "name": "fe-http", "bind_address": "0.0.0.0", "bind_port": 80,
-         "mode": "http", "default_backend": "be"},
-    ]
+    conn.fetch.return_value = [_routing_row()]
+    conn.fetchrow.return_value = _applied()
     out = await check_routing(conn, ["a.example.com"], [1])
     assert out["status"] == "ok"
     assert len(out["details"]["frontends"]) == 1
+    assert out["details"]["challenge_backends"] == {1: "10.90.1.4:80"}
+
+
+@pytest.mark.asyncio
+async def test_check_routing_warns_when_acme_is_disabled_on_the_cluster():
+    conn = AsyncMock()
+    conn.fetch.return_value = [_routing_row(acme_enabled=False)]
+    out = await check_routing(conn, ["a.example.com"], [1])
+    assert out["status"] == "warn"
+    assert "disabled" in out["message"]
+
+
+@pytest.mark.asyncio
+async def test_check_routing_warns_when_the_route_is_not_in_the_applied_config():
+    conn = AsyncMock()
+    conn.fetch.return_value = [_routing_row()]
+    conn.fetchrow.return_value = _applied(has_route=False)
+    out = await check_routing(conn, ["a.example.com"], [1])
+    assert out["status"] == "warn"
+    assert "apply the cluster" in out["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_check_routing_warns_when_the_challenge_backend_has_no_server_line():
+    # `haproxy -c` passes because the section exists, so nothing else catches this;
+    # every challenge request 503s from an empty backend.
+    conn = AsyncMock()
+    conn.fetch.return_value = [_routing_row()]
+    conn.fetchrow.return_value = _applied(server_line=None)
+    out = await check_routing(conn, ["a.example.com"], [1])
+    assert out["status"] == "warn"
+    assert "503" in out["message"]
+
+
+@pytest.mark.asyncio
+async def test_check_routing_warns_when_the_challenge_backend_is_loopback():
+    conn = AsyncMock()
+    conn.fetch.return_value = [_routing_row()]
+    conn.fetchrow.return_value = _applied(server_line="server _acme_mgmt 127.0.0.1:8080")
+    out = await check_routing(conn, ["a.example.com"], [1])
+    assert out["status"] == "warn"
+    assert "HAProxy node" in out["message"]
+
+
+@pytest.mark.asyncio
+async def test_check_routing_warns_rather_than_fails_on_a_tcp_only_port80_cluster():
+    # The `fail` branch must stay reachable only when NO port-80 frontend exists at
+    # all: SiteWizard blocks submit on any failing check, so turning this into a
+    # failure would lock tcp-only installs the day it ships.
+    conn = AsyncMock()
+    conn.fetch.return_value = [_routing_row(mode="tcp")]
+    out = await check_routing(conn, ["a.example.com"], [1])
+    assert out["status"] == "warn"
+    assert "tcp mode" in out["message"]
+
+
+@pytest.mark.asyncio
+async def test_check_routing_treats_null_mode_as_http_like_the_renderer():
+    conn = AsyncMock()
+    conn.fetch.return_value = [_routing_row(mode=None)]
+    conn.fetchrow.return_value = _applied()
+    out = await check_routing(conn, ["a.example.com"], [1])
+    assert out["status"] == "ok"
 
 
 # ----------------------------------------------------------------------------

@@ -49,13 +49,22 @@ services:
       - SECRET_KEY=your-secret-key-change-this-in-production
       - DEBUG=False
       - LOG_LEVEL=INFO
-      - PUBLIC_URL=http://localhost:8080
-      - MANAGEMENT_BASE_URL=http://localhost:8080
+      # Interpolated, not hardcoded: these were literals, so a value set in the
+      # host environment or .env was silently ignored and every install kept the
+      # localhost default. That default is also what the ACME challenge backend
+      # falls back to, and HAProxy resolves it ON THE HAPROXY NODE — so on any
+      # deployment where HAProxy is not this machine, it points at the wrong box.
+      - PUBLIC_URL=${PUBLIC_URL:-http://localhost:8080}
+      - MANAGEMENT_BASE_URL=${MANAGEMENT_BASE_URL:-http://localhost:8080}
       # Empty when unset on the host: the image CMD then falls back to
       # WEB_CONCURRENCY (uvicorn's native env) and finally to 1.
       - UVICORN_WORKERS=${UVICORN_WORKERS:-}
     volumes:
       - haproxy_configs:/etc/haproxy
+    # NOT published to the host: the API is reachable only through the nginx
+    # service (host :8080). Host port 8000 is therefore NOT this API — on a box
+    # running Portainer it is Portainer's edge tunnel, which answers 404 and looks
+    # deceptively like a working challenge endpoint.
     expose:
       - "8000"
     depends_on:

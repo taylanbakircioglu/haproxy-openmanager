@@ -1,5 +1,21 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List
+
+from utils.acme_backend_url import AcmeBackendUrlError, validate_acme_backend_url
+
+
+def _validated_acme_backend_url(value: Optional[str]) -> Optional[str]:
+    """Shared field validator body for `acme_backend_url`.
+
+    Pydantic turns the raised ValueError into a 422 with this message attached, so
+    the operator sees why the value was refused instead of discovering months later
+    that HTTP-01 never worked. Returns the normalised value — callers persist THIS,
+    not the raw input, so surrounding whitespace never reaches haproxy.cfg.
+    """
+    try:
+        return validate_acme_backend_url(value)
+    except AcmeBackendUrlError as exc:
+        raise ValueError(str(exc)) from None
 
 class HAProxyClusterCreate(BaseModel):
     name: str
@@ -10,6 +26,16 @@ class HAProxyClusterCreate(BaseModel):
     haproxy_bin_path: str = "/usr/sbin/haproxy"  # HAProxy binary path
     keepalived_config_path: str = "/etc/keepalived/keepalived.conf"  # HA/VIP: keepalived.conf path (Issue #27)
     pool_id: Optional[int] = None  # Which pool this cluster belongs to
+    # The create form submits both of these. Until they were declared here pydantic
+    # dropped them and the INSERT never carried them, so a cluster created with ACME
+    # switched on came back switched off with no error shown — the same silent-success
+    # failure this work exists to remove.
+    acme_enabled: Optional[bool] = None
+    acme_backend_url: Optional[str] = None
+
+    _validate_acme_backend_url = field_validator("acme_backend_url")(
+        _validated_acme_backend_url
+    )
 
 class HAProxyClusterUpdate(BaseModel):
     name: Optional[str] = None
@@ -23,6 +49,10 @@ class HAProxyClusterUpdate(BaseModel):
     is_active: Optional[bool] = None
     acme_enabled: Optional[bool] = None
     acme_backend_url: Optional[str] = None
+
+    _validate_acme_backend_url = field_validator("acme_backend_url")(
+        _validated_acme_backend_url
+    )
 
 class HAProxyClusterResponse(BaseModel):
     id: int
