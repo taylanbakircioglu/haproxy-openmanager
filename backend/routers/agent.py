@@ -9,7 +9,14 @@ import os
 import json
 import ipaddress
 import hashlib
+import re
 # Pipeline trigger - force backend redeploy v2
+
+# v1.10.4 — a discovered keepalived.conf is stored and served to the UI, so the VRRP password is
+# masked out of the stored copy (the real value lives Fernet-encrypted in its own column). Mask
+# the WHOLE remainder of the line, mirroring vip.py's version-diff masking, so a password
+# containing whitespace cannot partially leak.
+_AUTH_PASS_MASK_RE = re.compile(r"(auth_pass\s+).*")
 
 from models import AgentCreate
 from models.agent import AgentToggle, AgentHeartbeat, AgentScriptRequest, AgentUpgradeRequest
@@ -26,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Global version storage (acts as in-memory database)
 AGENT_VERSIONS = {
     "macos": "2.1.0",  # Updated via endpoint
-    "linux": "2.0.0"
+    "linux": "2.1.0"
 }
 
 
@@ -2332,7 +2339,7 @@ async def get_agent_keepalived_config(agent_name: str, x_api_key: Optional[str] 
         row = await conn.fetchrow("""
             SELECT v.id AS vip_id, v.name AS vip_name, v.is_active, v.track_haproxy,
                    v.purge_on_teardown,
-                   m.applied_config_content, m.applied_config_hash
+                   m.applied_config_content, m.applied_config_hash, m.takeover_expected_hash
             FROM vip_members m JOIN vip_instances v ON v.id = m.vip_id
             WHERE m.agent_id = $1
             -- Active VIP first (an agent has at most one). With NO active VIP, pick the most
@@ -2367,6 +2374,14 @@ async def get_agent_keepalived_config(agent_name: str, x_api_key: Optional[str] 
                 "config_content": row['applied_config_content'],
                 "config_hash": row['applied_config_hash'],
                 "check_script": check_script,
+                # v1.10.4 adoption handoff. The agent refuses to overwrite a keepalived.conf
+                # without our ownership marker — the guard that protects a hand-maintained
+                # setup. Adoption does not weaken it: it authorises exactly ONE takeover, of
+                # exactly the file we analysed, by pinning its hash. If the file changed since
+                # adoption the hashes differ and the agent keeps refusing, so an edit made
+                # between adoption and Apply can never be silently overwritten.
+                "allow_takeover": bool(row['takeover_expected_hash']),
+                "takeover_expected_hash": row['takeover_expected_hash'],
             },
         }
     except HTTPException:
@@ -2430,6 +2445,100 @@ async def agent_keepalived_status(agent_name: str, status_data: dict, x_api_key:
     finally:
         if conn:
             await close_database_connection(conn)
+
+
+@router.post("/{agent_name}/keepalived-discovery")
+async def agent_keepalived_discovery(agent_name: str, payload: dict, x_api_key: Optional[str] = Header(None)):
+    """v1.10.4 — the agent reports a keepalived.conf it found on the node but does NOT own.
+
+    This is what makes adopting a hand-maintained VIP possible: the heartbeat only carries the
+    VIP address and a best-effort MASTER/BACKUP, while rendering a node's config needs eleven
+    fields, so the file itself has to be read. Read-only on the agent side — reporting never
+    changes anything on the node.
+
+    Auth mirrors /keepalived-status: a MISSING key is rejected outright, and because the token
+    is a shared install token a name mismatch is an advisory audit log rather than a 403.
+
+    SECRETS: the reported content may contain the VRRP `auth_pass`. It is split immediately —
+    the password is Fernet-encrypted into its own column and the stored copy of the file has it
+    masked, so nothing readable through the API or a DB dump carries it in cleartext. The
+    parse result is never logged.
+    """
+    conn = None
+    try:
+        from auth_middleware import validate_agent_api_key
+        agent_auth = await validate_agent_api_key(x_api_key)
+        if not x_api_key or not agent_auth:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        if agent_auth['name'] != agent_name:
+            logger.info(f"Agent '{agent_name}' reporting keepalived discovery using API key "
+                        f"from agent '{agent_auth['name']}'")
+
+        conn = await get_database_connection()
+        agent = await conn.fetchrow("SELECT id FROM agents WHERE name = $1", agent_name)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
+
+        config_path = (payload.get("config_path") or "/etc/keepalived/keepalived.conf")[:500]
+        exists = bool(payload.get("exists"))
+        if not exists:
+            # The file is gone (keepalived removed, or we adopted and now own it) — drop the row
+            # so the UI stops offering a stale candidate.
+            await conn.execute("DELETE FROM vip_discoveries WHERE agent_id = $1", agent['id'])
+            return {"status": "cleared"}
+
+        content = payload.get("config_content") or ""
+        if len(content) > 256_000:
+            raise HTTPException(status_code=413, detail="keepalived.conf too large to analyse")
+        is_managed = bool(payload.get("is_managed"))
+        config_hash = hashlib.md5(content.encode("utf-8", "replace")).hexdigest()
+
+        from services.keepalived_parser import analyse_keepalived_conf, KeepalivedParseError
+        from services.keepalived_config import encrypt_vrrp_secret
+
+        parse_error = None
+        analysis = None
+        auth_enc = None
+        try:
+            analysis = analyse_keepalived_conf(content)
+            # Split the secret out of everything we persist or serve.
+            for cand in analysis.get("candidates", []):
+                secret = (cand.get("vip") or {}).pop("auth_pass", None)
+                cand["vip"]["has_auth_pass"] = bool(secret)
+                if secret and auth_enc is None:
+                    auth_enc = encrypt_vrrp_secret(secret)
+        except KeepalivedParseError as exc:
+            parse_error = str(exc)[:500]
+        except Exception as exc:  # noqa: BLE001 — a malformed file must not 500 the agent loop
+            parse_error = f"could not analyse the config ({type(exc).__name__})"
+
+        masked = _AUTH_PASS_MASK_RE.sub(r"\1********", content)
+        await conn.execute("""
+            INSERT INTO vip_discoveries
+                (agent_id, config_path, config_hash, is_managed, raw_config_masked,
+                 auth_pass_encrypted, analysis, parse_error, reported_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CURRENT_TIMESTAMP)
+            ON CONFLICT (agent_id) DO UPDATE SET
+                config_path = EXCLUDED.config_path,
+                config_hash = EXCLUDED.config_hash,
+                is_managed = EXCLUDED.is_managed,
+                raw_config_masked = EXCLUDED.raw_config_masked,
+                auth_pass_encrypted = EXCLUDED.auth_pass_encrypted,
+                analysis = EXCLUDED.analysis,
+                parse_error = EXCLUDED.parse_error,
+                reported_at = CURRENT_TIMESTAMP
+        """, agent['id'], config_path, config_hash, is_managed, masked, auth_enc,
+            json.dumps(analysis) if analysis is not None else None, parse_error)
+        return {"status": "recorded", "config_hash": config_hash}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"keepalived-discovery failed for '{agent_name}': {e}")
+        raise HTTPException(status_code=500, detail="keepalived-discovery failed")
+    finally:
+        if conn:
+            await close_database_connection(conn)
+
 
 @router.get("/script-version")
 async def get_latest_script_version(platform: str = "macos"):

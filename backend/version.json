@@ -1,5 +1,5 @@
 {
-  "version": "1.10.3",
-  "releaseName": "Multi-account ACME — the wizard honours the selected account",
+  "version": "1.10.4",
+  "releaseName": "Adopt an existing keepalived VIP into HA/VIP management",
   "releaseDate": "2026-08-08"
 }
