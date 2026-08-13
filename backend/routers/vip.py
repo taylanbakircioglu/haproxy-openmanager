@@ -480,10 +480,12 @@ async def list_vip_discoveries(cluster_id: Optional[int] = None, authorization: 
     try:
         try:
             rows = await conn.fetch("""
-                SELECT d.*, a.name AS agent_name, a.pool_id, p.name AS pool_name
+                SELECT d.*, a.name AS agent_name, a.pool_id, p.name AS pool_name,
+                       av.is_active AS adopted_vip_active
                 FROM vip_discoveries d
                 JOIN agents a ON a.id = d.agent_id
                 LEFT JOIN haproxy_cluster_pools p ON p.id = a.pool_id
+                LEFT JOIN vip_instances av ON av.id = d.adopted_vip_id
                 WHERE $1::int IS NULL
                    OR a.pool_id = (SELECT pool_id FROM haproxy_clusters WHERE id = $1::int)
                 ORDER BY d.reported_at DESC, d.id DESC
@@ -1057,6 +1059,14 @@ def _discovery_row_to_api(row) -> dict:
         "is_managed": row["is_managed"],
         "parse_error": row["parse_error"],
         "adopted_vip_id": row["adopted_vip_id"],
+        # v1.10.8 — adoptability is derived from whether the linked VIP is STILL active, not
+        # from the link existing. `adopted_vip_id` is write-once and nothing clears it, and a
+        # VIP is only ever soft-deleted (is_active=FALSE), so the column's ON DELETE SET NULL
+        # never fires. Keying the UI on the link alone made a rejected adoption hide the node
+        # from the panel forever: the VIP was gone from the VIP list too, and the agent does not
+        # re-report an unchanged file. Deriving it here self-heals reject, undo-reject, approved
+        # teardown and anything added later, without a write on each path.
+        "adopted_vip_active": bool(row["adopted_vip_active"]) if row["adopted_vip_id"] else False,
         "reported_at": row["reported_at"].isoformat() if row["reported_at"] else None,
         "config_preview": row["raw_config_masked"],
         "analysis": analysis,
@@ -1072,6 +1082,59 @@ def _find_candidate(analysis: Optional[dict], instance_name: str) -> Optional[di
         if cand.get("instance_name") == instance_name:
             return cand
     return None
+
+
+async def _collect_instance_participants(conn, *, pool_id: int, vrid: int, virtual_ip: str):
+    """Every discovered node in the pool that reports the SAME vrrp_instance.
+
+    v1.10.8. Adoption used to take only the node whose row was clicked, which broke the exact
+    case the feature exists for — a running HA pair:
+
+      * adopting the BACKUP alone produced a VIP whose apply fails outright, because apply
+        requires exactly one MASTER member;
+      * adopting the MASTER alone left the peer unmanaged, and adopting it afterwards hit the
+        VRID-collision guard with a 409, so the pair could never be completed from the panel;
+      * worst, on a UNICAST pair the single-member render silently drops the unicast block —
+        render_keepalived_conf only emits it when peer_ips is non-empty — so keepalived falls
+        back to multicast on the adopted node while its peer stays unicast. They stop seeing
+        each other and BOTH claim the VIP.
+
+    Identity is (virtual_router_id, virtual address), which is what keepalived itself uses to
+    decide two nodes belong to one VRRP group, so it is the correct key. A node whose config
+    failed to parse cannot be matched and is therefore skipped — the unicast peer check in the
+    caller is what stops that turning into a silent half-adoption.
+    """
+    rows = await conn.fetch("""
+        SELECT d.agent_id, d.config_hash, d.analysis, d.parse_error, d.adopted_vip_id,
+               a.name AS agent_name, a.ip_address, av.is_active AS adopted_vip_active
+        FROM vip_discoveries d
+        JOIN agents a ON a.id = d.agent_id
+        LEFT JOIN vip_instances av ON av.id = d.adopted_vip_id
+        WHERE a.pool_id = $1 AND COALESCE(a.enabled, TRUE) = TRUE
+    """, pool_id)
+
+    participants = []
+    for r in rows:
+        if r["parse_error"]:
+            continue
+        if r["adopted_vip_id"] and r["adopted_vip_active"]:
+            continue  # already under management by a VIP that still stands
+        analysis = r["analysis"]
+        if isinstance(analysis, str):
+            try:
+                analysis = json.loads(analysis)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        for cand in ((analysis or {}).get("candidates") or []):
+            v = cand.get("vip") or {}
+            if v.get("virtual_router_id") == vrid and v.get("virtual_ip") == virtual_ip:
+                participants.append({
+                    "agent_id": r["agent_id"], "agent_name": r["agent_name"],
+                    "ip_address": r["ip_address"], "config_hash": r["config_hash"],
+                    "candidate": cand,
+                })
+                break
+    return participants
 
 
 @router.post("/adopt")
@@ -1102,13 +1165,19 @@ async def adopt_vip(payload: dict, request: Request, authorization: str = Header
     conn = await get_database_connection()
     try:
         disc = await conn.fetchrow("""
-            SELECT d.*, a.name AS agent_name, a.pool_id
-            FROM vip_discoveries d JOIN agents a ON a.id = d.agent_id
+            SELECT d.*, a.name AS agent_name, a.pool_id, a.ip_address,
+                   av.is_active AS adopted_vip_active
+            FROM vip_discoveries d
+            JOIN agents a ON a.id = d.agent_id
+            LEFT JOIN vip_instances av ON av.id = d.adopted_vip_id
             WHERE d.agent_id = $1
         """, int(agent_id))
         if not disc:
             raise HTTPException(status_code=404, detail="No discovered keepalived config for that agent")
-        if disc["adopted_vip_id"]:
+        # Only an adoption that is still STANDING blocks a new one. A rejected adoption leaves
+        # adopted_vip_id pointing at a soft-deleted VIP, and nothing clears it, so keying on the
+        # link alone made the node permanently unadoptable (v1.10.8).
+        if disc["adopted_vip_id"] and disc["adopted_vip_active"]:
             raise HTTPException(status_code=409, detail="This discovery has already been adopted")
         if not disc["pool_id"]:
             raise HTTPException(status_code=400, detail="The agent is not in a pool; assign it first")
@@ -1135,26 +1204,95 @@ async def adopt_vip(payload: dict, request: Request, authorization: str = Header
             except (TypeError, ValueError):
                 raise HTTPException(status_code=400, detail="prefix_length must be an integer")
 
-        # One source of truth for which blockers an operator may resolve (see the docstring on
-        # remaining_blockers): a supplied prefix, and an explicit acceptance of directives our
-        # renderer would delete. Nothing else is waivable.
         from services.keepalived_parser import remaining_blockers
-        blockers = remaining_blockers(
-            list(cand.get("blockers") or []),
-            prefix_supplied=vip_fields.get("prefix_length") is not None,
-            accept_data_loss=bool(payload.get("accept_data_loss")),
-        )
-        if blockers:
-            raise HTTPException(status_code=422, detail={
-                "message": "This keepalived config cannot be adopted as-is",
-                "blockers": blockers,
-            })
 
         vrid = vip_fields.get("virtual_router_id")
         virtual_ip = vip_fields.get("virtual_ip")
         if vrid is None or not virtual_ip or not member.get("network_interface"):
             raise HTTPException(status_code=422,
                                 detail="Incomplete candidate (vrid/address/interface)")
+
+        # v1.10.8 — adopt the whole VRRP instance. Every node in the pool reporting this same
+        # VRID + address becomes a member, each with the role, priority and interface ITS OWN
+        # file declares. See _collect_instance_participants for why single-node adoption was
+        # unsafe on a unicast pair.
+        participants = await _collect_instance_participants(
+            conn, pool_id=disc["pool_id"], vrid=int(vrid), virtual_ip=virtual_ip)
+        if not any(p["agent_id"] == int(agent_id) for p in participants):
+            # The reporting node must be in its own instance; if it is not, something changed
+            # underneath us (re-report, concurrent adoption) — refuse rather than guess.
+            raise HTTPException(status_code=409,
+                                detail="The discovery changed while adopting; refresh and try again")
+
+        # One source of truth for which blockers an operator may resolve (see the docstring on
+        # remaining_blockers): a supplied prefix, and an explicit acceptance of directives our
+        # renderer would delete. Nothing else is waivable. Checked for EVERY node we are about
+        # to overwrite, not only the one that was clicked.
+        for p in participants:
+            rem = remaining_blockers(
+                list(p["candidate"].get("blockers") or []),
+                prefix_supplied=vip_fields.get("prefix_length") is not None,
+                accept_data_loss=bool(payload.get("accept_data_loss")),
+            )
+            if rem:
+                raise HTTPException(status_code=422, detail={
+                    "message": f"This keepalived config cannot be adopted as-is ({p['agent_name']})",
+                    "node": p["agent_name"],
+                    "blockers": rem,
+                })
+            if not (p["candidate"].get("member") or {}).get("network_interface"):
+                raise HTTPException(status_code=422,
+                                    detail=f"{p['agent_name']} does not declare an interface for this instance")
+
+        # keepalived requires one MASTER and a matching advertisement interval across the group.
+        # Both are checked here so the operator learns at adoption time instead of at apply.
+        roles = [(p["candidate"].get("member") or {}).get("role") or "BACKUP" for p in participants]
+        if roles.count("MASTER") != 1:
+            listed = ", ".join(f"{p['agent_name']}={r}" for p, r in zip(participants, roles))
+            raise HTTPException(status_code=422, detail=(
+                f"VRID {vrid} is reported by {len(participants)} node(s) with "
+                f"{roles.count('MASTER')} MASTER ({listed}); exactly one must be MASTER. If a "
+                f"member is missing, install or enable its agent so it reports its keepalived.conf, "
+                f"then adopt again."))
+        adverts = {int((p["candidate"].get("vip") or {}).get("advert_int") or 1) for p in participants}
+        if len(adverts) > 1:
+            raise HTTPException(status_code=422, detail=(
+                f"The nodes disagree on advert_int ({sorted(adverts)}). keepalived needs the same "
+                f"advertisement interval across a VRRP group, so align the files first."))
+
+        # UNICAST SAFETY. Our renderer emits the unicast block only when it has peer addresses,
+        # so a peer that is not a member would be dropped and keepalived would fall back to
+        # multicast on this node while the real peer stays unicast — both would then claim the
+        # VIP. Refuse instead, naming the address that is unaccounted for.
+        declared_peers = {str(x) for p in participants for x in (p["candidate"].get("peers") or [])}
+        if declared_peers:
+            missing_ip = [p["agent_name"] for p in participants if not p["ip_address"]]
+            if missing_ip:
+                raise HTTPException(status_code=422, detail=(
+                    f"These nodes have not reported an IP address yet: {', '.join(missing_ip)}. "
+                    f"The unicast peer list cannot be verified until they do."))
+            member_ips = {str(p["ip_address"]) for p in participants}
+            unknown = sorted(declared_peers - member_ips)
+            if unknown:
+                raise HTTPException(status_code=422, detail=(
+                    f"This instance is unicast and lists peer(s) {', '.join(unknown)} that are not "
+                    f"among the nodes being adopted. Adopting would drop them from the peer list and "
+                    f"keepalived would silently fall back to multicast, so both sides could end up "
+                    f"holding the VIP. Register those nodes as agents so they report their config, "
+                    f"then adopt again."))
+
+        # One active VIP per agent — the delivery endpoint serves a single keepalived.conf per
+        # node, so a second active membership never converges. create/update enforce this via
+        # _validate_members_against_pool; adoption did not call it at all.
+        busy = await conn.fetchrow("""
+            SELECT a.name AS agent_name, v.name AS vip_name
+            FROM vip_members vm JOIN vip_instances v ON v.id = vm.vip_id
+            JOIN agents a ON a.id = vm.agent_id
+            WHERE vm.agent_id = ANY($1::int[]) AND v.is_active = TRUE LIMIT 1
+        """, [p["agent_id"] for p in participants])
+        if busy:
+            raise HTTPException(status_code=409, detail=(
+                f"node '{busy['agent_name']}' is already a member of VIP '{busy['vip_name']}'"))
 
         # Adoption must keep the VRRP identity it found. A different VRID would create a second
         # VRRP domain on the wire, so a collision inside the pool is a hard conflict, never an
@@ -1182,18 +1320,22 @@ async def adopt_vip(payload: dict, request: Request, authorization: str = Header
                 disc["auth_pass_encrypted"],           # already Fernet-encrypted at ingest
                 bool(vip_fields.get("use_unicast")), bool(vip_fields.get("track_haproxy")),
                 current_user["id"])
-            # The reporting node becomes a member with the role/priority its own file declares,
-            # and carries the one-shot takeover authorisation pinned to the hash we analysed.
-            await conn.execute("""
-                INSERT INTO vip_members
-                    (vip_id, agent_id, network_interface, role, priority, takeover_expected_hash)
-                VALUES ($1,$2,$3,$4,$5,$6)
-            """, vip_id, int(agent_id), member["network_interface"],
-                member.get("role") or "BACKUP", int(member.get("priority") or 100),
-                disc["config_hash"])
-            await conn.execute(
-                "UPDATE vip_discoveries SET adopted_vip_id = $2 WHERE agent_id = $1",
-                int(agent_id), vip_id)
+            # Every node of the instance becomes a member with the role/priority/interface ITS
+            # OWN file declares, and each carries its own one-shot takeover authorisation pinned
+            # to the hash of the file we analysed on THAT node. The guard stays per-node: a file
+            # edited on one member between adoption and Apply is still refused there.
+            for p in participants:
+                pm = p["candidate"].get("member") or {}
+                await conn.execute("""
+                    INSERT INTO vip_members
+                        (vip_id, agent_id, network_interface, role, priority, takeover_expected_hash)
+                    VALUES ($1,$2,$3,$4,$5,$6)
+                """, vip_id, p["agent_id"], pm["network_interface"],
+                    pm.get("role") or "BACKUP", int(pm.get("priority") or 100),
+                    p["config_hash"])
+                await conn.execute(
+                    "UPDATE vip_discoveries SET adopted_vip_id = $2 WHERE agent_id = $1",
+                    p["agent_id"], vip_id)
 
         await _stage_vip_version(conn, vip_id, "adopt", current_user["id"])
         await log_user_activity(
@@ -1201,18 +1343,18 @@ async def adopt_vip(payload: dict, request: Request, authorization: str = Header
             resource_id=str(vip_id),
             details={"name": name, "virtual_ip": virtual_ip, "vrid": vrid,
                      "adopted_from_agent": disc["agent_name"],
+                     "members": [p["agent_name"] for p in participants],
                      "accepted_data_loss": bool(payload.get("accept_data_loss"))},
             ip_address=_client_ip(request), user_agent=_user_agent(request))
 
-        peers = list(cand.get("peers") or [])
+        node_names = [p["agent_name"] for p in participants]
         return {
             "id": vip_id,
-            "message": ("VIP adopted (PENDING — review it in Apply Management, then apply to hand "
-                        "the node's keepalived.conf over to OpenManager)"),
-            # Adoption covers the node that reported. Its peers hold their own keepalived.conf,
-            # so they must be added as members (or adopted from their own report) before the VIP
-            # renders a complete unicast group.
-            "peers_to_add": peers,
+            "members": node_names,
+            "message": (
+                f"VIP adopted with {len(node_names)} member node(s): {', '.join(node_names)} "
+                f"(PENDING — review it in Apply Management, then apply to hand their "
+                f"keepalived.conf over to OpenManager)"),
         }
     finally:
         await close_database_connection(conn)

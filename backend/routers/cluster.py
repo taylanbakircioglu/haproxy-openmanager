@@ -2704,7 +2704,11 @@ async def get_config_version_diff(cluster_id: int, version_id: int, authorizatio
         # HA/VIP (Issue #27): vip-{id}-{action} versions show the generated keepalived.conf
         # each member node will deploy as the change content (VRRP secret masked). Mirrors
         # the ssl-* special case above so VIP uses the STANDARD View Change diff modal.
-        vip_match = re.search(r'vip-(\d+)-(create|update|delete)', current_version['version_name'])
+        # `adopt` MUST stay in this alternation. A vip-* action missing here does not degrade
+        # gracefully: the version falls through to the generic HAProxy diff, which compares this
+        # row's keepalived.conf against the cluster's previous haproxy.cfg and shows the whole
+        # HAProxy config as removed. v1.10.4 added `adopt` without it (fixed in v1.10.8).
+        vip_match = re.search(r'vip-(\d+)-(create|update|delete|adopt)', current_version['version_name'])
         if vip_match:
             vip_id = int(vip_match.group(1))
             vip_action = vip_match.group(2)

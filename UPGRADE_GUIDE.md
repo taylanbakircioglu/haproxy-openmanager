@@ -1,3 +1,38 @@
+# Upgrade Notes — v1.10.8 (VIP adoption takes the whole VRRP instance)
+
+**Backend + frontend, no schema change.** No `SCHEMA_VERSION` bump, so the built-in roles are
+**not** re-seeded. No agent impact: nothing about what the agent reports or how it takes a
+config over changes.
+
+- **Adoption is now per VRRP instance, not per node.** Every node in the pool reporting the same
+  `virtual_router_id` and virtual address becomes a member of one VIP, each with the role,
+  priority and interface its own `keepalived.conf` declares, and each with its own one-shot
+  takeover hash. The panel lists one row per instance.
+- **Why this mattered:** single-node adoption could not produce a working pair. The BACKUP alone
+  failed apply, the MASTER alone left the peer unmanaged and the peer could not then be adopted
+  (VRID collision). On a **unicast** instance it was worse than inconvenient: the render drops
+  the unicast block when there are no peers, so the adopted node fell back to multicast while its
+  peer stayed unicast and both could hold the address.
+- **New refusals, each with the reason in the message:** the group does not have exactly one
+  MASTER; the nodes disagree on `advert_int`; a declared unicast peer is not among the nodes being
+  adopted; a node is already a member of a live VIP.
+- **Apply Management "View Change" now renders the adopt diff correctly.** It did not recognise
+  the `adopt` action and fell through to the generic HAProxy diff, which compared the staged
+  `keepalived.conf` against the cluster's previous `haproxy.cfg` and showed the whole HAProxy
+  config as removed. Alarming, but display-only — nothing was ever applied from that view.
+- **Rejecting an adoption is recoverable again.** It used to hide the node from the panel
+  permanently. Nothing clears `vip_discoveries.adopted_vip_id`, a VIP is only soft-deleted so the
+  column's `ON DELETE SET NULL` never fires, and the agent does not re-report a file whose hash
+  has not changed. Adoptability is now derived from whether the linked VIP is still active.
+- **If you adopted a VIP on 1.10.4-1.10.7**, check it before applying: it may have only one
+  member. Add the peer from the VIP's edit form, or reject the pending adoption and adopt again —
+  the node reappears in the panel under this release.
+
+**Rollback:** safe. No schema or data change; reverting restores the previous single-node
+adoption behaviour.
+
+---
+
 # Upgrade Notes — v1.10.7 (HA / VIP follows the selected cluster)
 
 **Backend + frontend, no schema change.** No `SCHEMA_VERSION` bump, so the built-in roles are

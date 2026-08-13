@@ -134,7 +134,11 @@ const VIPManagement = () => {
       const res = await fetch(`/api/vip/discoveries${scopeQuery}`, { headers: authHeaders() });
       if (!res.ok) { setDiscoveries([]); return; }
       const data = await res.json();
-      setDiscoveries((data.discoveries || []).filter((d) => !d.is_managed && !d.adopted_vip_id));
+      // v1.10.8 — hide a node only while its adoption still STANDS. Filtering on adopted_vip_id
+      // alone hid it forever after a reject: nothing clears that column, the VIP is only ever
+      // soft-deleted, and the agent does not re-report an unchanged file.
+      setDiscoveries((data.discoveries || [])
+        .filter((d) => !d.is_managed && !d.adopted_vip_active));
     } catch (e) {
       console.error('fetchDiscoveries failed', e);
     }
@@ -147,12 +151,62 @@ const VIPManagement = () => {
     return () => clearInterval(t);
   }, [fetchVips, fetchDiscoveries]);
 
-  const openAdopt = (discovery, candidate) => {
-    setAdoptTarget({ discovery, candidate });
+  // v1.10.8 — one row per VRRP INSTANCE, not per node. Adoption now takes the whole instance
+  // (every node in the pool reporting the same VRID + address), so listing the nodes as separate
+  // adoptable rows invited exactly the half-adoption the backend refuses: adopting the BACKUP
+  // alone cannot be applied, and on a unicast pair adopting one side drops the peer list and
+  // drops both nodes into a split brain. Identity is (VRID, address), same as keepalived's.
+  const discoveryGroups = React.useMemo(() => {
+    const groups = new Map();
+    (discoveries || []).forEach((d) => {
+      const cands = d.analysis?.candidates || [];
+      if (cands.length === 0) {
+        const key = `solo:${d.agent_id}`;
+        groups.set(key, { key, instance_name: '—', vip: null, members: [{ discovery: d, candidate: null }] });
+        return;
+      }
+      cands.forEach((c) => {
+        const vrid = c.vip?.virtual_router_id;
+        const addr = c.vip?.virtual_ip;
+        const key = (vrid != null && addr) ? `${vrid}|${addr}` : `solo:${d.agent_id}:${c.instance_name}`;
+        if (!groups.has(key)) {
+          groups.set(key, { key, instance_name: c.instance_name, vip: c.vip, members: [] });
+        }
+        groups.get(key).members.push({ discovery: d, candidate: c });
+      });
+    });
+    return Array.from(groups.values());
+  }, [discoveries]);
+
+  // What stops a whole instance from being adopted. Mirrors the backend's checks so the button
+  // state and the 422 it would return cannot drift apart.
+  const groupState = (g) => {
+    const parseFailed = g.members.filter((m) => m.discovery.parse_error);
+    const noCandidate = g.members.filter((m) => !m.candidate);
+    const blockers = g.members.flatMap((m) => m.candidate?.blockers || []);
+    const { hard, loss, prefix } = splitBlockers(blockers);
+    const masters = g.members.filter((m) => m.candidate?.member?.role === 'MASTER').length;
+    let reason = null;
+    if (parseFailed.length) reason = `${parseFailed.map((m) => m.discovery.agent_name).join(', ')}: config could not be parsed`;
+    else if (noCandidate.length) reason = 'no vrrp_instance in the report';
+    else if (hard.length) reason = hard.join(' · ');
+    else if (masters !== 1) {
+      reason = masters === 0
+        ? 'no node in this instance declares state MASTER — enable the missing node\'s agent so it reports its config'
+        : `${masters} nodes declare MASTER; exactly one must`;
+    }
+    return { parseFailed, noCandidate, hard, loss, prefix, masters, blockers, reason };
+  };
+
+  const openAdopt = (group) => {
+    // Any member can carry the request: the backend resolves the whole instance from it. Prefer
+    // the MASTER so the suggested name and the preview show the authoritative node.
+    const primary = group.members.find((m) => m.candidate?.member?.role === 'MASTER') || group.members[0];
+    setAdoptTarget({ group, primary, discovery: primary.discovery, candidate: primary.candidate });
     setAdoptAcceptLoss(false);
     adoptForm.setFieldsValue({
-      name: `${discovery.agent_name}-${candidate?.vip?.virtual_ip || 'vip'}`,
-      prefix_length: candidate?.vip?.prefix_length ?? undefined,
+      name: `${group.vip?.virtual_ip || primary.discovery.agent_name}-vip`,
+      prefix_length: group.vip?.prefix_length ?? undefined,
     });
   };
 
@@ -180,14 +234,6 @@ const VIPManagement = () => {
       }
       const data = await res.json();
       message.success(data.message || 'VIP adopted', 8);
-      if ((data.peers_to_add || []).length > 0) {
-        // The adopted node's peers keep their own keepalived.conf, so the VIP is not a complete
-        // VRRP group until they are members too.
-        message.info(
-          `This instance has ${data.peers_to_add.length} unicast peer(s) (${data.peers_to_add.join(', ')}). `
-          + 'Adopt or add those nodes as members before applying, or the rendered config will have no peers.',
-          12);
-      }
       setAdoptTarget(null);
       fetchVips();
       fetchDiscoveries();
@@ -528,70 +574,85 @@ const VIPManagement = () => {
             }
           />
           <Table
-            rowKey={(r) => `${r.agent_id}:${r.instance_name}`}
+            rowKey={(r) => r.key}
             size="small"
             pagination={false}
-            dataSource={discoveries.flatMap((d) => {
-              const cands = (d.analysis?.candidates || []);
-              if (cands.length === 0) {
-                return [{ agent_id: d.agent_id, discovery: d, instance_name: '—', candidate: null }];
-              }
-              return cands.map((c) => ({
-                agent_id: d.agent_id, discovery: d, instance_name: c.instance_name, candidate: c,
-              }));
-            })}
+            dataSource={discoveryGroups}
             columns={[
-              { title: 'Node', dataIndex: ['discovery', 'agent_name'], key: 'agent',
+              { title: 'Nodes', key: 'agents',
                 render: (_v, r) => (
                   <Space direction="vertical" size={0}>
-                    <Text strong>{r.discovery.agent_name}</Text>
-                    <Text type="secondary" style={{ fontSize: 12 }}>{r.discovery.pool_name || 'no pool'}</Text>
+                    {r.members.map((m) => (
+                      <Text strong key={m.discovery.agent_id}>{m.discovery.agent_name}</Text>
+                    ))}
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {r.members[0]?.discovery.pool_name || 'no pool'}
+                    </Text>
                   </Space>
                 ) },
               { title: 'Instance', dataIndex: 'instance_name', key: 'instance' },
               { title: 'Virtual IP', key: 'vip',
-                render: (_v, r) => (r.candidate?.vip?.virtual_ip
-                  ? <Text code>{r.candidate.vip.virtual_ip}
-                      {r.candidate.vip.prefix_length != null ? `/${r.candidate.vip.prefix_length}` : ''}</Text>
+                render: (_v, r) => (r.vip?.virtual_ip
+                  ? <Text code>{r.vip.virtual_ip}
+                      {r.vip.prefix_length != null ? `/${r.vip.prefix_length}` : ''}</Text>
                   : <Text type="secondary">—</Text>) },
               { title: 'VRID', key: 'vrid',
-                render: (_v, r) => (r.candidate?.vip?.virtual_router_id ?? <Text type="secondary">—</Text>) },
-              { title: 'This node', key: 'member',
-                render: (_v, r) => (r.candidate ? (
-                  <Space size={4}>
-                    <Tag color={r.candidate.member.role === 'MASTER' ? 'green' : 'default'}>
-                      {r.candidate.member.role}
-                    </Tag>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      prio {r.candidate.member.priority} · {r.candidate.member.network_interface}
-                    </Text>
+                render: (_v, r) => (r.vip?.virtual_router_id ?? <Text type="secondary">—</Text>) },
+              { title: 'Members', key: 'member',
+                render: (_v, r) => (
+                  <Space direction="vertical" size={0}>
+                    {r.members.map((m) => (
+                      <Space size={4} key={m.discovery.agent_id}>
+                        {m.candidate ? (
+                          <>
+                            <Tag color={m.candidate.member.role === 'MASTER' ? 'green' : 'default'}>
+                              {m.candidate.member.role}
+                            </Tag>
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              prio {m.candidate.member.priority} · {m.candidate.member.network_interface}
+                            </Text>
+                          </>
+                        ) : <Text type="secondary">—</Text>}
+                      </Space>
+                    ))}
                   </Space>
-                ) : <Text type="secondary">—</Text>) },
+                ) },
               { title: 'Adoptable', key: 'adoptable',
                 render: (_v, r) => {
-                  if (r.discovery.parse_error) {
-                    return <Tooltip title={r.discovery.parse_error}><Tag color="red">unparseable</Tag></Tooltip>;
+                  const st = groupState(r);
+                  if (st.parseFailed.length) {
+                    return (
+                      <Tooltip title={st.parseFailed.map((m) => `${m.discovery.agent_name}: ${m.discovery.parse_error}`).join(' · ')}>
+                        <Tag color="red">unparseable</Tag>
+                      </Tooltip>
+                    );
                   }
-                  if (!r.candidate) return <Tag>no vrrp_instance</Tag>;
-                  if (r.candidate.adoptable) return <Tag color="green">yes</Tag>;
-                  const { hard } = splitBlockers(r.candidate.blockers);
+                  if (st.noCandidate.length) return <Tag>no vrrp_instance</Tag>;
+                  if (st.hard.length || st.masters !== 1) {
+                    return <Tooltip title={st.reason}><Tag color="red">
+                      {st.hard.length ? `${st.hard.length} blocker(s)` : 'MASTER missing'}
+                    </Tag></Tooltip>;
+                  }
+                  if (!st.blockers.length) return <Tag color="green">yes</Tag>;
                   return (
-                    <Tooltip title={(r.candidate.blockers || []).join(' · ')}>
-                      <Tag color={hard.length ? 'red' : 'gold'}>
-                        {hard.length ? `${hard.length} blocker(s)` : 'needs review'}
-                      </Tag>
-                    </Tooltip>
+                    <Tooltip title={st.blockers.join(' · ')}><Tag color="gold">needs review</Tag></Tooltip>
                   );
                 } },
               { title: 'Actions', key: 'actions',
-                render: (_v, r) => (
-                  <Button size="small" type="primary" ghost
-                    disabled={!r.candidate || !!r.discovery.parse_error
-                      || splitBlockers(r.candidate.blockers).hard.length > 0}
-                    onClick={() => openAdopt(r.discovery, r.candidate)}>
-                    Adopt
-                  </Button>
-                ) },
+                render: (_v, r) => {
+                  const st = groupState(r);
+                  const btn = (
+                    <Button size="small" type="primary" ghost
+                      disabled={!!st.reason} onClick={() => openAdopt(r)}>
+                      Adopt
+                    </Button>
+                  );
+                  // A disabled antd Button swallows mouse events, so the tooltip needs a live
+                  // wrapper or the operator never learns WHY adoption is unavailable.
+                  return st.reason
+                    ? <Tooltip title={st.reason}><span style={{ display: 'inline-block' }}>{btn}</span></Tooltip>
+                    : btn;
+                } },
             ]}
           />
         </Card>
@@ -599,7 +660,9 @@ const VIPManagement = () => {
 
       {/* Adopt modal — shows what will be taken over, what was assumed, and what would be lost. */}
       <Modal
-        title={adoptTarget ? `Adopt ${adoptTarget.candidate.instance_name} from ${adoptTarget.discovery.agent_name}` : 'Adopt VIP'}
+        title={adoptTarget
+          ? `Adopt ${adoptTarget.group.instance_name} — ${adoptTarget.group.members.length} node(s)`
+          : 'Adopt VIP'}
         open={!!adoptTarget}
         onCancel={() => setAdoptTarget(null)}
         onOk={submitAdopt}
@@ -608,16 +671,34 @@ const VIPManagement = () => {
         width={720}
         okButtonProps={{
           disabled: !!adoptTarget && (() => {
-            const { loss, hard } = splitBlockers(adoptTarget.candidate.blockers);
+            const { loss, hard } = splitBlockers(
+              adoptTarget.group.members.flatMap((m) => m.candidate?.blockers || []));
             return hard.length > 0 || (loss.length > 0 && !adoptAcceptLoss);
           })(),
         }}
       >
         {adoptTarget && (() => {
           const cand = adoptTarget.candidate;
-          const { loss, prefix, hard } = splitBlockers(cand.blockers);
+          // Blockers are aggregated across EVERY node of the instance, because adoption
+          // overwrites every one of their files — the backend refuses on the same combined set.
+          const { loss, prefix, hard } = splitBlockers(
+            adoptTarget.group.members.flatMap((m) => m.candidate?.blockers || []));
           return (
             <>
+              <Alert type="info" showIcon style={{ marginBottom: 12 }}
+                message={`These ${adoptTarget.group.members.length} node(s) will be taken over together`}
+                description={
+                  <ul style={{ margin: 0, paddingLeft: 18 }}>
+                    {adoptTarget.group.members.map((m) => (
+                      <li key={m.discovery.agent_id}>
+                        <Text strong>{m.discovery.agent_name}</Text>
+                        {' — '}{m.candidate?.member?.role} · prio {m.candidate?.member?.priority}
+                        {' · '}{m.candidate?.member?.network_interface}
+                        {' · '}<Text code>{m.discovery.config_path}</Text>
+                      </li>
+                    ))}
+                  </ul>
+                } />
               {hard.length > 0 && (
                 <Alert type="error" showIcon style={{ marginBottom: 12 }}
                   message="This config cannot be adopted"
