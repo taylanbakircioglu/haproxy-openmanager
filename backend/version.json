@@ -1,5 +1,5 @@
 {
-  "version": "1.10.6",
-  "releaseName": "VIP adoption panel was unreachable (route shadowing)",
+  "version": "1.10.7",
+  "releaseName": "HA/VIP follows the selected cluster",
   "releaseDate": "2026-08-13"
 }

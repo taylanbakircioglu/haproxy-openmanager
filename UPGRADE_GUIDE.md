@@ -1,3 +1,25 @@
+# Upgrade Notes — v1.10.7 (HA / VIP follows the selected cluster)
+
+**Backend + frontend, no schema change.** No `SCHEMA_VERSION` bump, so the built-in roles are
+**not** re-seeded. No agent impact.
+
+- **The HA / VIP page ignored the cluster picker.** Both the VIP table and the *Unmanaged
+  keepalived detected* panel queried the whole fleet, so on an install with more than one
+  cluster the lists never changed when the selection did. Both now pass `cluster_id`, mapped to
+  the cluster's pool the same way `GET /api/vip?cluster_id=` already worked for Apply
+  Management.
+- **Behaviour change worth knowing:** the VIP table is now scoped to the selected cluster. It
+  used to show every VIP in the fleet. If you relied on the fleet-wide view, the API still
+  supports it — `GET /api/vip` and `GET /api/vip/discoveries` without `cluster_id` return
+  everything, unchanged.
+- **API compatibility:** `cluster_id` is optional on both endpoints. Existing integrations that
+  do not send it behave exactly as before.
+
+**Rollback:** safe. The change is a query parameter plus the page that sends it; reverting
+restores the fleet-wide lists and touches no data.
+
+---
+
 # Upgrade Notes — v1.10.6 (VIP adoption panel was unreachable)
 
 **One backend fix, no schema change.** No `SCHEMA_VERSION` bump, so the built-in roles are

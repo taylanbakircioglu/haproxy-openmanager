@@ -465,11 +465,15 @@ async def list_vips(cluster_id: Optional[int] = None, authorization: str = Heade
 # non-OK response as "nothing to show", so the whole adoption feature silently disappears.
 # See the v1.10.4 adoption section further down for the endpoint's own documentation.
 @router.get("/discoveries")
-async def list_vip_discoveries(authorization: str = Header(None)):
+async def list_vip_discoveries(cluster_id: Optional[int] = None, authorization: str = Header(None)):
     """Unmanaged keepalived configs the agents found on their nodes.
 
     Read-only and safe to poll: this is what the HA/VIP page shows so an existing VIP is
     visible before anyone adopts it.
+
+    `cluster_id` scopes the result to the agents in that cluster's pool, resolved exactly like
+    the VIP list above. Without it every discovery in the fleet is returned, which is what a
+    caller that does not know about the parameter still gets.
     """
     await _require(authorization, "read")
     conn = await get_database_connection()
@@ -480,8 +484,10 @@ async def list_vip_discoveries(authorization: str = Header(None)):
                 FROM vip_discoveries d
                 JOIN agents a ON a.id = d.agent_id
                 LEFT JOIN haproxy_cluster_pools p ON p.id = a.pool_id
+                WHERE $1::int IS NULL
+                   OR a.pool_id = (SELECT pool_id FROM haproxy_clusters WHERE id = $1::int)
                 ORDER BY d.reported_at DESC, d.id DESC
-            """)
+            """, cluster_id)
         except Exception as exc:  # noqa: BLE001 — a missing relation degrades to empty (B-7)
             logger.debug(f"vip_discoveries unavailable: {exc}")
             return {"discoveries": []}

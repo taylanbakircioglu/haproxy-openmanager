@@ -72,7 +72,7 @@ const fetchApiError = async (res, fallback) => {
 };
 
 const VIPManagement = () => {
-  const { clusters } = useCluster();
+  const { clusters, selectedCluster } = useCluster();
   const [vips, setVips] = useState([]);
   const [loading, setLoading] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
@@ -103,10 +103,15 @@ const VIPManagement = () => {
     return Array.from(seen, ([id, name]) => ({ id, name }));
   }, [clusters]);
 
+  // v1.10.6 — both lists follow the cluster picked in the header, like every other page. The
+  // selector was always there but this page ignored it, so a fleet with several clusters saw
+  // one undifferentiated list. Falls back to fleet-wide while the context is still resolving.
+  const scopeQuery = selectedCluster?.id ? `?cluster_id=${selectedCluster.id}` : '';
+
   const fetchVips = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/vip', { headers: authHeaders() });
+      const res = await fetch(`/api/vip${scopeQuery}`, { headers: authHeaders() });
       if (res.ok) {
         const data = await res.json();
         setVips(data.vips || []);
@@ -119,21 +124,21 @@ const VIPManagement = () => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [scopeQuery]);
 
   // v1.10.4 — keepalived configs the agents found on their nodes but do NOT manage. This is why
   // the page could be empty on a fleet that already runs keepalived: the flow was one-way, so
   // nothing ever read what was already there.
   const fetchDiscoveries = useCallback(async () => {
     try {
-      const res = await fetch('/api/vip/discoveries', { headers: authHeaders() });
+      const res = await fetch(`/api/vip/discoveries${scopeQuery}`, { headers: authHeaders() });
       if (!res.ok) { setDiscoveries([]); return; }
       const data = await res.json();
       setDiscoveries((data.discoveries || []).filter((d) => !d.is_managed && !d.adopted_vip_id));
     } catch (e) {
       console.error('fetchDiscoveries failed', e);
     }
-  }, []);
+  }, [scopeQuery]);
 
   useEffect(() => {
     fetchVips();
