@@ -3320,6 +3320,45 @@ CONFIG_RESPONSE_EOF
         chk="$(dirname "$conf")/check_haproxy.sh"
         if [[ -f "$conf" ]] && grep -q "$marker" "$conf" 2>/dev/null; then we_own="true"; fi
 
+        # v1.10.4 — VIP adoption discovery. Report a keepalived.conf we do NOT own so an existing
+        # VIP can be adopted from the UI instead of retyped. STRICTLY READ-ONLY: this never writes
+        # to the node. The heartbeat cannot carry this — it has the VIP address and a best-effort
+        # MASTER/BACKUP, while rendering a node's config needs eleven fields.
+        #
+        # Rate limited by content: the hash of the last report is cached next to the config, so the
+        # file (which may contain the VRRP password) is posted only when it actually changes, not on
+        # every cycle. Once we own the file there is nothing to adopt, so the record is cleared once.
+        _kp_discover() {
+            local cache="$(dirname "$conf")/.hom_discovery_hash" cur_hash="" body content_json
+            if [[ "$we_own" == "true" || ! -f "$conf" ]]; then
+                # Nothing adoptable here. Clear a previous report exactly once.
+                [[ -f "$cache" ]] || return 0
+                curl -k -s --connect-timeout 10 --max-time 30 -X POST \
+                    "$MANAGEMENT_URL/api/agents/$AGENT_NAME/keepalived-discovery" \
+                    -H "X-API-Key: $AGENT_TOKEN" -H "Content-Type: application/json" \
+                    -d "{\"config_path\":\"$conf\",\"exists\":false}" >/dev/null 2>&1 || return 0
+                rm -f "$cache"
+                return 0
+            fi
+            cur_hash=$(md5sum "$conf" 2>/dev/null | awk '{print $1}')
+            [[ -z "$cur_hash" ]] && return 0
+            [[ -f "$cache" && "$(cat "$cache" 2>/dev/null)" == "$cur_hash" ]] && return 0
+            # jq -Rs makes the file a single JSON string with its newlines intact, so the content the
+            # server hashes is byte-identical to what is on disk — the takeover authorisation is
+            # pinned to that hash.
+            content_json=$(jq -Rs . < "$conf" 2>/dev/null) || return 0
+            body=$(jq -n --arg p "$conf" --argjson c "$content_json" \
+                '{config_path:$p, exists:true, is_managed:false, config_content:$c}' 2>/dev/null) || return 0
+            if curl -k -s --connect-timeout 10 --max-time 30 -o /dev/null -X POST \
+                "$MANAGEMENT_URL/api/agents/$AGENT_NAME/keepalived-discovery" \
+                -H "X-API-Key: $AGENT_TOKEN" -H "Content-Type: application/json" \
+                --data-binary "$body" 2>/dev/null; then
+                printf '%s' "$cur_hash" > "$cache" 2>/dev/null
+                log "INFO" "KEEPALIVED: reported an unmanaged keepalived.conf for adoption"
+            fi
+        }
+        _kp_discover
+
         _kp_report() {
             local vid="${2:-null}"; [[ -z "$2" ]] && vid="null"
             curl -k -s --connect-timeout 10 --max-time 30 -X POST "$MANAGEMENT_URL/api/agents/$AGENT_NAME/keepalived-status" \
@@ -3379,10 +3418,25 @@ CONFIG_RESPONSE_EOF
         [[ -z "$new_conf" ]] && return 0
 
         if [[ -f "$conf" && "$we_own" != "true" ]]; then
-            log "WARN" "KEEPALIVED: $conf is externally managed — refusing to overwrite"
-            _kp_report "externally_managed" "$vip_id" "" "pre-existing unmanaged keepalived.conf"
-            return 0
+            local allow_takeover expected_hash disk_hash
+            allow_takeover=$(echo "$resp" | jq -r '.keepalived.allow_takeover // false' 2>/dev/null)
+            expected_hash=$(echo "$resp" | jq -r '.keepalived.takeover_expected_hash // empty' 2>/dev/null)
+            disk_hash=$(md5sum "$conf" 2>/dev/null | awk '{print $1}')
+            if [[ "$allow_takeover" == "true" && -n "$expected_hash" && "$disk_hash" == "$expected_hash" ]]; then
+                log "INFO" "KEEPALIVED: adopting $conf (one-shot takeover authorised; on-disk hash matches)"
+            elif [[ "$allow_takeover" == "true" ]]; then
+                log "WARN" "KEEPALIVED: adoption authorised but $conf changed since it was adopted — refusing"
+                _kp_report "externally_managed" "$vip_id" "$disk_hash" \
+                    "config changed after adoption; re-adopt to pick up the current file"
+                return 0
+            else
+                log "WARN" "KEEPALIVED: $conf is externally managed — refusing to overwrite"
+                _kp_report "externally_managed" "$vip_id" "" "pre-existing unmanaged keepalived.conf"
+                return 0
+            fi
         fi
+
+        # Hybrid install: install keepalived only if missing.
 
         if ! command -v keepalived >/dev/null 2>&1; then
             if [[ "$install_if" == "true" ]]; then
