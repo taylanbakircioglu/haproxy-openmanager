@@ -209,20 +209,42 @@ const VIPManagement = () => {
       ? discoveries.filter((d) => !inGroup.has(d.agent_id)
           && (d.config_preview || '').includes(g.vip.virtual_ip))
       : [];
+    // v1.10.11 — ONE ordered decision drives both the label and the button, because they used to
+    // be computed separately and disagreed: a group blocked by an unreadable peer was tagged
+    // "MASTER missing" (its peer's MASTER simply had not been counted) while the disabled button
+    // gave the real reason in its own tooltip. Whatever stops adoption is what the label says.
     let reason = null;
-    if (parseFailed.length) reason = `${parseFailed.map((m) => m.discovery.agent_name).join(', ')}: config could not be parsed`;
-    else if (noCandidate.length) reason = 'no vrrp_instance in the report';
-    else if (strandedPeers.length) {
-      reason = `${strandedPeers.map((d) => d.agent_name).join(', ')} reference ${g.vip.virtual_ip} `
-        + 'but their config could not be parsed — fix those nodes first, or they would be left '
-        + 'running an unmanaged config';
-    } else if (hard.length) reason = hard.join(' · ');
-    else if (masters !== 1) {
+    let label = null;
+    let colour = null;
+    if (parseFailed.length) {
+      reason = `${parseFailed.map((m) => m.discovery.agent_name).join(', ')}: config could not be parsed`;
+      label = 'unparseable'; colour = 'red';
+    } else if (noCandidate.length) {
+      reason = 'no vrrp_instance in the report';
+      label = 'no vrrp_instance'; colour = undefined;
+    } else if (strandedPeers.length) {
+      const names = strandedPeers.map((d) => d.agent_name).join(', ');
+      const why = strandedPeers.every((d) => d.parse_error)
+        ? 'their config could not be parsed'
+        : 'they cannot be taken over with this instance';
+      reason = `${names} also reference ${g.vip.virtual_ip} but ${why} — fix those nodes first, or `
+        + 'they would be left running an unmanaged config on the same address';
+      label = 'blocked by peer'; colour = 'red';
+    } else if (hard.length) {
+      reason = hard.join(' · ');
+      label = `${hard.length} blocker(s)`; colour = 'red';
+    } else if (masters !== 1) {
       reason = masters === 0
         ? 'no node in this instance declares state MASTER — enable the missing node\'s agent so it reports its config'
         : `${masters} nodes declare MASTER; exactly one must`;
+      label = masters === 0 ? 'MASTER missing' : 'two MASTERs'; colour = 'red';
+    } else if (blockers.length) {
+      label = 'needs review'; colour = 'gold';          // resolvable in the adopt dialog
+    } else {
+      label = 'yes'; colour = 'green';
     }
-    return { parseFailed, noCandidate, hard, loss, prefix, masters, blockers, reason };
+    return { parseFailed, noCandidate, hard, loss, prefix, masters, blockers,
+             strandedPeers, reason, label, colour };
   };
 
   const openAdopt = (group) => {
@@ -646,24 +668,15 @@ const VIPManagement = () => {
                 ) },
               { title: 'Adoptable', key: 'adoptable',
                 render: (_v, r) => {
+                  // Label, colour and tooltip all come from the single ordered decision in
+                  // groupState, so the tag can never name a different problem than the one that
+                  // actually disables the button.
                   const st = groupState(r);
-                  if (st.parseFailed.length) {
-                    return (
-                      <Tooltip title={st.parseFailed.map((m) => `${m.discovery.agent_name}: ${m.discovery.parse_error}`).join(' · ')}>
-                        <Tag color="red">unparseable</Tag>
-                      </Tooltip>
-                    );
-                  }
-                  if (st.noCandidate.length) return <Tag>no vrrp_instance</Tag>;
-                  if (st.hard.length || st.masters !== 1) {
-                    return <Tooltip title={st.reason}><Tag color="red">
-                      {st.hard.length ? `${st.hard.length} blocker(s)` : 'MASTER missing'}
-                    </Tag></Tooltip>;
-                  }
-                  if (!st.blockers.length) return <Tag color="green">yes</Tag>;
-                  return (
-                    <Tooltip title={st.blockers.join(' · ')}><Tag color="gold">needs review</Tag></Tooltip>
-                  );
+                  const detail = st.parseFailed.length
+                    ? st.parseFailed.map((m) => `${m.discovery.agent_name}: ${m.discovery.parse_error}`).join(' · ')
+                    : (st.reason || st.blockers.join(' · '));
+                  const tag = <Tag color={st.colour}>{st.label}</Tag>;
+                  return detail ? <Tooltip title={detail}>{tag}</Tooltip> : tag;
                 } },
               { title: 'Actions', key: 'actions',
                 render: (_v, r) => {

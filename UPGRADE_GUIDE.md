@@ -1,3 +1,19 @@
+# Upgrade Notes — v1.10.11 (Adoptable tag names the real blocker)
+
+**Frontend only, no schema change.** No `SCHEMA_VERSION` bump, no API change, no agent change.
+
+- The *Adoptable* tag and the disabled *Adopt* button were derived separately, so they could
+  name different problems. A pair blocked by a peer whose config could not be parsed showed
+  **MASTER missing**, because the unreadable node's `state MASTER` had not been counted — true,
+  but it sent the operator to the wrong node. Both now come from one ordered decision.
+- New label **blocked by peer** for a group held up by a node that references the same address
+  but cannot be taken over with it. Two MASTERs is now distinct from none.
+- Display only. The endpoint's checks and refusals are unchanged.
+
+**Rollback:** safe; purely presentational.
+
+---
+
 # Upgrade Notes — v1.10.10 (Adoption blockers listed once per instance)
 
 **Frontend only, no schema change.** No `SCHEMA_VERSION` bump, no API change, no agent change.

@@ -1,5 +1,5 @@
 {
-  "version": "1.10.10",
-  "releaseName": "Adoption blockers listed once per instance, not once per node",
+  "version": "1.10.11",
+  "releaseName": "The Adoptable tag names the problem that actually blocks adoption",
   "releaseDate": "2026-08-14"
 }
