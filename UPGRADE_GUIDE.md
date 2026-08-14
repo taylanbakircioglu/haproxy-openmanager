@@ -1,3 +1,18 @@
+# Upgrade Notes — v1.10.10 (Adoption blockers listed once per instance)
+
+**Frontend only, no schema change.** No `SCHEMA_VERSION` bump, no API change, no agent change.
+
+- The adoption panel merged every member's blocker list, so a two-node pair showed each shared
+  problem twice. The two files report different line numbers for the same directive, so exact
+  de-duplication did not collapse them. Blockers are now merged on the message with the leading
+  `line N:` ignored.
+- Display only. The endpoint already evaluated the combined set across all nodes, and what it
+  accepts or refuses is unchanged.
+
+**Rollback:** safe; purely presentational.
+
+---
+
 # Upgrade Notes — v1.10.9 (Adoption refuses to strand a node)
 
 **Backend + frontend, no schema change.** No `SCHEMA_VERSION` bump, so the built-in roles are

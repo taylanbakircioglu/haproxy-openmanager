@@ -63,6 +63,19 @@ const splitBlockers = (blockers) => {
   };
 };
 
+// v1.10.10 — every node of an instance reports the SAME problems about the SAME shared config,
+// so merging their blocker lists repeats each one per member. The line numbers differ between
+// the files, so exact-string dedup does not collapse them; key on the text WITHOUT the leading
+// "line N:" and keep the first occurrence. Four issues on a pair used to read as eight.
+const mergeBlockers = (lists) => {
+  const seen = new Map();
+  lists.flat().forEach((b) => {
+    const key = String(b).replace(/^line \d+:\s*/, '');
+    if (!seen.has(key)) seen.set(key, b);
+  });
+  return Array.from(seen.values());
+};
+
 // This component uses raw fetch(), but extractApiError expects an axios-shaped error
 // (err.response.data). Read the fetch Response body and reuse the envelope-aware extractor
 // so backend messages — e.g. the 409 "node already in VIP X" — actually reach the user.
@@ -183,7 +196,7 @@ const VIPManagement = () => {
   const groupState = (g) => {
     const parseFailed = g.members.filter((m) => m.discovery.parse_error);
     const noCandidate = g.members.filter((m) => !m.candidate);
-    const blockers = g.members.flatMap((m) => m.candidate?.blockers || []);
+    const blockers = mergeBlockers(g.members.map((m) => m.candidate?.blockers || []));
     const { hard, loss, prefix } = splitBlockers(blockers);
     const masters = g.members.filter((m) => m.candidate?.member?.role === 'MASTER').length;
     // Any reported config that mentions this address but is NOT one of this group's nodes would
@@ -686,7 +699,7 @@ const VIPManagement = () => {
         okButtonProps={{
           disabled: !!adoptTarget && (() => {
             const { loss, hard } = splitBlockers(
-              adoptTarget.group.members.flatMap((m) => m.candidate?.blockers || []));
+              mergeBlockers(adoptTarget.group.members.map((m) => m.candidate?.blockers || [])));
             return hard.length > 0 || (loss.length > 0 && !adoptAcceptLoss);
           })(),
         }}
@@ -696,7 +709,7 @@ const VIPManagement = () => {
           // Blockers are aggregated across EVERY node of the instance, because adoption
           // overwrites every one of their files — the backend refuses on the same combined set.
           const { loss, prefix, hard } = splitBlockers(
-            adoptTarget.group.members.flatMap((m) => m.candidate?.blockers || []));
+            mergeBlockers(adoptTarget.group.members.map((m) => m.candidate?.blockers || [])));
           return (
             <>
               <Alert type="info" showIcon style={{ marginBottom: 12 }}

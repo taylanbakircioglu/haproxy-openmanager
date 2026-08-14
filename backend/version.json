@@ -1,5 +1,5 @@
 {
-  "version": "1.10.9",
-  "releaseName": "Adoption refuses to strand a node or normalise a peer's settings",
+  "version": "1.10.10",
+  "releaseName": "Adoption blockers listed once per instance, not once per node",
   "releaseDate": "2026-08-14"
 }
