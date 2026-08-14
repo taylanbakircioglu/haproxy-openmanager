@@ -2433,23 +2433,30 @@ async def agent_keepalived_status(agent_name: str, status_data: dict, x_api_key:
         #
         # Gated on the acked hash MATCHING applied_config_hash, so a partial or failed deploy
         # never drops the authorisation and leaves the VIP unable to converge.
+        # The hash is passed TWICE on purpose. Reusing one placeholder for both the assignment
+        # (`last_deploy_hash=$n`, a VARCHAR column) and the comparison inside the CASE made
+        # PostgreSQL deduce two different types for it and asyncpg refused the whole statement
+        # with AmbiguousParameterError ("text versus character varying"). Because the failure is
+        # in the UPDATE itself, not in one column, EVERY status ack was lost and every VIP sat at
+        # SYNCING forever — including teardown acks. A separate placeholder is only ever compared
+        # against the column, so its type is unambiguous.
         _retire_takeover = ("takeover_expected_hash = CASE WHEN applied_config_hash IS NOT NULL "
-                            "AND {p} = applied_config_hash THEN NULL ELSE takeover_expected_hash END")
+                            "AND applied_config_hash = {p} THEN NULL ELSE takeover_expected_hash END")
         if vip_id is None:
             # No specific VIP (e.g. a teardown ack) — update all this agent's memberships.
             await conn.execute(f"""
                 UPDATE vip_members SET last_deploy_state=$2, last_deploy_message=$3,
                     last_deploy_hash=$4, last_deploy_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP,
-                    {_retire_takeover.format(p="$4")}
+                    {_retire_takeover.format(p="$5")}
                 WHERE agent_id=$1
-            """, agent['id'], state, message, config_hash)
+            """, agent['id'], state, message, config_hash, config_hash)
         else:
             await conn.execute(f"""
                 UPDATE vip_members SET last_deploy_state=$3, last_deploy_message=$4,
                     last_deploy_hash=$5, last_deploy_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP,
-                    {_retire_takeover.format(p="$5")}
+                    {_retire_takeover.format(p="$6")}
                 WHERE agent_id=$1 AND vip_id=$2
-            """, agent['id'], int(vip_id), state, message, config_hash)
+            """, agent['id'], int(vip_id), state, message, config_hash, config_hash)
         return {"status": "ok"}
     except HTTPException:
         raise

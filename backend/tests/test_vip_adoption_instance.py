@@ -261,6 +261,119 @@ def test_takeover_authorisation_is_retired_once_the_node_acks_our_config():
     )
 
 
+def test_validation_judges_the_output_not_the_exit_code():
+    """keepalived's config-test exit code cannot separate fatal from benign.
+
+    Measured on keepalived 2.2.8 rather than assumed:
+
+        clean config ..................... 0
+        auth_pass longer than 8 chars .... 5   "Truncating auth_pass to 8 characters"
+        missing '}' ...................... 5   "There are 1 missing '}'s"
+        unknown keyword .................. 5   "Unknown keyword '...'"
+        script without script_security ... 6   "SECURITY VIOLATION ..."
+
+    So 5 covers both a harmless truncation and a broken file. Treating any non-zero exit as
+    invalid rejected VALID configs: a VRRP password over 8 characters is enough, and keepalived
+    truncates it to 8 anyway, exactly as it does for the file the operator already runs. Found
+    on the first live adoption, where the node's OWN running config also exited non-zero.
+
+    The gate must therefore judge the output, and it must fail CLOSED: anything not on the
+    benign list still counts as fatal.
+    """
+    script = (BACKEND / "utils" / "agent_scripts" / "linux_install.sh").read_text()
+    assert script.count("grep -v 'Truncating auth_pass to 8 characters'") == 2, (
+        "both daemon copies must drop the known-benign truncation warning before judging"
+    )
+    assert script.count('if [[ -n "$kp_fatal" ]]; then') == 2, (
+        "the decision must be made on what REMAINS after the benign lines are dropped"
+    )
+    # Fail-closed: the benign list is an allowlist, never a denylist of fatal messages. The
+    # measured table above is quoted in a comment inside the script, so assert on what is used
+    # as a grep PATTERN rather than on the text appearing anywhere.
+    patterns = re.findall(r"grep -v '([^']*)'", script)
+    assert set(patterns) == {"Truncating auth_pass to 8 characters", "^[[:space:]]*$"}, (
+        f"the validation filter greps for {sorted(set(patterns))}. It must drop only messages "
+        f"known to be benign; matching on fatal messages instead would let an unrecognised "
+        f"error through."
+    )
+
+
+def test_validation_fails_closed_when_keepalived_says_nothing():
+    """A non-zero exit with no output must stay fatal.
+
+    Filtering the output introduces a way to reach the accept path with an EMPTY filter result,
+    and some keepalived builds log to syslog rather than stderr — on such a host every config
+    would then be accepted regardless of what is wrong with it. Verified against a stub that
+    exits non-zero silently, and against one that emits only whitespace.
+    """
+    script = (BACKEND / "utils" / "agent_scripts" / "linux_install.sh").read_text()
+    assert script.count('if [[ -z "${kp_out//[[:space:]]/}" ]]; then') == 2, (
+        "both daemon copies must treat a non-zero exit with no readable output as fatal"
+    )
+    assert script.count('kp_fatal="keepalived -t exited non-zero without output"') == 2
+
+
+def test_validation_failure_reports_what_keepalived_said():
+    """The fail-safe protected the node correctly on a live adoption but logged only
+    "config validation failed", with keepalived's own output sent to /dev/null. The operator
+    had no way to act on it without reproducing the check by hand on the node."""
+    script = (BACKEND / "utils" / "agent_scripts" / "linux_install.sh").read_text()
+    assert 'keepalived -t -f "$tmp_conf" >/dev/null 2>&1' not in script, (
+        "keepalived's output must not be discarded — a fail-safe that cannot say why it fired "
+        "is only half a safety feature"
+    )
+    assert script.count('kp_out=$(keepalived -t -f "$tmp_conf" 2>&1)') == 2, (
+        "both daemon copies must capture the validation output"
+    )
+    # The text is interpolated into JSON by both `log` and _kp_report, so it must be sanitised.
+    assert script.count(r"""tr -d '"\\'""") == 2, (
+        "captured output must have quotes and backslashes stripped before it reaches the JSON "
+        "log line and the status report"
+    )
+    assert script.count('keepalived -t failed: ${kp_err}') == 2, (
+        "the reason must also travel to the server so the UI can show it"
+    )
+
+
+def test_status_ack_statements_bind_each_placeholder_once():
+    """Every `$n` in the keepalived-status UPDATEs must be used exactly once, and the count must
+    match the arguments passed.
+
+    Reusing one placeholder for both the assignment (`last_deploy_hash=$n`, a VARCHAR column)
+    and the comparison inside the takeover-retirement CASE made PostgreSQL deduce two types for
+    it, and asyncpg rejected the whole statement with AmbiguousParameterError. The failure was
+    not partial: no ack was written at all, so every VIP sat at SYNCING forever and teardown acks
+    were lost too. Shipped in v1.10.12 and caught in the field.
+
+    The suite has no database, so this pins the shape that made it possible rather than the SQL
+    behaviour: one placeholder, one binding site.
+    """
+    src = (BACKEND / "routers" / "agent.py").read_text()
+    start = src.index("async def agent_keepalived_status")
+    seg = src[start:src.index('return {"status": "ok"}', start)]
+
+    retire = "".join(re.findall(r'"([^"]*)"',
+                                re.search(r"_retire_takeover = \((.*?)\)\n", seg, re.S).group(1)))
+    calls = re.findall(r'await conn\.execute\(f"""(.*?)""",\s*(.*?)\)\n', seg, re.S)
+    assert len(calls) == 2, f"expected the two ack UPDATEs, found {len(calls)}"
+
+    for sql, args in calls:
+        placeholder = re.search(r'_retire_takeover\.format\(p="(\$\d+)"\)', sql).group(1)
+        rendered = re.sub(r"\{_retire_takeover\.format\(p=\"\$\d+\"\)\}",
+                          retire.replace("{p}", placeholder), sql)
+        used = re.findall(r"\$(\d+)", rendered)
+        dupes = {n for n in used if used.count(n) > 1}
+        assert not dupes, (
+            f"placeholder(s) {sorted('$'+d for d in dupes)} are bound more than once. PostgreSQL "
+            f"deduces a type per USE, so a placeholder that is both assigned to a column and "
+            f"compared against one is ambiguous and the whole UPDATE is rejected."
+        )
+        n_args = len([a for a in args.split(",") if a.strip()])
+        assert max(int(n) for n in used) == n_args, (
+            f"the statement uses ${max(int(n) for n in used)} but {n_args} arguments are passed"
+        )
+
+
 def test_takeover_still_requires_the_pinned_hash_to_match_on_disk():
     """The guard that stops an edit between adoption and Apply from being overwritten."""
     script = (BACKEND / "utils" / "agent_scripts" / "linux_install.sh").read_text()

@@ -1880,11 +1880,43 @@ fetch_and_deploy_keepalived_config() {
     local tmp_conf="${conf}.hom.tmp"
     printf '%s' "$new_conf" > "$tmp_conf"
     chmod 0644 "$tmp_conf"
-    if ! keepalived -t -f "$tmp_conf" >/dev/null 2>&1; then
-        rm -f "$tmp_conf"
-        log "ERROR" "KEEPALIVED: config validation failed (keepalived -t) — keeping current config, not (re)starting"
-        _kp_report "error" "$vip_id" "$new_hash" "keepalived -t failed"
-        return 0
+    # Capture what keepalived actually said. Discarding it made the fail-safe useless in
+    # practice: the node was correctly protected, but neither the log nor the UI could say WHY,
+    # so the only way forward was to reproduce the check by hand on the node. Sanitised hard
+    # (quotes, backslashes and newlines removed, tail kept) because both `log` and _kp_report
+    # embed the text in JSON built by string interpolation.
+    local kp_out kp_err kp_fatal
+    if ! kp_out=$(keepalived -t -f "$tmp_conf" 2>&1); then
+        # keepalived's config-test EXIT CODE does not separate a fatal config error from a
+        # harmless warning. Measured on 2.2.8, not assumed:
+        #     clean config .................. 0
+        #     auth_pass longer than 8 chars . 5   "Truncating auth_pass to 8 characters"
+        #     missing '}' ................... 5   "There are 1 missing '}'s"
+        #     unknown keyword ............... 5   "Unknown keyword '...'"
+        #     script without script_security  6   "SECURITY VIOLATION ..."
+        # So 5 covers both a benign truncation and a broken file, and treating any non-zero
+        # exit as invalid rejected VALID configs: a VRRP password over 8 characters is enough,
+        # and keepalived truncates it to 8 regardless, exactly as it does for the file the
+        # operator already runs. Judge on the OUTPUT instead, dropping only messages known to
+        # be benign; anything unrecognised is still fatal, so this fails CLOSED.
+        if [[ -z "${kp_out//[[:space:]]/}" ]]; then
+            # Non-zero with NOTHING to read. We cannot confirm the reason is benign, and some
+            # builds log to syslog rather than stderr, so proceeding here would silently accept
+            # every config on such a host. Treat as fatal — the gate must fail closed.
+            kp_fatal="keepalived -t exited non-zero without output"
+        else
+            kp_fatal=$(printf '%s\n' "$kp_out" \
+                | grep -v 'Truncating auth_pass to 8 characters' \
+                | grep -v '^[[:space:]]*$' || true)
+        fi
+        if [[ -n "$kp_fatal" ]]; then
+            rm -f "$tmp_conf"
+            kp_err=$(printf '%s' "$kp_fatal" | tr '\n\r\t' '   ' | tr -d '"\\' | tail -c 300)
+            log "ERROR" "KEEPALIVED: config validation failed (keepalived -t): ${kp_err} — keeping current config, not (re)starting"
+            _kp_report "error" "$vip_id" "$new_hash" "keepalived -t failed: ${kp_err}"
+            return 0
+        fi
+        log "WARN" "KEEPALIVED: keepalived -t exited non-zero with only known-benign warnings; proceeding"
     fi
     mv -f "$tmp_conf" "$conf"
     chown root:root "$conf" 2>/dev/null
@@ -3478,11 +3510,26 @@ CONFIG_RESPONSE_EOF
         local tmp_conf="${conf}.hom.tmp"
         printf '%s' "$new_conf" > "$tmp_conf"
         chmod 0644 "$tmp_conf"
-        if ! keepalived -t -f "$tmp_conf" >/dev/null 2>&1; then
-            rm -f "$tmp_conf"
-            log "ERROR" "KEEPALIVED: config validation failed (keepalived -t) — keeping current config, not (re)starting"
-            _kp_report "error" "$vip_id" "$new_hash" "keepalived -t failed"
-            return 0
+        # See the heredoc copy for why the output is captured rather than discarded.
+        # See the heredoc copy for the measured exit-code table and why the OUTPUT, not the
+        # exit code, decides. Fails closed on anything not known to be benign.
+        local kp_out kp_err kp_fatal
+        if ! kp_out=$(keepalived -t -f "$tmp_conf" 2>&1); then
+            if [[ -z "${kp_out//[[:space:]]/}" ]]; then
+                kp_fatal="keepalived -t exited non-zero without output"
+            else
+                kp_fatal=$(printf '%s\n' "$kp_out" \
+                    | grep -v 'Truncating auth_pass to 8 characters' \
+                    | grep -v '^[[:space:]]*$' || true)
+            fi
+            if [[ -n "$kp_fatal" ]]; then
+                rm -f "$tmp_conf"
+                kp_err=$(printf '%s' "$kp_fatal" | tr '\n\r\t' '   ' | tr -d '"\\' | tail -c 300)
+                log "ERROR" "KEEPALIVED: config validation failed (keepalived -t): ${kp_err} — keeping current config, not (re)starting"
+                _kp_report "error" "$vip_id" "$new_hash" "keepalived -t failed: ${kp_err}"
+                return 0
+            fi
+            log "WARN" "KEEPALIVED: keepalived -t exited non-zero with only known-benign warnings; proceeding"
         fi
         mv -f "$tmp_conf" "$conf"
         chown root:root "$conf" 2>/dev/null

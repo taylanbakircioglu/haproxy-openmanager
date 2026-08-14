@@ -1,3 +1,53 @@
+# Upgrade Notes — v1.10.13 (deploy acknowledgements were dropped)
+
+**Backend only, no schema change.** No `SCHEMA_VERSION` bump, no agent change. If you deployed
+v1.10.12, deploy this one too.
+
+- **Regression in v1.10.12.** The takeover-retirement clause added to the keepalived status
+  endpoint reused a query placeholder for both an assignment and a comparison. PostgreSQL types a
+  placeholder per use, so it was deduced as `text` in one place and `character varying` in the
+  other, and asyncpg refused the statement outright.
+- **Symptom:** a VIP stayed at `SYNCING (0/n)` with an empty *Last ack* even though the agent log
+  showed `applied config for VIP <id>` on every member. Teardown acknowledgements were lost the
+  same way, so a deletion never showed as complete.
+- **Nothing was damaged.** The failure was on the write of the acknowledgement, not on the node.
+  Configs were deployed correctly throughout; only the reporting was lost. Existing VIPs converge
+  on the next poll once this is deployed, with no action on the nodes.
+- **Verified against a real PostgreSQL**, not by inspection: both statements execute, a matching
+  hash retires the takeover authorisation, a non-matching hash and a NULL `applied_config_hash`
+  leave it in place, and the acknowledgement is recorded in every case.
+
+**Rollback:** do not roll back to v1.10.12; roll back to v1.10.11 instead, which predates the
+clause entirely.
+
+---
+
+# Upgrade Notes — v1.10.12 (valid config rejected by its own warning)
+
+**Agent-script change, no schema change.** No `SCHEMA_VERSION` bump. After deploying, sync the
+Linux agent script from **Agent Management** and let the agents upgrade, or the fix does not
+reach the nodes.
+
+- **Symptom:** applying a VIP left it stuck at `SYNCING`, the node kept its previous config and
+  the agent logged only `config validation failed (keepalived -t)`.
+- **Cause:** the agent treated any non-zero exit from `keepalived -t` as invalid. keepalived's
+  config-test exit code does not separate fatal from benign: on 2.2.8 a clean config exits 0,
+  while `Truncating auth_pass to 8 characters` exits 5 and so do a missing `}` and an unknown
+  keyword. A VRRP password longer than eight characters was enough to block every apply, even on
+  a node whose own running config emits the same warning.
+- **Fix:** the gate judges the output instead. Known-benign messages are dropped and anything
+  left still fails, so it fails closed. Verified against real keepalived: the truncation warning
+  passes; a missing brace, an unknown keyword and a `SECURITY VIOLATION` are refused.
+- **Also:** the agent now reports what keepalived actually said, in its log and in the status the
+  HA/VIP page shows. The refusal was correct but unactionable without reproducing it by hand.
+- **The fail-safe itself is unchanged:** a config that genuinely fails validation is never
+  written and keepalived is never restarted.
+
+**Rollback:** safe. Reverting restores the stricter gate, which rejects valid configs whose
+password exceeds eight characters.
+
+---
+
 # Upgrade Notes — v1.10.11 (Adoptable tag names the real blocker)
 
 **Frontend only, no schema change.** No `SCHEMA_VERSION` bump, no API change, no agent change.

@@ -1,5 +1,5 @@
 {
-  "version": "1.10.11",
-  "releaseName": "The Adoptable tag names the problem that actually blocks adoption",
+  "version": "1.10.13",
+  "releaseName": "Agent deploy acknowledgements were silently dropped",
   "releaseDate": "2026-08-14"
 }
