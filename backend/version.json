@@ -1,5 +1,5 @@
 {
-  "version": "1.10.8",
-  "releaseName": "VIP adoption takes the whole VRRP instance",
-  "releaseDate": "2026-08-13"
+  "version": "1.10.9",
+  "releaseName": "Adoption refuses to strand a node or normalise a peer's settings",
+  "releaseDate": "2026-08-14"
 }

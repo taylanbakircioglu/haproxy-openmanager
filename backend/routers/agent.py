@@ -2423,17 +2423,31 @@ async def agent_keepalived_status(agent_name: str, status_data: dict, x_api_key:
         state = (status_data.get("state") or "").strip()[:24]
         config_hash = (status_data.get("config_hash") or "")[:64]
         message = status_data.get("message")
+        # v1.10.9 — retire the adoption takeover authorisation once the node CONFIRMS it is
+        # running our rendered config. `takeover_expected_hash` is the permission to overwrite a
+        # keepalived.conf that lacks our ownership marker; it was written at adoption and never
+        # cleared, so it stayed valid indefinitely and "one-shot" was only true in the sense of
+        # "for exactly that file content". Clearing it the moment the member acks OUR hash makes
+        # the claim real: if the file is replaced by hand afterwards the agent refuses and reports
+        # "externally managed", which is the visible behaviour an operator should get.
+        #
+        # Gated on the acked hash MATCHING applied_config_hash, so a partial or failed deploy
+        # never drops the authorisation and leaves the VIP unable to converge.
+        _retire_takeover = ("takeover_expected_hash = CASE WHEN applied_config_hash IS NOT NULL "
+                            "AND {p} = applied_config_hash THEN NULL ELSE takeover_expected_hash END")
         if vip_id is None:
             # No specific VIP (e.g. a teardown ack) — update all this agent's memberships.
-            await conn.execute("""
+            await conn.execute(f"""
                 UPDATE vip_members SET last_deploy_state=$2, last_deploy_message=$3,
-                    last_deploy_hash=$4, last_deploy_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+                    last_deploy_hash=$4, last_deploy_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP,
+                    {_retire_takeover.format(p="$4")}
                 WHERE agent_id=$1
             """, agent['id'], state, message, config_hash)
         else:
-            await conn.execute("""
+            await conn.execute(f"""
                 UPDATE vip_members SET last_deploy_state=$3, last_deploy_message=$4,
-                    last_deploy_hash=$5, last_deploy_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+                    last_deploy_hash=$5, last_deploy_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP,
+                    {_retire_takeover.format(p="$5")}
                 WHERE agent_id=$1 AND vip_id=$2
             """, agent['id'], int(vip_id), state, message, config_hash)
         return {"status": "ok"}

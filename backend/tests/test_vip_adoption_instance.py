@@ -175,11 +175,99 @@ def test_adopt_refuses_a_unicast_peer_that_is_not_being_adopted():
     )
 
 
+def test_adopt_refuses_to_strand_any_node_that_references_the_address():
+    """The half-adoption hole that instance resolution alone does not close.
+
+    Participant resolution can only match a node it can READ, that is ENABLED and that is in the
+    SAME pool. Each of those is a door a real member leaves through silently, and the nodes that
+    remain get rewritten while it keeps serving the same address unmanaged. Seen for real: one
+    node of a pair had a missing closing brace, so it parsed to nothing while its partner parsed
+    cleanly. Rather than guard each door, the endpoint asks whether ANY reported config mentions
+    this address and is not among the nodes being adopted.
+    """
+    body = _adopt_body()
+    assert "raw_config_masked LIKE" in body, (
+        "the check must be scoped to configs that reference THIS virtual address, so an unrelated "
+        "file elsewhere in the fleet does not block every adoption"
+    )
+    assert "NOT (a.id = ANY($2::int[]))" in body, (
+        "the guard must catch every node that is NOT a participant, not just the unparseable "
+        "ones — a disabled agent and a peer in another pool are stranded exactly the same way"
+    )
+    assert "COALESCE(av.is_active, FALSE) = FALSE" in body and "d.is_managed = FALSE" in body, (
+        "a node already under management is not stranded and must not block adoption"
+    )
+    for reason in ("could not be parsed", "agent is disabled", "different agent pool"):
+        assert reason in body, f"the refusal must be able to explain '{reason}'"
+
+
+@pytest.mark.parametrize("field,label", [
+    ("prefix_length", "prefix length"),
+    ("use_unicast", "unicast/multicast mode"),
+    ("track_haproxy", "HAProxy tracking"),
+])
+def test_adopt_requires_agreement_on_shared_vip_fields(field, label):
+    """These live on the VIP row and are re-rendered onto EVERY member, so taking them from the
+    node that happened to be clicked imposes its settings on the others. prefix_length is the
+    sharpest: the design refuses to guess a netmask for a live VIP, and copying one node's
+    netmask onto another is that same change by another name."""
+    body = _adopt_body()
+    assert f'("{field}", "{label}")' in body, (
+        f"{field} is written to the VIP row from one node's report; adoption must refuse when the "
+        f"nodes disagree about it"
+    )
+
+
+def test_adopt_requires_one_shared_vrrp_password():
+    body = _adopt_body()
+    assert "decrypt_vrrp_secret(enc)" in body, (
+        "Fernet is non-deterministic, so the per-node tokens cannot be compared as ciphertext — "
+        "they must be decrypted and compared as plaintext"
+    )
+    assert "do not share one VRRP password" in body, (
+        "adoption stores ONE secret and renders it onto every member, so a mismatch must be "
+        "refused rather than silently normalised"
+    )
+    assert "cannot be decrypted" in body, (
+        "a token we cannot decrypt must be an error, not silently treated as equal to another"
+    )
+
+
 def test_adopt_requires_reported_ips_before_trusting_the_peer_check():
     body = _adopt_body()
     assert "have not reported an IP address yet" in body, (
         "the unicast peer check compares against member IPs, so a member without a reported IP "
         "must block the check rather than silently pass it"
+    )
+
+
+# ----------------------------------------------------------------------------
+# The takeover authorisation is genuinely one-shot
+# ----------------------------------------------------------------------------
+
+def test_takeover_authorisation_is_retired_once_the_node_acks_our_config():
+    """`takeover_expected_hash` is the permission to overwrite a keepalived.conf that does NOT
+    carry our ownership marker. It was written at adoption and never cleared, so the release
+    notes' "authorises exactly ONE takeover" was only true as "for exactly that file content,
+    indefinitely" — restoring the pre-adoption file would have been silently overwritten again
+    with no fresh human approval."""
+    agent_router = (BACKEND / "routers" / "agent.py").read_text()
+    assert "takeover_expected_hash = CASE WHEN applied_config_hash IS NOT NULL" in agent_router, (
+        "the status ack must retire the takeover authorisation once the node confirms our config"
+    )
+    assert "ELSE takeover_expected_hash END" in agent_router, (
+        "a non-matching ack must LEAVE the authorisation in place — dropping it on a partial or "
+        "failed deploy would leave the VIP unable to converge"
+    )
+
+
+def test_takeover_still_requires_the_pinned_hash_to_match_on_disk():
+    """The guard that stops an edit between adoption and Apply from being overwritten."""
+    script = (BACKEND / "utils" / "agent_scripts" / "linux_install.sh").read_text()
+    guard = '[[ "$allow_takeover" == "true" && -n "$expected_hash" && "$disk_hash" == "$expected_hash" ]]'
+    assert script.count(guard) == 2, (
+        f"the takeover guard must be present in BOTH daemon copies (found {script.count(guard)}); "
+        f"a self-upgraded agent runs the in-script copy, a freshly installed one the heredoc"
     )
 
 

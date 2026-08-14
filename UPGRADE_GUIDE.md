@@ -1,3 +1,31 @@
+# Upgrade Notes — v1.10.9 (Adoption refuses to strand a node)
+
+**Backend + frontend, no schema change.** No `SCHEMA_VERSION` bump, so the built-in roles are
+**not** re-seeded. No agent change.
+
+- **Adoption will not leave a node behind.** v1.10.8 resolved the whole VRRP instance, but only
+  from nodes it could parse, that were enabled and that were in the same pool. Anything else fell
+  out of the set silently while its peers were rewritten. Adoption now refuses if any reported
+  `keepalived.conf` mentions the virtual address and is not among the nodes being taken over, and
+  says which node and why.
+- **The nodes must agree on the shared fields.** `prefix_length`, unicast/multicast mode, HAProxy
+  tracking and the VRRP password live on the VIP and are re-rendered onto every member, so one
+  node's value used to be imposed on the rest. A disagreement is now refused with both values
+  shown.
+- **The takeover authorisation is now retired on acknowledgement.** It is the permission to
+  overwrite a `keepalived.conf` that does not carry our marker. It was never cleared, so it stayed
+  valid for that exact file content indefinitely; restoring the pre-adoption file would have been
+  overwritten again without fresh approval. It is now dropped once the member acks our rendered
+  config, gated on the acked hash matching `applied_config_hash` so a failed deploy cannot strand
+  the VIP.
+- **Nothing to do on upgrade.** Existing adopted VIPs keep working; their authorisation is retired
+  on the next successful acknowledgement.
+
+**Rollback:** safe. No schema or data migration; reverting restores the previous (more permissive)
+adoption checks.
+
+---
+
 # Upgrade Notes — v1.10.8 (VIP adoption takes the whole VRRP instance)
 
 **Backend + frontend, no schema change.** No `SCHEMA_VERSION` bump, so the built-in roles are

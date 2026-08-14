@@ -1106,6 +1106,7 @@ async def _collect_instance_participants(conn, *, pool_id: int, vrid: int, virtu
     """
     rows = await conn.fetch("""
         SELECT d.agent_id, d.config_hash, d.analysis, d.parse_error, d.adopted_vip_id,
+               d.auth_pass_encrypted,
                a.name AS agent_name, a.ip_address, av.is_active AS adopted_vip_active
         FROM vip_discoveries d
         JOIN agents a ON a.id = d.agent_id
@@ -1131,6 +1132,7 @@ async def _collect_instance_participants(conn, *, pool_id: int, vrid: int, virtu
                 participants.append({
                     "agent_id": r["agent_id"], "agent_name": r["agent_name"],
                     "ip_address": r["ip_address"], "config_hash": r["config_hash"],
+                    "auth_pass_encrypted": r["auth_pass_encrypted"],
                     "candidate": cand,
                 })
                 break
@@ -1243,6 +1245,93 @@ async def adopt_vip(payload: dict, request: Request, authorization: str = Header
             if not (p["candidate"].get("member") or {}).get("network_interface"):
                 raise HTTPException(status_code=422,
                                     detail=f"{p['agent_name']} does not declare an interface for this instance")
+
+        # STRANDING GUARD. Participant resolution can only match a node it can READ, that is
+        # ENABLED, and that is in THIS pool. Every one of those is a door through which a real
+        # member of the VRRP group leaves the set silently — and a silent exit is the whole
+        # failure mode this release exists to close, because the nodes we do adopt get rewritten
+        # while the one that left keeps running an unmanaged config on the same address.
+        #
+        # So rather than guard each door, ask the question directly: is there any reported
+        # keepalived.conf that mentions THIS virtual address and is not among the nodes we are
+        # about to adopt? Scoping on the address keeps an unrelated file elsewhere in the fleet
+        # from blocking every adoption.
+        #
+        # Two exclusions are legitimate rather than stranding:
+        #   * a node already held by a VIP that still STANDS is under management already — and it
+        #     cannot be this instance, because uq_vip_vrid_active forbids a second active VIP with
+        #     this VRID in the pool (the clash check above would have refused first);
+        #   * a node whose file carries our ownership marker (is_managed) is ours already.
+        adopted_ids = [p["agent_id"] for p in participants]
+        stranded = await conn.fetch("""
+            SELECT a.name AS agent_name, a.pool_id, COALESCE(a.enabled, TRUE) AS enabled,
+                   d.parse_error
+            FROM vip_discoveries d
+            JOIN agents a ON a.id = d.agent_id
+            LEFT JOIN vip_instances av ON av.id = d.adopted_vip_id
+            WHERE d.raw_config_masked LIKE '%' || $1 || '%'
+              AND NOT (a.id = ANY($2::int[]))
+              AND COALESCE(av.is_active, FALSE) = FALSE
+              AND d.is_managed = FALSE
+            ORDER BY a.name
+        """, virtual_ip, adopted_ids)
+        if stranded:
+            def _why(r):
+                if r["parse_error"]:
+                    return f"its config could not be parsed: {r['parse_error']}"
+                if not r["enabled"]:
+                    return "the agent is disabled, so it can never receive a config"
+                if r["pool_id"] != disc["pool_id"]:
+                    return "it is in a different agent pool, and a VIP's members must share one pool"
+                return "it does not report this vrrp_instance"
+            named = "; ".join(f"{r['agent_name']} — {_why(r)}" for r in stranded)
+            raise HTTPException(status_code=422, detail=(
+                f"These node(s) also reference {virtual_ip} but cannot be taken over with the rest "
+                f"of the instance, so adopting now would rewrite the others and leave them running "
+                f"an unmanaged config on the same address: {named}. Resolve that first, then adopt."))
+
+        # AGREEMENT ON THE SHARED VIP FIELDS. Everything below is stored once on the VIP row and
+        # re-rendered onto EVERY member, so a value taken from the node that happened to be
+        # clicked would be imposed on nodes whose own file said something else. prefix_length is
+        # the sharpest: the design refuses to GUESS a netmask for a live VIP, and quietly copying
+        # one node's netmask onto another is the same change by another name.
+        def _vfield(p, key):
+            return (p["candidate"].get("vip") or {}).get(key)
+
+        for key, label in (("prefix_length", "prefix length"),
+                           ("use_unicast", "unicast/multicast mode"),
+                           ("track_haproxy", "HAProxy tracking")):
+            seen = {}
+            for p in participants:
+                seen.setdefault(_vfield(p, key), []).append(p["agent_name"])
+            if len(seen) > 1:
+                spread = "; ".join(f"{v!r}: {', '.join(names)}" for v, names in seen.items())
+                raise HTTPException(status_code=422, detail=(
+                    f"The nodes of this instance disagree on {label} ({spread}). One value is "
+                    f"stored on the VIP and re-rendered onto every member, so adopting would "
+                    f"impose one node's setting on the others. Align the files first."))
+
+        # The VRRP secret is stored per discovery as its own Fernet token, and Fernet is
+        # non-deterministic, so the ciphertexts cannot be compared — decrypt and compare the
+        # plaintexts. Nothing is logged. A node we cannot decrypt is treated as a mismatch rather
+        # than assumed equal.
+        secrets = {}
+        for p in participants:
+            enc = p.get("auth_pass_encrypted")
+            plain = decrypt_vrrp_secret(enc) if enc else None
+            if enc and not plain:
+                raise HTTPException(status_code=409, detail=(
+                    f"The VRRP secret reported by {p['agent_name']} cannot be decrypted "
+                    f"(encryption key changed?). Re-report or fix that node before adopting."))
+            secrets.setdefault(plain, []).append(p["agent_name"])
+        if len(secrets) > 1:
+            groups = "; ".join(
+                ("no password: " if k is None else "one password: ") + ", ".join(v)
+                for k, v in secrets.items())
+            raise HTTPException(status_code=422, detail=(
+                f"The nodes of this instance do not share one VRRP password ({groups}). "
+                f"Adoption stores a single secret and renders it onto every member, so it would "
+                f"silently change authentication on the others. Align the files first."))
 
         # keepalived requires one MASTER and a matching advertisement interval across the group.
         # Both are checked here so the operator learns at adoption time instead of at apply.

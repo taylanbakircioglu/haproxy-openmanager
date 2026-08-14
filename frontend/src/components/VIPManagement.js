@@ -186,10 +186,24 @@ const VIPManagement = () => {
     const blockers = g.members.flatMap((m) => m.candidate?.blockers || []);
     const { hard, loss, prefix } = splitBlockers(blockers);
     const masters = g.members.filter((m) => m.candidate?.member?.role === 'MASTER').length;
+    // Any reported config that mentions this address but is NOT one of this group's nodes would
+    // be left behind when the others are taken over — unparseable, agent disabled, different
+    // pool. The endpoint refuses on exactly that question, so ask it here too rather than letting
+    // the operator click into a 422. This list is cluster-scoped, so a peer in another pool is
+    // invisible from here; the endpoint still catches it.
+    const inGroup = new Set(g.members.map((m) => m.discovery.agent_id));
+    const strandedPeers = g.vip?.virtual_ip
+      ? discoveries.filter((d) => !inGroup.has(d.agent_id)
+          && (d.config_preview || '').includes(g.vip.virtual_ip))
+      : [];
     let reason = null;
     if (parseFailed.length) reason = `${parseFailed.map((m) => m.discovery.agent_name).join(', ')}: config could not be parsed`;
     else if (noCandidate.length) reason = 'no vrrp_instance in the report';
-    else if (hard.length) reason = hard.join(' · ');
+    else if (strandedPeers.length) {
+      reason = `${strandedPeers.map((d) => d.agent_name).join(', ')} reference ${g.vip.virtual_ip} `
+        + 'but their config could not be parsed — fix those nodes first, or they would be left '
+        + 'running an unmanaged config';
+    } else if (hard.length) reason = hard.join(' · ');
     else if (masters !== 1) {
       reason = masters === 0
         ? 'no node in this instance declares state MASTER — enable the missing node\'s agent so it reports its config'
