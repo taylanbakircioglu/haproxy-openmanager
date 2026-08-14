@@ -1,3 +1,26 @@
+# Upgrade Notes — v1.10.14 (a converged node keeps acknowledging)
+
+**Agent-script change, no schema change.** No `SCHEMA_VERSION` bump. After deploying, sync the
+Linux agent script from **Agent Management** and let the agents upgrade, or the fix does not
+reach the nodes.
+
+- **Symptom:** a VIP shows `SYNCING (0/n)` with an empty *Last ack* even though every member node
+  has the rendered `keepalived.conf` on disk, keepalived is running and the VIP is held.
+- **Cause:** the deploy report was sent only when the agent actually wrote the config. Once the
+  node matched, it took the idempotency early return every cycle and never reported again, so any
+  report lost in transit was never retried and the server's view stayed stale permanently.
+- **Fix:** the agent re-asserts its state on the idempotent path as well. One request per node
+  per poll cycle (~2.5 min); nothing is written and keepalived is not reloaded.
+- **Recovery is automatic.** A VIP stuck at SYNCING converges on the first poll after the agents
+  pick up the new script. No action on the nodes, no re-apply, no edit to force a rewrite.
+- **This is not new in 1.10.12.** The gap dates from the original HA/VIP work; it only became
+  visible when acknowledgements were dropped for an unrelated reason.
+
+**Rollback:** safe. Reverting restores the previous behaviour, in which a lost acknowledgement is
+never recovered.
+
+---
+
 # Upgrade Notes — v1.10.13 (deploy acknowledgements were dropped)
 
 **Backend only, no schema change.** No `SCHEMA_VERSION` bump, no agent change. If you deployed

@@ -335,6 +335,31 @@ def test_validation_failure_reports_what_keepalived_said():
     )
 
 
+def test_converged_node_keeps_acknowledging():
+    """The idempotent path must still report, or a lost ack is never recovered.
+
+    The status report is the server's ONLY evidence that a member converged, and it used to be
+    sent solely on the write path. Once the rendered config was on disk the agent took the
+    idempotency early return every cycle and never spoke again, so a single lost report - a
+    backend restart, a 5xx, a network blip - left the VIP reading SYNCING forever with an empty
+    "Last ack" while the node was demonstrably running the right config. Seen in the field after
+    acks were dropped for an unrelated reason: the node was correct, the page was not, and
+    nothing would ever reconcile them.
+    """
+    script = (BACKEND / "utils" / "agent_scripts" / "linux_install.sh").read_text()
+    assert script.count('_kp_report "enabled" "$vip_id" "$new_hash" "already converged"') == 2, (
+        "both daemon copies must re-assert the deploy state on the idempotent path; without it "
+        "the server can never recover a lost acknowledgement"
+    )
+    # The report has to come BEFORE the early return in both copies.
+    for m in re.finditer(r'if \[\[ -n "\$cur_hash" && "\$cur_hash" == "\$would_hash" \]\]; then(.*?)fi',
+                         script, re.S):
+        body = m.group(1)
+        assert body.index("_kp_report") < body.index("return 0"), (
+            "the acknowledgement must be sent before returning, or the early return skips it"
+        )
+
+
 def test_status_ack_statements_bind_each_placeholder_once():
     """Every `$n` in the keepalived-status UPDATEs must be used exactly once, and the count must
     match the arguments passed.

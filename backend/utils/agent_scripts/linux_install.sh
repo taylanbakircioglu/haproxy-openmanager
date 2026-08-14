@@ -1865,6 +1865,13 @@ fetch_and_deploy_keepalived_config() {
         cur_hash=$(md5sum "$conf" 2>/dev/null | awk '{print $1}')
         would_hash=$(printf '%s' "$new_conf" | md5sum 2>/dev/null | awk '{print $1}')
         if [[ -n "$cur_hash" && "$cur_hash" == "$would_hash" ]]; then
+            # STILL ACK. This report is the server's only evidence that the node converged, and
+            # it used to be sent on the write path alone — so a single lost ack (a backend
+            # restart, a 5xx, a network blip) left the VIP reading SYNCING forever: the node was
+            # already correct on disk, took this early return every cycle, and never spoke again.
+            # Re-asserting the state makes the loop self-healing, costs one request per ~2.5
+            # minutes, and touches nothing on the node.
+            _kp_report "enabled" "$vip_id" "$new_hash" "already converged"
             return 0
         fi
     fi
@@ -3495,6 +3502,9 @@ CONFIG_RESPONSE_EOF
             cur_hash=$(md5sum "$conf" 2>/dev/null | awk '{print $1}')
             would_hash=$(printf '%s' "$new_conf" | md5sum 2>/dev/null | awk '{print $1}')
             if [[ -n "$cur_hash" && "$cur_hash" == "$would_hash" ]]; then
+                # See the heredoc copy: the ack must be re-asserted here or a single lost report
+                # leaves the VIP reading SYNCING forever.
+                _kp_report "enabled" "$vip_id" "$new_hash" "already converged"
                 return 0
             fi
         fi

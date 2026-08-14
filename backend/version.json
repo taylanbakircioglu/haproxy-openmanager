@@ -1,5 +1,5 @@
 {
-  "version": "1.10.13",
-  "releaseName": "Agent deploy acknowledgements were silently dropped",
+  "version": "1.10.14",
+  "releaseName": "A converged node keeps acknowledging, so a lost report self-heals",
   "releaseDate": "2026-08-14"
 }
