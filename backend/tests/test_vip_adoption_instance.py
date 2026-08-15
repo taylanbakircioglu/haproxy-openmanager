@@ -429,3 +429,213 @@ def test_vip_version_transition_matches_any_action():
     assert 'f"vip-{vip_id}-%"' in VIP_ROUTER, (
         "the PENDING -> APPLIED/REJECTED transition must match every action for the VIP"
     )
+
+
+# ----------------------------------------------------------------------------
+# v1.11.1 — a discovery report that was never accepted must be retried
+# ----------------------------------------------------------------------------
+
+def test_discovery_is_cached_only_when_the_server_accepted_it():
+    """`curl` without -f exits 0 on 500/403/404, so the previous `if curl ...` recorded a
+    REJECTED discovery as delivered. The cache then suppressed every later attempt, and since
+    the file never changes on its own the node stayed out of the adoption panel permanently:
+    the only cure was deleting the cache on the node by hand."""
+    script = (BACKEND / "utils" / "agent_scripts" / "linux_install.sh").read_text()
+    assert "if curl -k -s --connect-timeout 10 --max-time 30 -o /dev/null -X POST" not in script, (
+        "the discovery POST must not be judged by curl's exit code; it is 0 for 5xx as well"
+    )
+    assert script.count('if [[ "$disc_code" =~ ^2[0-9][0-9]$ ]]; then') == 2, (
+        "both daemon copies must cache only on a 2xx"
+    )
+
+
+def test_discovery_cache_defers_to_the_server():
+    """Recovery without touching the node. The server reports whether it actually holds a
+    discovery for this agent; only an explicit `false` overrides the cache, so a backend older
+    than v1.11.1 (which omits the field) keeps the previous behaviour instead of being flooded
+    with re-posts."""
+    script = (BACKEND / "utils" / "agent_scripts" / "linux_install.sh").read_text()
+    agent_router = (BACKEND / "routers" / "agent.py").read_text()
+
+    assert agent_router.count('AS discovery_known') == 1, (
+        "the keepalived-config query must report whether a discovery row exists"
+    )
+    assert agent_router.count('"discovery_known": bool(agent["discovery_known"])') == 5, (
+        "every response path that knows the agent must carry the flag — the adoptable nodes are "
+        "precisely the not_configured ones"
+    )
+    assert script.count('jq -r \'if has("discovery_known")') == 2
+    assert script.count('[[ "$disc_known" != "false" ]] && return 0') == 2, (
+        "only an explicit false may override the cache, or an older backend — which omits the "
+        "field — would cause a re-post on every cycle"
+    )
+    assert script.count('conf chk disc_known=""') == 2, (
+        "disc_known must be function-local; in the in-script daemon the enclosing scope is the "
+        "poll loop, so a stale value would outlive the response it came from"
+    )
+
+
+def test_keepalived_config_path_is_resolved_deterministically():
+    """A pool may hold more than one cluster, and the join multiplies the agent row. Without an
+    ordering the fetch took an arbitrary cluster, so the keepalived.conf PATH handed to the agent
+    was non-deterministic whenever two clusters in a pool disagreed on it: the agent would look at
+    the wrong file, find nothing, and the node would never appear for adoption."""
+    src = (BACKEND / "routers" / "agent.py").read_text()
+    start = src.index("async def get_agent_keepalived_config")
+    q_start = src.index('agent = await conn.fetchrow("""', start)
+    query = src[q_start:src.index('""", agent_name)', q_start)]
+    assert "LEFT JOIN haproxy_clusters" in query, "re-point this test; the join moved"
+    assert "ORDER BY" in query and "LIMIT 1" in query, (
+        "the cluster row must be picked deterministically, or the config path the agent is told "
+        "to inspect can change between polls"
+    )
+    assert "hc.keepalived_config_path = '/etc/keepalived/keepalived.conf'" in query, (
+        "the ordering must prefer a CUSTOMISED path over the shipped default. The column defaults "
+        "to that path rather than NULL, so ordering by id alone could pick a default-valued row "
+        "over one the operator deliberately set, turning 'undefined' into 'reliably wrong'."
+    )
+
+
+def test_daemon_copies_agree_on_the_whole_keepalived_path():
+    """Everything the adoption flow depends on must behave identically on BOTH install routes:
+    a freshly installed agent runs the heredoc body, a self-upgraded one runs the in-script
+    daemon. Comments may differ; logic may not."""
+    import difflib
+    lines = (BACKEND / "utils" / "agent_scripts" / "linux_install.sh").read_text().splitlines()
+    term = next(i for i, l in enumerate(lines) if l.strip() == "AGENT_SCRIPT")
+
+    def strip_comment(s):
+        out, q, esc = [], None, False
+        for ch in s:
+            if esc:
+                out.append(ch); esc = False; continue
+            if ch == "\\":
+                out.append(ch); esc = True; continue
+            if q:
+                out.append(ch)
+                if ch == q:
+                    q = None
+                continue
+            if ch in ('"', "'"):
+                q = ch; out.append(ch); continue
+            if ch == "#":
+                break
+            out.append(ch)
+        return "".join(out).rstrip()
+
+    def funcs(block):
+        found = {}
+        for idx, l in enumerate(block):
+            m = re.match(r"^(\s*)([a-zA-Z_][a-zA-Z0-9_]*)\(\)\s*\{\s*(#.*)?$", l)
+            if not m:
+                continue
+            close = m.group(1) + "}"
+            end = next((j for j in range(idx + 1, len(block)) if block[j].rstrip() == close), None)
+            if end is None:
+                continue
+            found[m.group(2)] = [re.sub(r"\s+", " ", strip_comment(x).strip())
+                                 for x in block[idx + 1:end] if strip_comment(x).strip()]
+        return found
+
+    here, insc = funcs(lines[923:term]), funcs(lines[term + 1:])
+    for name in ("_kp_discover", "_kp_report", "_kp_teardown",
+                 "fetch_and_deploy_keepalived_config", "get_keepalive_state"):
+        assert name in here and name in insc, f"{name} is missing from one daemon copy"
+        if here[name] != insc[name]:
+            d = "\n".join(x for x in difflib.unified_diff(here[name], insc[name], lineterm="")
+                          if x[:1] in "+-" and x[:3] not in ("+++", "---"))
+            raise AssertionError(
+                f"{name}() differs between the daemon copies, so a self-upgraded agent would "
+                f"behave differently from a freshly installed one:\n{d}"
+            )
+
+
+def test_discovery_flag_distinguishes_false_from_absent():
+    """jq's `//` returns the alternative for **false** as well as null.
+
+    `.discovery_known // empty` therefore yields an empty string both when the backend omits the
+    field (older release) and when it explicitly says `false` (no discovery on record) — the one
+    case the recovery exists for. Written that way the fix is inert: the cache is never overridden
+    and a stuck node stays hidden. Caught in review, before it shipped, by parsing a real response
+    rather than passing the value in by hand.
+    """
+    script = (BACKEND / "utils" / "agent_scripts" / "linux_install.sh").read_text()
+    assert "'.discovery_known // empty'" not in script, (
+        "jq's // treats false like null, so this cannot tell 'no record' from 'old backend'"
+    )
+    expected = ('disc_known=$(echo "$resp" | jq -r \'if has("discovery_known") '
+                'then (.discovery_known|tostring) else "" end\' 2>/dev/null)')
+    assert script.count(expected) == 2, (
+        "both daemon copies must distinguish an explicit false from an absent field"
+    )
+
+
+def test_discovery_backs_off_on_a_permanent_rejection():
+    """A 4xx means the payload itself is unacceptable, so re-posting the same bytes cannot help.
+
+    Retrying forever is not free here: 4xx and 5xx agent calls are never sampled out of the
+    request log (see request_log_sink), so an unattended loop writes a row carrying the whole
+    keepalived.conf every poll cycle, on every affected node — the exact "polling noise evicts
+    the forensic record" failure the log's own defaults exist to prevent. The cache therefore
+    records the rejection and stays quiet until the file changes; a 5xx or a transport failure
+    is still retried, which is what the recovery depends on.
+    """
+    script = (BACKEND / "utils" / "agent_scripts" / "linux_install.sh").read_text()
+    brake = ('elif [[ "$disc_code" == "400" || "$disc_code" == "413" '
+             '|| "$disc_code" == "422" ]]; then')
+    assert script.count(brake) == 2, (
+        "the brake must be limited to the codes that mean 'these bytes are unacceptable'"
+    )
+    # 401 and 404 are 4xx but TRANSIENT here: a token rotation, or an agent row briefly absent
+    # while it re-registers. Braking on them would silence discovery for every affected node
+    # until its keepalived.conf changed, which for a hand-maintained file may be never — the
+    # exact failure this release removes.
+    for transient in ('"401"', '"404"'):
+        assert transient not in brake, (
+            f"{transient} must stay in the retry class; it does not mean the payload is bad"
+        )
+    assert script.count("""printf '%s rejected' "$cur_hash" > "$cache" 2>/dev/null""") == 2
+    assert script.count('[[ "$cached_state" == "rejected" ]] && return 0') == 2, (
+        "a recorded rejection must suppress the post even when the server reports no record, "
+        "or the flag override turns into an unbounded retry loop"
+    )
+    # The rejection must be keyed to the CONTENT, so a fixed config is retried.
+    assert script.count('cached_hash="${cached_line%% *}"') == 2, (
+        "the rejection is stored against the hash; changing the file must clear the brake"
+    )
+
+
+def test_config_import_reaches_a_freshly_installed_agent():
+    """`check_config_requests` uploads the node's live haproxy.cfg when the operator asks for it.
+
+    It was defined in the installer body and in the in-script daemon, but NOT in the heredoc a
+    fresh install writes to /usr/local/bin/haproxy-agent. Its call site is guarded by
+    `type check_config_requests`, so on a freshly installed agent the whole feature was a silent
+    no-op: the operator requested a config from the node and nothing ever arrived, with no error.
+    Agents that had self-upgraded at least once did have it, which is why it went unnoticed.
+    """
+    lines = (BACKEND / "utils" / "agent_scripts" / "linux_install.sh").read_text().splitlines()
+    term = next(i for i, l in enumerate(lines) if l.strip() == "AGENT_SCRIPT")
+    pattern = re.compile(r"^\s*check_config_requests\(\)\s*\{")
+
+    in_heredoc = sum(1 for l in lines[923:term] if pattern.match(l))
+    in_daemon = sum(1 for l in lines[term + 1:] if pattern.match(l))
+    assert in_heredoc == 1, (
+        "the heredoc a fresh install writes must define check_config_requests, or Config Import "
+        "silently does nothing on any node that has never self-upgraded"
+    )
+    assert in_daemon == 1, "the self-upgrade daemon must keep its definition"
+
+    # And the two must be the same function, not two drifting implementations.
+    def body(block):
+        idx = next(i for i, l in enumerate(block) if pattern.match(l))
+        out = []
+        for l in block[idx:]:
+            out.append(l.strip())
+            if l.strip() == "}" and len(out) > 5:
+                break
+        return out
+
+    assert body(lines[923:term]) == body(lines[term + 1:]), (
+        "the two copies of check_config_requests have drifted"
+    )

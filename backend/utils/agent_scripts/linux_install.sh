@@ -1691,7 +1691,7 @@ check_ssl_updates() {
 # (kept in sync with the live token in both daemon loops).
 fetch_and_deploy_keepalived_config() {
     local marker="# Managed by HAProxy OpenManager"
-    local resp status http_code we_own="false" conf chk
+    local resp status http_code we_own="false" conf chk disc_known=""
 
     # Timeouts so a hung management server can never stall the daemon loop.
     resp=$(curl -k -s --connect-timeout 10 --max-time 30 -w '\n%{http_code}' -X GET \
@@ -1710,6 +1710,9 @@ fetch_and_deploy_keepalived_config() {
     [[ -z "$conf" || "$conf" == "null" ]] && conf="/etc/keepalived/keepalived.conf"
     chk="$(dirname "$conf")/check_haproxy.sh"
     if [[ -f "$conf" ]] && grep -q "$marker" "$conf" 2>/dev/null; then we_own="true"; fi
+    # Whether the SERVER already holds a discovery for this node. Absent on backends older than
+    # v1.11.1, in which case the discovery cache keeps its previous meaning.
+    disc_known=$(echo "$resp" | jq -r 'if has("discovery_known") then (.discovery_known|tostring) else "" end' 2>/dev/null)
 
     # v1.10.4 — VIP adoption discovery. Report a keepalived.conf we do NOT own so an existing
     # VIP can be adopted from the UI instead of retyped. STRICTLY READ-ONLY: this never writes
@@ -1724,28 +1727,75 @@ fetch_and_deploy_keepalived_config() {
         if [[ "$we_own" == "true" || ! -f "$conf" ]]; then
             # Nothing adoptable here. Clear a previous report exactly once.
             [[ -f "$cache" ]] || return 0
-            curl -k -s --connect-timeout 10 --max-time 30 -X POST \
-                "$MANAGEMENT_URL/api/agents/$AGENT_NAME/keepalived-discovery" \
+            # Clear ONLY when the server accepted it. curl's exit code is 0 for 5xx too, so
+            # dropping the cache on a rejected clear lost the fact that this node is ours: the
+            # stale discovery row would keep offering a MANAGED node for adoption, and with the
+            # cache gone nothing would ever send the clear again.
+            local clr_code
+            clr_code=$(curl -k -s --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' \
+                -X POST "$MANAGEMENT_URL/api/agents/$AGENT_NAME/keepalived-discovery" \
                 -H "X-API-Key: $AGENT_TOKEN" -H "Content-Type: application/json" \
-                -d "{\"config_path\":\"$conf\",\"exists\":false}" >/dev/null 2>&1 || return 0
+                -d "{\"config_path\":\"$conf\",\"exists\":false}" 2>/dev/null)
+            [[ "$clr_code" =~ ^2[0-9][0-9]$ ]] || return 0
             rm -f "$cache"
             return 0
         fi
         cur_hash=$(md5sum "$conf" 2>/dev/null | awk '{print $1}')
         [[ -z "$cur_hash" ]] && return 0
-        [[ -f "$cache" && "$(cat "$cache" 2>/dev/null)" == "$cur_hash" ]] && return 0
+        # The cache may only suppress a report while the SERVER agrees it already holds one.
+        # v1.11.1: it suppressed unconditionally, so a report the server REJECTED was recorded
+        # as delivered and the node stayed out of the adoption panel for good — the file never
+        # changes, so nothing ever triggered another attempt and the only cure was deleting this
+        # file on the node by hand. `discovery_known` is absent on older backends, and only an
+        # explicit "false" overrides the cache, so an old server keeps the previous behaviour
+        # rather than being flooded with re-posts.
+        # Cache line is "<hash>" after a success, or "<hash> rejected" after a 4xx.
+        local cached_line cached_hash cached_state=""
+        cached_line=$(cat "$cache" 2>/dev/null)
+        cached_hash="${cached_line%% *}"
+        [[ "$cached_line" == *" "* ]] && cached_state="${cached_line#* }"
+        if [[ -n "$cached_hash" && "$cached_hash" == "$cur_hash" ]]; then
+            # A 4xx means the server refuses THESE BYTES. Re-posting them cannot succeed, and
+            # every attempt is stored as a failed agent call (4xx/5xx are never sampled out), so
+            # an unattended loop would write a row carrying the whole config every cycle. Stay
+            # quiet until the file changes — the reason was logged when it was rejected.
+            [[ "$cached_state" == "rejected" ]] && return 0
+            # Otherwise the cache only holds while the SERVER agrees it has the report.
+            [[ "$disc_known" != "false" ]] && return 0
+        fi
         # jq -Rs makes the file a single JSON string with its newlines intact, so the content the
         # server hashes is byte-identical to what is on disk — the takeover authorisation is
         # pinned to that hash.
         content_json=$(jq -Rs . < "$conf" 2>/dev/null) || return 0
         body=$(jq -n --arg p "$conf" --argjson c "$content_json" \
             '{config_path:$p, exists:true, is_managed:false, config_content:$c}' 2>/dev/null) || return 0
-        if curl -k -s --connect-timeout 10 --max-time 30 -o /dev/null -X POST \
-            "$MANAGEMENT_URL/api/agents/$AGENT_NAME/keepalived-discovery" \
+        # Cache ONLY on a 2xx. curl without -f exits 0 on 500/403/404 too, so the previous
+        # `if curl ...` recorded a REJECTED report as delivered — and since the cache suppresses
+        # every later attempt until the file itself changes, one server-side error hid the node
+        # from the adoption panel permanently. Same failure shape as the deploy acknowledgement
+        # fixed in v1.10.14, on the discovery path.
+        local disc_code
+        disc_code=$(curl -k -s --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' \
+            -X POST "$MANAGEMENT_URL/api/agents/$AGENT_NAME/keepalived-discovery" \
             -H "X-API-Key: $AGENT_TOKEN" -H "Content-Type: application/json" \
-            --data-binary "$body" 2>/dev/null; then
+            --data-binary "$body" 2>/dev/null)
+        if [[ "$disc_code" =~ ^2[0-9][0-9]$ ]]; then
             printf '%s' "$cur_hash" > "$cache" 2>/dev/null
             log "INFO" "KEEPALIVED: reported an unmanaged keepalived.conf for adoption"
+        elif [[ "$disc_code" == "400" || "$disc_code" == "413" || "$disc_code" == "422" ]]; then
+            # ONLY the codes that mean "these bytes are unacceptable" stop the retry: too large
+            # to analyse, malformed, rejected by validation. Re-posting identical content cannot
+            # change any of those answers.
+            #
+            # 401 and 404 are deliberately NOT here even though they are 4xx. Both are transient
+            # in this system — a token rotation, or an agent row briefly absent while it
+            # re-registers — and treating them as permanent would silence discovery for every
+            # affected node until its keepalived.conf changed, which for a hand-maintained file
+            # may be never. That is the exact failure this release set out to remove.
+            printf '%s rejected' "$cur_hash" > "$cache" 2>/dev/null
+            log "WARN" "KEEPALIVED: discovery report refused (HTTP $disc_code); not retrying until the config changes"
+        else
+            log "WARN" "KEEPALIVED: discovery report failed (HTTP ${disc_code:-none}); will retry next cycle"
         fi
     }
     _kp_discover
@@ -2193,6 +2243,95 @@ UPGRADE_EOF
 }
 
 # Check and apply configuration updates (Linux)
+# Config Import: upload this node's live haproxy.cfg when the operator asks for it.
+#
+# This function existed ONLY in the installer body and in the in-script daemon, never in the
+# heredoc that a FRESH install writes to /usr/local/bin/haproxy-agent. The call site below is
+# guarded by `type check_config_requests`, so on a freshly installed agent the whole feature
+# was a silent no-op: the operator requested a config from the node and nothing ever arrived,
+# with no error anywhere. Agents that had self-upgraded at least once did have it, which is why
+# it went unnoticed. Copied verbatim from the in-script daemon so both install routes behave
+# identically (v1.11.1).
+check_config_requests() {
+    local curl_bin="${CURL_BIN:-$(find_binary curl)}"
+    
+    # Get pending config requests from backend
+    log "DEBUG" "CONFIG: Checking for pending config requests from: ${MANAGEMENT_URL}/api/configuration/agents/${AGENT_NAME}/pending-requests"
+    
+    local response=$("$curl_bin" -k -s -X GET "${MANAGEMENT_URL}/api/configuration/agents/${AGENT_NAME}/pending-requests" \
+        -H "Content-Type: application/json" \
+        -H "X-API-Key: ${AGENT_TOKEN}")
+    
+    log "DEBUG" "CONFIG: Response: ${response:0:200}..."
+    
+    # Check if there are pending requests
+    local pending_count=$(echo "$response" | jq -r '.pending_requests | length' 2>/dev/null)
+    
+    log "DEBUG" "CONFIG: Pending count: $pending_count"
+    
+    if [[ "$pending_count" -gt 0 ]]; then
+        log "INFO" "CONFIG: Found $pending_count pending config request(s)"
+        
+        # Process each request
+        echo "$response" | jq -c '.pending_requests[]' 2>/dev/null | while read -r request; do
+            local request_id=$(echo "$request" | jq -r '.request_id')
+            local request_type=$(echo "$request" | jq -r '.request_type')
+            
+            log "INFO" "CONFIG: Processing config request #$request_id (type: $request_type)"
+            
+            # Read haproxy.cfg content
+            local config_path="${HAPROXY_CONFIG_PATH}"
+            if [[ -f "$config_path" ]]; then
+                local file_size=$(wc -c < "$config_path")
+                log "INFO" "CONFIG: Reading config from: $config_path (size: $file_size bytes)"
+                
+                local config_content=$(cat "$config_path")
+                
+                # Escape config content for JSON
+                log "DEBUG" "CONFIG: Escaping config content for JSON..."
+                local escaped_content=$(echo "$config_content" | jq -Rs .)
+                
+                if [[ -z "$escaped_content" ]]; then
+                    log "ERROR" "CONFIG: JSON escaping failed for config content!"
+                    continue
+                fi
+                
+                local escaped_size=${#escaped_content}
+                log "DEBUG" "CONFIG: JSON escaped content size: $escaped_size bytes"
+                
+                # Submit config response
+                local response_payload=$(cat <<CONFIG_RESPONSE_EOF
+{
+"request_id": $request_id,
+"config_content": $escaped_content,
+"config_path": "$config_path"
+}
+CONFIG_RESPONSE_EOF
+)
+                
+                local payload_size=${#response_payload}
+                log "INFO" "CONFIG: Sending config response (payload size: $payload_size bytes)..."
+                
+                local http_response=$("$curl_bin" -k -s -w "\n%{http_code}" -X POST "${MANAGEMENT_URL}/api/configuration/agents/${AGENT_NAME}/config-response" \
+                    -H "Content-Type: application/json" \
+                    -H "X-API-Key: ${AGENT_TOKEN}" \
+                    -d "$response_payload")
+                
+                local http_code=$(echo "$http_response" | tail -n1)
+                local response_body=$(echo "$http_response" | head -n-1)
+                
+                if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
+                    log "INFO" "CONFIG: Config response sent for request #$request_id (size: $file_size bytes, HTTP $http_code)"
+                else
+                    log "ERROR" "CONFIG: Config response failed for request #$request_id (HTTP $http_code): $response_body"
+                fi
+            else
+                log "ERROR" "CONFIG: Config file not found: $config_path"
+            fi
+        done
+    fi
+}
+
 check_config_updates() {
     # Only log config check in debug mode to reduce log spam
     [[ "${DEBUG_MODE:-0}" == "1" ]] && log "INFO" "Checking for configuration updates..."
@@ -3339,7 +3478,7 @@ CONFIG_RESPONSE_EOF
     # the live token at the top of each loop iteration below.
     fetch_and_deploy_keepalived_config() {
         local marker="# Managed by HAProxy OpenManager"
-        local resp status http_code we_own="false" conf chk
+        local resp status http_code we_own="false" conf chk disc_known=""
 
         # Timeouts so a hung management server can never stall the daemon loop.
         resp=$(curl -k -s --connect-timeout 10 --max-time 30 -w '\n%{http_code}' -X GET \
@@ -3358,6 +3497,8 @@ CONFIG_RESPONSE_EOF
         [[ -z "$conf" || "$conf" == "null" ]] && conf="/etc/keepalived/keepalived.conf"
         chk="$(dirname "$conf")/check_haproxy.sh"
         if [[ -f "$conf" ]] && grep -q "$marker" "$conf" 2>/dev/null; then we_own="true"; fi
+        # See the heredoc copy.
+        disc_known=$(echo "$resp" | jq -r 'if has("discovery_known") then (.discovery_known|tostring) else "" end' 2>/dev/null)
 
         # v1.10.4 — VIP adoption discovery. Report a keepalived.conf we do NOT own so an existing
         # VIP can be adopted from the UI instead of retyped. STRICTLY READ-ONLY: this never writes
@@ -3372,28 +3513,65 @@ CONFIG_RESPONSE_EOF
             if [[ "$we_own" == "true" || ! -f "$conf" ]]; then
                 # Nothing adoptable here. Clear a previous report exactly once.
                 [[ -f "$cache" ]] || return 0
-                curl -k -s --connect-timeout 10 --max-time 30 -X POST \
-                    "$MANAGEMENT_URL/api/agents/$AGENT_NAME/keepalived-discovery" \
+                # See the heredoc copy: clear only on a 2xx, or a managed node keeps being
+                # offered for adoption and nothing ever retries the clear.
+                local clr_code
+                clr_code=$(curl -k -s --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' \
+                    -X POST "$MANAGEMENT_URL/api/agents/$AGENT_NAME/keepalived-discovery" \
                     -H "X-API-Key: $AGENT_TOKEN" -H "Content-Type: application/json" \
-                    -d "{\"config_path\":\"$conf\",\"exists\":false}" >/dev/null 2>&1 || return 0
+                    -d "{\"config_path\":\"$conf\",\"exists\":false}" 2>/dev/null)
+                [[ "$clr_code" =~ ^2[0-9][0-9]$ ]] || return 0
                 rm -f "$cache"
                 return 0
             fi
             cur_hash=$(md5sum "$conf" 2>/dev/null | awk '{print $1}')
             [[ -z "$cur_hash" ]] && return 0
-            [[ -f "$cache" && "$(cat "$cache" 2>/dev/null)" == "$cur_hash" ]] && return 0
+            # See the heredoc copy: the cache may only suppress while the server agrees it holds
+            # a discovery for this node, or a rejected report hides the node permanently.
+            # Cache line is "<hash>" after a success, or "<hash> rejected" after a 4xx.
+            local cached_line cached_hash cached_state=""
+            cached_line=$(cat "$cache" 2>/dev/null)
+            cached_hash="${cached_line%% *}"
+            [[ "$cached_line" == *" "* ]] && cached_state="${cached_line#* }"
+            if [[ -n "$cached_hash" && "$cached_hash" == "$cur_hash" ]]; then
+                # A 4xx means the server refuses THESE BYTES. Re-posting them cannot succeed, and
+                # every attempt is stored as a failed agent call (4xx/5xx are never sampled out), so
+                # an unattended loop would write a row carrying the whole config every cycle. Stay
+                # quiet until the file changes — the reason was logged when it was rejected.
+                [[ "$cached_state" == "rejected" ]] && return 0
+                # Otherwise the cache only holds while the SERVER agrees it has the report.
+                [[ "$disc_known" != "false" ]] && return 0
+            fi
             # jq -Rs makes the file a single JSON string with its newlines intact, so the content the
             # server hashes is byte-identical to what is on disk — the takeover authorisation is
             # pinned to that hash.
             content_json=$(jq -Rs . < "$conf" 2>/dev/null) || return 0
             body=$(jq -n --arg p "$conf" --argjson c "$content_json" \
                 '{config_path:$p, exists:true, is_managed:false, config_content:$c}' 2>/dev/null) || return 0
-            if curl -k -s --connect-timeout 10 --max-time 30 -o /dev/null -X POST \
-                "$MANAGEMENT_URL/api/agents/$AGENT_NAME/keepalived-discovery" \
+            # See the heredoc copy: cache ONLY on a 2xx, or a rejected report is recorded as
+            # delivered and the node never reappears in the adoption panel.
+            local disc_code
+            disc_code=$(curl -k -s --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' \
+                -X POST "$MANAGEMENT_URL/api/agents/$AGENT_NAME/keepalived-discovery" \
                 -H "X-API-Key: $AGENT_TOKEN" -H "Content-Type: application/json" \
-                --data-binary "$body" 2>/dev/null; then
+                --data-binary "$body" 2>/dev/null)
+            if [[ "$disc_code" =~ ^2[0-9][0-9]$ ]]; then
                 printf '%s' "$cur_hash" > "$cache" 2>/dev/null
                 log "INFO" "KEEPALIVED: reported an unmanaged keepalived.conf for adoption"
+            elif [[ "$disc_code" == "400" || "$disc_code" == "413" || "$disc_code" == "422" ]]; then
+                # ONLY the codes that mean "these bytes are unacceptable" stop the retry: too large
+                # to analyse, malformed, rejected by validation. Re-posting identical content cannot
+                # change any of those answers.
+                #
+                # 401 and 404 are deliberately NOT here even though they are 4xx. Both are transient
+                # in this system — a token rotation, or an agent row briefly absent while it
+                # re-registers — and treating them as permanent would silence discovery for every
+                # affected node until its keepalived.conf changed, which for a hand-maintained file
+                # may be never. That is the exact failure this release set out to remove.
+                printf '%s rejected' "$cur_hash" > "$cache" 2>/dev/null
+                log "WARN" "KEEPALIVED: discovery report refused (HTTP $disc_code); not retrying until the config changes"
+            else
+                log "WARN" "KEEPALIVED: discovery report failed (HTTP ${disc_code:-none}); will retry next cycle"
             fi
         }
         _kp_discover

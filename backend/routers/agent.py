@@ -2325,16 +2325,41 @@ async def get_agent_keepalived_config(agent_name: str, x_api_key: Optional[str] 
         # to write/own-marker-check even on not_configured/teardown.
         agent = await conn.fetchrow("""
             SELECT a.id, a.name, COALESCE(a.enabled, TRUE) AS enabled,
-                   hc.keepalived_config_path
+                   hc.keepalived_config_path,
+                   -- v1.11.1: does the server already hold a discovery for this node? The agent
+                   -- caches the hash of its last discovery report next to the config and skips
+                   -- re-posting while it matches. That cache used to be written even when the
+                   -- POST was REJECTED, so a node could be hidden from the adoption panel for
+                   -- good: the file never changes, so the agent never speaks again. Telling it
+                   -- what we actually hold lets it recover on its own, with no extra request and
+                   -- no one having to touch the node.
+                   EXISTS (SELECT 1 FROM vip_discoveries vd WHERE vd.agent_id = a.id)
+                       AS discovery_known
             FROM agents a
             LEFT JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
             WHERE a.name = $1
+            -- A pool may hold more than one cluster, and the join then multiplies this row. With
+            -- no ordering the fetch took an arbitrary one, so the keepalived.conf PATH handed to
+            -- the agent was non-deterministic whenever two clusters in a pool disagreed on it:
+            -- the agent would look at the wrong file, find nothing there, and the node would
+            -- never appear for adoption — intermittently, which is the worst way to fail.
+            --
+            -- A CUSTOMISED path wins over the shipped default, then the lowest cluster id. The
+            -- column defaults to '/etc/keepalived/keepalived.conf' rather than NULL, so ordering
+            -- by id alone could have picked a default-valued row over one the operator had
+            -- deliberately set — turning "undefined" into "reliably wrong" for that install.
+            -- When every cluster in the pool carries the default the string is identical, so the
+            -- ordering cannot change what any working deployment already receives.
+            ORDER BY (hc.keepalived_config_path IS NULL
+                      OR hc.keepalived_config_path = '/etc/keepalived/keepalived.conf'),
+                     hc.id
+            LIMIT 1
         """, agent_name)
         if not agent:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
         config_path = agent['keepalived_config_path'] or '/etc/keepalived/keepalived.conf'
         if not agent['enabled']:
-            return {"agent_name": agent_name, "status": "not_configured", "config_path": config_path, "keepalived": None}
+            return {"agent_name": agent_name, "status": "not_configured", "config_path": config_path, "discovery_known": bool(agent["discovery_known"]), "keepalived": None}
 
         row = await conn.fetchrow("""
             SELECT v.id AS vip_id, v.name AS vip_name, v.is_active, v.track_haproxy,
@@ -2350,22 +2375,22 @@ async def get_agent_keepalived_config(agent_name: str, x_api_key: Optional[str] 
         """, agent['id'])
 
         if not row:
-            return {"agent_name": agent_name, "status": "not_configured", "config_path": config_path, "keepalived": None}
+            return {"agent_name": agent_name, "status": "not_configured", "config_path": config_path, "discovery_known": bool(agent["discovery_known"]), "keepalived": None}
         if not row['is_active']:
             # Soft-deleted VIP → teardown. purge carries the operator's opt-in package removal;
             # the agent still only purges on nodes where IT installed keepalived (install marker).
             return {"agent_name": agent_name, "status": "teardown", "vip_id": row['vip_id'],
-                    "config_path": config_path, "keepalived": None,
+                    "config_path": config_path, "discovery_known": bool(agent["discovery_known"]), "keepalived": None,
                     "purge": bool(row['purge_on_teardown'])}
         if not row['applied_config_content']:
-            return {"agent_name": agent_name, "status": "not_configured", "config_path": config_path, "keepalived": None}
+            return {"agent_name": agent_name, "status": "not_configured", "config_path": config_path, "discovery_known": bool(agent["discovery_known"]), "keepalived": None}
 
         from services.keepalived_config import build_haproxy_check_script
         check_script = build_haproxy_check_script() if row['track_haproxy'] else ""
         return {
             "agent_name": agent_name,
             "status": "available",
-            "config_path": config_path,
+            "config_path": config_path, "discovery_known": bool(agent["discovery_known"]),
             "keepalived": {
                 "desired_state": "enabled",
                 "install_if_missing": True,

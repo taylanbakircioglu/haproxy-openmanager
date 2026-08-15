@@ -1,3 +1,46 @@
+# Upgrade Notes — v1.11.1 (adoption cannot hide a node; Config Import on fresh installs)
+
+**Agent-script change, no schema change.** No `SCHEMA_VERSION` bump, so the built-in roles are
+**not** re-seeded. After deploying, sync the Linux agent script from **Agent Management** and let
+the agents upgrade, or none of this reaches the nodes.
+
+- **A node that never appeared under *Unmanaged keepalived detected* now recovers by itself.**
+  The agent caches the hash of its last discovery report and skips re-posting while it matches.
+  Delivery was judged by `curl`'s exit code, which is 0 for 5xx too, so a rejected report was
+  cached as delivered and a hand-maintained config — which never changes on its own — kept that
+  node hidden. The report is now cached only on a 2xx, and the config endpoint reports whether
+  the server actually holds a discovery for that agent, so the cache can only suppress while the
+  server agrees. **No access to the nodes is needed**; affected nodes reappear within one poll
+  cycle (~2.5 min) after the agents pick up the new script.
+- **Permanent refusals do not loop.** A 400, 413 or 422 means the payload itself is unacceptable,
+  so the refusal is recorded and the same bytes are not re-posted; fixing the file releases the
+  brake, because it is keyed to the content hash. **401 and 404 keep retrying** — in this system
+  they mean a token rotation or an agent row briefly absent while it re-registers, and braking on
+  them would have re-created the very failure above. This matters beyond noise: 4xx and 5xx agent
+  calls are never sampled out of the request log, so a loop would write a row carrying the whole
+  `keepalived.conf` every cycle on every affected node.
+- **The clear path had the same defect.** When a node becomes managed the agent tells the server
+  to drop the discovery; that too was judged by the exit code, so a rejected clear left a stale
+  row offering a **managed** node for adoption, with nothing to ever retry it.
+- **Config Import now works on a freshly installed agent.** `check_config_requests` uploads a
+  node's live `haproxy.cfg` when you ask for it. It was defined in the installer and in the
+  self-upgrade daemon but not in the body a fresh install writes, and its call site is guarded by
+  `type`, so on such a node the feature was a silent no-op: the request was made and nothing ever
+  arrived. Any agent that had self-upgraded at least once already had it, which is why it went
+  unnoticed. A freshly installed agent now polls the pending-requests endpoint once per cycle,
+  exactly as every upgraded agent already does — **no node running today changes behaviour**.
+- **The keepalived.conf path is resolved deterministically.** A pool may hold more than one
+  cluster and the join was unordered, so the path handed to an agent could differ between polls
+  whenever two clusters disagreed on it — the agent would inspect a file that is not there and the
+  node would never appear, intermittently. A customised path now wins over the shipped default,
+  then the lowest cluster id. With one cluster per pool, or when every cluster carries the
+  default, the value is byte-identical to before.
+
+**Rollback:** safe. No schema or data change; reverting restores the previous behaviour, in which
+a rejected discovery report is never retried and Config Import is absent on fresh installs.
+
+---
+
 # Upgrade Notes — v1.11.0 (Unified request/response log)
 
 **Adds one new table and bumps `SCHEMA_VERSION` 11 → 12. The migration runs automatically on the

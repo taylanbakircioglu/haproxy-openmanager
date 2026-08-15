@@ -1,5 +1,5 @@
 {
-  "version": "1.11.0",
-  "releaseName": "Unified request/response log with configurable retention",
-  "releaseDate": "2026-08-14"
+  "version": "1.11.1",
+  "releaseName": "Adoption cannot hide a node; Config Import on fresh installs",
+  "releaseDate": "2026-08-15"
 }
