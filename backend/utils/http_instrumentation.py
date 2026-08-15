@@ -29,6 +29,7 @@ Two hard rules, both load-bearing:
 import asyncio
 import logging
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
@@ -50,19 +51,44 @@ TARGET_HAPROXY_STATS = "haproxy_stats"
 TARGET_SETTINGS_PROBE = "settings_probe"
 
 
+def begin_background_trace(label: str) -> str:
+    """Open a fresh correlation id for ONE iteration of a background loop.
+
+    Without this, background outbound rows fell back to `bg:<asyncio task
+    name>`. Nothing in main.py passes `name=` to `create_task`, so a loop is
+    `Task-5` for its entire life and EVERY call it ever makes carries the same
+    `request_id` — measured: fifteen ACME calls across five renewal ticks came
+    out as one id. `GET /api/request-logs/{id}` then answers with up to 100 rows
+    under `related`, presented as "the calls this request made", which in a
+    forensics tool is worse than having no trace: an operator reading a failed
+    renewal is shown a hundred unrelated calls spanning days. Task numbers are
+    also reused across restarts, so `bg:Task-5` can mean a different loop after
+    a redeploy.
+
+    Called at the top of each iteration; the loop task is dedicated, so the next
+    iteration simply overwrites it and there is nothing to reset.
+    """
+    trace_id = f"bg:{label}:{uuid.uuid4().hex[:12]}"[:64]
+    request_id_context.set(trace_id)
+    return trace_id
+
+
 def _correlation_id() -> str:
     """Inherit the inbound request's id when there is one, so an API call and
-    the CA/DNS calls it triggered share a trace. Background loops (ACME
-    renewal, order completion) get a `bg:<task>` id instead."""
+    the CA/DNS calls it triggered share a trace. Background work gets the id
+    opened by begin_background_trace() for the current iteration."""
     existing = request_id_context.get()
     if existing:
         return existing
+    # No inbound request and no iteration trace: background code that has not
+    # been wrapped. Mint a unique id rather than falling back to the task name,
+    # which would silently re-collapse every such call into one row group.
     try:
         task = asyncio.current_task()
         name = task.get_name() if task else "unknown"
     except Exception:
         name = "unknown"
-    return f"bg:{name}"[:64]
+    return f"bg:{name}:{uuid.uuid4().hex[:12]}"[:64]
 
 
 class OutboundSpan:

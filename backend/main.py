@@ -58,6 +58,7 @@ from middleware.error_handler import (
 )
 from middleware.activity_logger import log_activity_middleware
 from middleware.request_logger import RequestResponseLogMiddleware  # v1.11.0
+from utils.http_instrumentation import begin_background_trace  # v1.11.0
 from utils.request_log_settings import refresh_config as refresh_request_log_config
 from utils.request_log_sink import request_log_sink
 
@@ -236,6 +237,8 @@ Most operations are **cluster-scoped**:
 async def monitor_agent_status():
     """Background task to monitor agent status and mark offline agents"""
     while True:
+        # v1.11.0: see complete_pending_acme_orders — one id per tick.
+        begin_background_trace("agent_status_monitor")
         try:
             conn = await get_database_connection()
             
@@ -280,6 +283,10 @@ async def complete_pending_acme_orders():
     """
     await asyncio.sleep(60)
     while True:
+        # v1.11.0: one correlation id per TICK, so the outbound rows for this
+        # pass group together and do not merge with every other pass this
+        # process has ever run.
+        begin_background_trace("acme_complete_orders")
         try:
             conn_check = await get_database_connection()
             try:
@@ -649,6 +656,8 @@ async def check_letsencrypt_renewals():
     """
     await asyncio.sleep(120)
     while True:
+        # v1.11.0: see complete_pending_acme_orders — one id per tick.
+        begin_background_trace("acme_renewals")
         conn = None
         try:
             conn = await get_database_connection()
