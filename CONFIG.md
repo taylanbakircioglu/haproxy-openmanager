@@ -154,7 +154,7 @@ REQUEST_LOG_ENABLED=false
 3. Disk büyümesi asıl operasyonel konudur: sırasıyla `sample_rate`'i düşürün, `capture_get`'i
    kapatın, `capture_bodies`'i kapatın, sonra `success_retention_days`'i kısaltın.
 
-### REQUEST_LOG_QUEUE_MAX / REQUEST_LOG_BATCH_SIZE / REQUEST_LOG_FLUSH_MS (v1.11.0)
+### REQUEST_LOG_QUEUE_MAX / REQUEST_LOG_QUEUE_MAX_BYTES / REQUEST_LOG_BATCH_SIZE / REQUEST_LOG_FLUSH_MS (v1.11.0)
 
 **Ne İşe Yarar**: Log satırlarını yazan arka plan görevinin ayarları. Satırlar sınırlı bir kuyruğa
 konur ve toplu (batch) INSERT ile yazılır; böylece istek yolu asla veritabanını beklemez.
@@ -165,6 +165,12 @@ konur ve toplu (batch) INSERT ile yazılır; böylece istek yolu asla veritaban�
 # Request Log sayfasında gösterilir), istek bloklanmaz.
 REQUEST_LOG_QUEUE_MAX=2000
 
+# Aynı kuyruğun BAYT tavanı (worker başına). Satır sayısı tek başına belleği
+# sınırlamaz: `max_body_bytes` Settings'ten 256 KB'a kadar ayarlanabilir ve bir
+# satır bunu iki kez taşıyabilir, o tavanda 2000 satırlık kuyruk ~1 GiB tutar.
+# Hangi sınır önce dolarsa kuyruk orada durur.
+REQUEST_LOG_QUEUE_MAX_BYTES=67108864
+
 # Tek INSERT'te kaç satır yazılacağı (havuzdan istek başına değil, batch başına
 # bir bağlantı alınır)
 REQUEST_LOG_BATCH_SIZE=100
@@ -174,9 +180,16 @@ REQUEST_LOG_FLUSH_MS=500
 ```
 
 **Nasıl Kullanılır**:
-1. Request Log sayfasında "rows dropped" uyarısı görüyorsanız önce `REQUEST_LOG_QUEUE_MAX`'ı
-   artırın; sorun devam ederse `sample_rate`'i düşürün.
-2. Bu üç değer worker başınadır — `UVICORN_WORKERS` arttıkça toplam bellek de o oranda artar.
+1. Request Log sayfasında "rows dropped" uyarısı görüyorsanız önce `requestlog.max_body_bytes`
+   veya `sample_rate`'i düşürün. `REQUEST_LOG_QUEUE_MAX`'ı artırmak bu worker'ın tutabileceği
+   belleği de artırır; artıracaksanız `REQUEST_LOG_QUEUE_MAX_BYTES`'ı da birlikte artırın.
+2. Bu değerler worker başınadır — `UVICORN_WORKERS` arttıkça toplam bellek de o oranda artar.
+   `GET /api/request-logs/stats` içindeki sayaçlar da worker başınadır ve yanıtta öyle
+   etiketlenir; 4 worker'da gördüğünüz düşüş sayısı gerçeğin dörtte biridir.
+3. Büyük filolarda tek en etkili ayar `requestlog.capture_agent_success`'tir (varsayılan kapalı).
+   Açık olsaydı 200 düğümlük bir filo günde ~2M satır yazar ve 500.000 satır tavanına 6 saatte
+   ulaşırdı; yapılandırılmış 7 gün / 30 gün saklama o noktada birkaç saate iner. Başarısız ajan
+   çağrıları bu ayardan bağımsız olarak her zaman loglanır.
 
 ## 🚀 Deployment Senaryoları
 

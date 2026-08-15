@@ -1,13 +1,39 @@
 # Upgrade Notes — v1.11.0 (Unified request/response log)
 
-**Adds one new table and bumps `SCHEMA_VERSION` 10 → 11. The migration runs automatically on the
+**Adds one new table and bumps `SCHEMA_VERSION` 11 → 12. The migration runs automatically on the
 first backend start.** No agent impact, no rendered-config change, no change to any existing API
 shape or response body.
 
+> **12, not 11.** The feature was developed against v1.10.3, where `SCHEMA_VERSION` was still 10, and
+> proposed 11. v1.10.4 took 11 in the meantime. Shipping it as 11 would have been silently inert:
+> `run_all_migrations()` returns early on `applied_version >= SCHEMA_VERSION`, so every database
+> already at 11 would have skipped the entire sequence and received neither `request_logs` nor the
+> `requestlog.*` permissions, while a fresh install would have received both. If you are coming from
+> a pre-release build that recorded 11 for this feature, no action is needed: the bump to 12 re-runs
+> the (idempotent) sequence and creates whatever is missing.
+
 - **New table `request_logs`** (BIGSERIAL primary key, 9 indexes). Created empty and starts filling
-  immediately. Budget for it as **one row per API call**. The shipped defaults keep 7 days of
-  successful requests, 30 days of failed ones, and at most 500 000 rows — whichever limit is reached
-  first. Change any of it in *Settings → Request Log*.
+  immediately. The shipped defaults keep 7 days of successful requests, 30 days of failed ones, and
+  at most 500 000 rows — whichever limit is reached first. Change any of it in
+  *Settings → Request Log*.
+- **Successful agent polls are NOT logged** (`requestlog.capture_agent_success`, default off).
+  Failed agent calls always are. This is what keeps the table's size a function of operator
+  activity rather than of how many nodes you run. Measured at 2 424 bytes/row on PostgreSQL 15
+  against the real schema and all nine indexes, with each agent issuing ~9 792 logged calls a day:
+
+  | fleet | if successful polls were logged | with the shipped default |
+  |---|---|---|
+  | 20 nodes  | 196k rows/day, 453 MB/day, row cap in 61 h | ~21k rows/day, 48 MB/day, cap in 24 d |
+  | 200 nodes | 2.0M rows/day, 4.5 GB/day, row cap in 6 h  | ~30k rows/day, 69 MB/day, cap in 17 d |
+  | 500 nodes | 4.9M rows/day, 11 GB/day, row cap in 2.5 h | ~44k rows/day, 103 MB/day, cap in 11 d |
+
+  The row cap always holds, but it holds by deleting — so without this default the configured
+  "7 days of successes, 30 days of failures" silently becomes a few hours of both, and the forensic
+  record the feature exists for is evicted by polling noise. Turn it on temporarily when debugging
+  a specific node, then turn it back off.
+- **Runtime cost is measured, not estimated.** The middleware adds 27.7 µs (p50) per request and
+  1.4 µs on an excluded path; redaction runs on the writer task, off the request path, at 18.8 µs
+  per row. At 500 nodes that is **0.096 % of one core** in total.
 - **New permissions `requestlog.read` and `requestlog.manage`.** Both are granted to `super_admin`
   and `security_admin`; `operator` gets `requestlog.read` only; `viewer` gets neither, because
   captured request/response bodies are a broader disclosure surface than the read-only configuration
@@ -31,11 +57,28 @@ shape or response body.
   assets, and the log viewer's own endpoints. The list is editable, except the log viewer itself,
   which is a hard floor so the page cannot end up logging you reading it.
 - **Disk growth is the main operational consideration.** On a busy install, in order of bluntness:
-  lower `sample_rate` (errors are always kept at 100 %), turn off `capture_get`, turn off
-  `capture_bodies`, or shorten `success_retention_days`.
+  leave `capture_agent_success` off (the single biggest lever on a large fleet), lower `sample_rate`
+  (errors are always kept at 100 %), turn off `capture_get`, turn off `capture_bodies`, or shorten
+  `success_retention_days`.
+- **`operator` can see agent rows.** A caller holding only `requestlog.read` sees their own inbound
+  requests plus the fleet's, and nothing belonging to another user. Agent rows are included because
+  an apply fails on the *node* and the node reports it over its own API key — scoping to own-rows
+  only would have hidden the diagnosis from exactly the role the grant exists for. Anonymous traffic
+  (failed logins and the usernames they carry, unauthenticated probes) is **not** agent traffic and
+  remains visible only to `requestlog.manage`.
 - **New environment variables**, all optional: `REQUEST_LOG_ENABLED` (default `true`),
-  `REQUEST_LOG_QUEUE_MAX` (2000), `REQUEST_LOG_BATCH_SIZE` (100), `REQUEST_LOG_FLUSH_MS` (500). See
-  `.env.template`.
+  `REQUEST_LOG_QUEUE_MAX` (2000 rows), `REQUEST_LOG_QUEUE_MAX_BYTES` (64 MiB),
+  `REQUEST_LOG_BATCH_SIZE` (100), `REQUEST_LOG_FLUSH_MS` (500). See `.env.template`.
+  `REQUEST_LOG_QUEUE_MAX_BYTES` is a hard memory ceiling per worker: the row count alone does not
+  bound memory, because `max_body_bytes` is operator-editable up to 256 KB and a row can carry it
+  twice — at the ceiling the default 2 000-row queue would hold ~1 GiB, which is the whole pod
+  limit. Whichever limit binds first stops the queue. If you raise `REQUEST_LOG_QUEUE_MAX`, raise
+  this with it.
+- **`GET /api/request-logs/stats` sink counters are per worker**, labelled as such in the response.
+  With `UVICORN_WORKERS > 1` each process keeps its own queue and its own drop counter.
+- **Clearing the exclude-path list does not mean "log everything."** An empty list falls back to the
+  shipped defaults, so the log viewer and the raw-body agent heartbeat stay excluded; the UI now
+  says so and shows what was actually applied.
 - **To disable entirely:** set `REQUEST_LOG_ENABLED=false` in the backend environment and restart —
   the middleware is then not registered at all and costs nothing, not even a settings lookup. The
   `enabled` toggle in Settings is the no-restart equivalent (it takes effect immediately).
