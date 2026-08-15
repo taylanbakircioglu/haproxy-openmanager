@@ -156,15 +156,6 @@ const { Text } = Typography;
       label: <Link to="/configuration">Config Versions</Link>,
     },
     {
-      key: '/request-log',
-      icon: <FileSearchOutlined />,
-      label: (
-        <Tooltip placement="right" title="Request Log — every API call in, and every HTTP call this backend made out (ACME, DNS, agents)">
-          <Link to="/request-log">Request Log</Link>
-        </Tooltip>
-      ),
-    },
-    {
       key: '/clusters',
       icon: <CloudServerOutlined />,
       label: <Link to="/clusters">Clusters</Link>,
@@ -193,6 +184,18 @@ const { Text } = Typography;
       key: '/security',
       icon: <SecurityScanOutlined />,
       label: <Link to="/security">Security</Link>,
+    },
+    // v1.11.0 — sits directly above Settings on purpose: the Request Log page
+    // and its retention/capture policy (Settings -> Request Log) are the two
+    // halves of one feature, so they are adjacent in the sidebar.
+    {
+      key: '/request-log',
+      icon: <FileSearchOutlined />,
+      label: (
+        <Tooltip placement="right" title="Request Log — every API call in, and every HTTP call this backend made out (ACME, DNS, agents)">
+          <Link to="/request-log">Request Log</Link>
+        </Tooltip>
+      ),
     },
     {
       key: '/settings',
