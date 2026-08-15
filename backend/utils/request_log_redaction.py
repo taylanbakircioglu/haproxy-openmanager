@@ -37,6 +37,14 @@ REDACT_EXACT = {
     "password", "passwd", "pwd", "secret", "token", "key", "auth",
     "authorization", "cookie", "signature", "protected", "payload",
     "nonce", "credentials", "credential", "otp", "pin", "jwk", "csr",
+    # `auth_pass` is keepalived's VRRP password and it is the plaintext field
+    # name on `POST/PUT /api/vip` (routers/vip.py binds `payload.auth_pass`
+    # straight into encrypt_vrrp_secret). It normalizes to "authpass", which
+    # matches NOTHING above: "password" is not a substring of "authpass", and
+    # the bare "auth" entry is an EXACT match, not a prefix. Without this line
+    # the VRRP secret is written to request_logs in cleartext on every VIP
+    # create and edit.
+    "authpass",
 }
 
 # Compound names. Matched as SUBSTRINGS of the normalized key.
@@ -65,6 +73,59 @@ _NORMALIZE_RE = re.compile(r"[^a-z0-9]")
 # Value-shaped guards — these fire regardless of the key name.
 _PEM_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 _JWT_RE = re.compile(r"^[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}$")
+
+# ---------------------------------------------------------------------------
+# Secrets embedded INSIDE a value, not carried as their own field.
+# ---------------------------------------------------------------------------
+# Key-name and whole-value matching both miss the biggest source of secrets in
+# this system: a rendered config file handed around as one long string under an
+# innocent key.
+#
+#   GET  /api/agents/{n}/keepalived-config   -> keepalived.config_content
+#   POST /api/agents/{n}/keepalived-discovery -> config_content
+#
+# Both carry a full keepalived.conf whose `auth_pass <secret>` line is the VRRP
+# password in cleartext, and the delivery endpoint is polled every ~2.5 minutes
+# per member node. routers/vip.py states the rule this restores: "the secret
+# never leaves the server in cleartext ... only the at-rest Fernet token and the
+# agent-delivery endpoint ever see the real value" — and routers/agent.py's
+# discovery handler already masks the very same text with the very same pattern
+# before storing it in `vip_discoveries.raw_config_masked`. Capturing the
+# unmasked original into request_logs would sit that plaintext right next to the
+# masked copy the codebase went to three separate lengths to produce.
+#
+# ONE compiled alternation, applied in a single pass over each string value:
+# `re.sub` with no match costs one scan, whereas a pre-filter plus N patterns
+# costs a scan each. Mask the WHOLE remainder of the line (vip.py's reasoning),
+# so a secret containing whitespace cannot partially leak.
+_EMBEDDED_SECRET_RE = re.compile(
+    r"(?P<kw>\bauth_pass[ \t]+)(?P<v>\S[^\r\n]*)",
+    re.IGNORECASE,
+)
+_EMBEDDED_MASK = "********"
+
+# Only strings long enough to hold `auth_pass ` plus a value are worth scanning.
+_EMBEDDED_MIN_LENGTH = 11
+
+
+def _mask_embedded(match: "re.Match") -> str:
+    return f"{match.group('kw')}{_EMBEDDED_MASK}"
+
+
+def scrub_embedded_secrets(text: str) -> str:
+    """Mask credentials that live inside a larger text value (config blobs).
+
+    Never raises: a scrub failure must not turn into a failed log write, and
+    returning the input unchanged would be the wrong failure direction, so the
+    whole value is replaced instead.
+    """
+    if not text or len(text) < _EMBEDDED_MIN_LENGTH:
+        return text
+    try:
+        return _EMBEDDED_SECRET_RE.sub(_mask_embedded, text)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug(f"scrub_embedded_secrets() failed, blanking value: {exc}")
+        return REDACTED
 
 _MAX_DEPTH = 6
 _MAX_NODES = 2000
@@ -173,6 +234,12 @@ def redact(value: Any, *, depth: int = 0, budget: Optional[_NodeBudget] = None) 
         if isinstance(value, str):
             if _is_secret_value(value):
                 return REDACTED
+            # Scrub BEFORE truncating. Truncation is not a security control:
+            # `auth_pass` sits inside the first 400 bytes of a rendered
+            # keepalived.conf, well under _MAX_STRING, so relying on the cut to
+            # drop it would be relying on luck about where the secret happens
+            # to fall in the file.
+            value = scrub_embedded_secrets(value)
             if len(value) > _MAX_STRING:
                 return value[:_MAX_STRING] + f"…[truncated {len(value) - _MAX_STRING} chars]"
             return value
