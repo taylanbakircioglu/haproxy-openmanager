@@ -127,12 +127,41 @@ def test_filters_are_bound_never_interpolated(src):
         assert "{n}" in match, f"filter clause {match!r} does not use a bound placeholder"
 
 
-def test_list_endpoint_scopes_non_privileged_callers_to_themselves(src):
-    body = _handler_body(src, '@router.get("")')
+def test_list_endpoint_scopes_non_privileged_callers(src):
+    """A caller with only `requestlog.read` sees their own rows plus the fleet's.
+
+    Widened from own-rows-only during review, deliberately. The `operator` role
+    is granted requestlog.read to "debug failing applies and ACME orders", but
+    an apply fails on the NODE and the node reports it over its own API key, so
+    the row carrying the diagnosis has `user_id IS NULL` — own-rows-only hid it
+    from exactly the role the grant was written for.
+
+    What must NOT widen is the part this test was written to protect: another
+    USER's captured bodies. Both halves are asserted below.
+    """
+    # Comments explain what the clause deliberately does NOT do, so match on
+    # code only — otherwise the prose describing the rule fails the test for it.
+    body = "\n".join(
+        line for line in _handler_body(src, '@router.get("")').splitlines()
+        if not line.lstrip().startswith("#")
+    )
     assert "if not can_manage:" in body
-    assert "direction = 'inbound' AND user_id =" in body, (
-        "a caller with only requestlog.read can see every other user's captured request "
-        "bodies"
+    assert "direction = 'inbound'" in body, (
+        "outbound rows are not scoped at all, so a caller with only "
+        "requestlog.read would see every CA and DNS call the backend ever made"
+    )
+    assert "user_id = $" in body, (
+        "a caller with only requestlog.read can see every other user's captured "
+        "request bodies"
+    )
+    assert "TARGET_INBOUND_AGENT" in body, (
+        "agent rows are hidden from requestlog.read, which is the one thing the "
+        "operator grant exists for"
+    )
+    assert "user_id IS NULL" not in body, (
+        "scoping on NULL rather than on target would also expose anonymous "
+        "traffic — failed logins and the usernames they carry, unauthenticated "
+        "probes — to any requestlog.read holder"
     )
 
 

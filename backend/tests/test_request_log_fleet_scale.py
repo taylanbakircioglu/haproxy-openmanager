@@ -166,7 +166,12 @@ def test_read_only_scoping_admits_agent_rows_but_not_other_users():
     src = open(_ROUTER, encoding="utf-8").read()
     clause = re.search(r"if not can_manage:(.*?)where_sql =", src, re.S)
     assert clause, "the self-scoping block moved; re-check this test"
-    body = clause.group(1)
+    # Code only: the comment above the clause explains what it deliberately
+    # does NOT do, and would otherwise match the negative assertion below.
+    body = "\n".join(
+        line for line in clause.group(1).splitlines()
+        if not line.lstrip().startswith("#")
+    )
     assert "TARGET_INBOUND_AGENT" in body, "agent rows are still hidden from requestlog.read"
     assert "user_id IS NULL" not in body, (
         "scoping on NULL would also expose anonymous traffic, including failed "
