@@ -216,6 +216,17 @@ const PERMISSION_TREE = [
       { title: 'Export Activity Logs', key: 'activity.export' }
     ]
   },
+  // v1.11.0 — the API does no server-side whitelist of permission strings, so
+  // this tree is the ONLY catalogue an admin can grant from. Without an entry
+  // here the permission exists but is unreachable for custom roles.
+  {
+    title: '🧾 Request Log',
+    key: 'requestlog',
+    children: [
+      { title: 'View Request/Response Logs', key: 'requestlog.read' },
+      { title: 'Manage Retention & Purge', key: 'requestlog.manage' }
+    ]
+  },
   {
     title: '⚙️ Settings',
     key: 'settings',

@@ -433,53 +433,84 @@ async def check_port80(domains: List[str], *, http_timeout: float = 5.0) -> Dict
                 continue
             url = f"http://{d}/.well-known/acme-challenge/diagnostic-probe"
             try:
+                # v1.11.0: recorded as an outbound row so a failing port-80 probe is
+                # diagnosable after the fact, not only while the panel is open.
+                #
+                # MERGE NOTE: the feature branch instrumented a `session.head(...)`
+                # probe, which is what this function did when that branch was cut.
+                # It has since become a GET, because the status code alone cannot
+                # tell a working challenge endpoint from a SPA catch-all serving
+                # index.html with HTTP 200 (v1.10.x). Reverting to HEAD to gain the
+                # log row would put that bug straight back, so the GET probe below
+                # is the one that is wrapped.
+                #
                 # GET, not HEAD: the status code alone cannot tell a working challenge
                 # endpoint from a SPA. A reverse proxy that has lost its
                 # /.well-known/acme-challenge/ location falls through to its catch-all
                 # and serves index.html with HTTP 200 — which the old
                 # `status in (200, 404)` rule accepted as healthy while every real
                 # validation failed. Only the body distinguishes them.
-                async with session.get(url, allow_redirects=False) as resp:
-                    # The body is EVIDENCE, not a precondition. If it cannot be read —
-                    # connection reset mid-response, a server that hangs after headers —
-                    # fall back to the status-only semantics this check has always had
-                    # rather than turning a healthy 404 into a hard failure. The stricter
-                    # rule below applies only when there is something to judge.
-                    try:
-                        body = await resp.content.read(_PROBE_BODY_LIMIT)
-                    except Exception:
-                        body = None
-                    content_type = (resp.headers.get("content-type") or "").split(";")[0].strip()
-                    body_class = (
-                        _classify_probe_body(body, content_type) if body is not None else "unread"
-                    )
-                    target = {
-                        "domain": d,
-                        "status": resp.status,
-                        "content_type": content_type or None,
-                        "body_len": len(body) if body is not None else None,
-                        "body_class": body_class,
-                    }
-                    if resp.status == 200 and body_class == "html":
-                        # Reachable, wrong responder. Reported as a warning rather than
-                        # a failure: this check probes the PUBLIC domain and cannot see
-                        # the challenge backend, so it is evidence, not a verdict — and
-                        # a new `fail` here would block the site wizard on upgrade day
-                        # for every install.
-                        target["warn"] = True
-                        target["diagnosis"] = (
-                            "responded 200 with an HTML page, not a challenge token — "
-                            "the request is reaching a web UI instead of the ACME endpoint"
+                from utils.http_instrumentation import outbound_span, TARGET_ACME_DIAG
+
+                async with outbound_span(
+                    target=TARGET_ACME_DIAG, method="GET", url=url, capture_body=False
+                ) as span:
+                    async with session.get(url, allow_redirects=False) as resp:
+                        # The body is EVIDENCE, not a precondition. If it cannot be read —
+                        # connection reset mid-response, a server that hangs after headers —
+                        # fall back to the status-only semantics this check has always had
+                        # rather than turning a healthy 404 into a hard failure. The stricter
+                        # rule below applies only when there is something to judge.
+                        try:
+                            body = await resp.content.read(_PROBE_BODY_LIMIT)
+                        except Exception:
+                            body = None
+                        content_type = (resp.headers.get("content-type") or "").split(";")[0].strip()
+                        body_class = (
+                            _classify_probe_body(body, content_type) if body is not None else "unread"
                         )
-                    elif resp.status in (301, 302, 303, 307, 308):
-                        target["warn"] = True
-                        target["redirect_location"] = resp.headers.get("location")
-                        target["diagnosis"] = (
-                            "redirected instead of serving the challenge path"
+                        target = {
+                            "domain": d,
+                            "status": resp.status,
+                            "content_type": content_type or None,
+                            "body_len": len(body) if body is not None else None,
+                            "body_class": body_class,
+                        }
+                        # The VERDICT goes in the log row, not the body. `body` here is
+                        # up to 64 KB of a third party's page (`_PROBE_BODY_LIMIT`);
+                        # storing it would put an arbitrary remote document into the
+                        # audit table for every probed domain. The classification is
+                        # what an operator reads back anyway.
+                        span.set_response(
+                            resp.status,
+                            getattr(resp, "headers", None),
+                            {
+                                "probe": "acme-http01",
+                                "content_type": content_type or None,
+                                "body_len": len(body) if body is not None else None,
+                                "body_class": body_class,
+                            },
                         )
-                    else:
-                        target["ok"] = resp.status in (200, 404)
-                    targets.append(target)
+                        if resp.status == 200 and body_class == "html":
+                            # Reachable, wrong responder. Reported as a warning rather than
+                            # a failure: this check probes the PUBLIC domain and cannot see
+                            # the challenge backend, so it is evidence, not a verdict — and
+                            # a new `fail` here would block the site wizard on upgrade day
+                            # for every install.
+                            target["warn"] = True
+                            target["diagnosis"] = (
+                                "responded 200 with an HTML page, not a challenge token — "
+                                "the request is reaching a web UI instead of the ACME endpoint"
+                            )
+                        elif resp.status in (301, 302, 303, 307, 308):
+                            target["warn"] = True
+                            target["redirect_location"] = resp.headers.get("location")
+                            target["diagnosis"] = (
+                                "redirected instead of serving the challenge path"
+                            )
+                        else:
+                            target["ok"] = resp.status in (200, 404)
+                        targets.append(target)
             except asyncio.TimeoutError:
                 targets.append({"domain": d, "error": "egress timeout", "warn": True})
                 skip_reason = "egress timeout"

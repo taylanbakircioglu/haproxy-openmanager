@@ -75,16 +75,23 @@ class ACMEService:
         from utils.ssrf_guard import assert_public_url, safe_connector
         await assert_public_url(directory_url)
 
-        async with aiohttp.ClientSession(connector=safe_connector()) as session:
-            async with session.get(directory_url, timeout=aiohttp.ClientTimeout(total=15), allow_redirects=False) as resp:
-                if resp.status != 200:
-                    raise Exception(f"Failed to fetch ACME directory: HTTP {resp.status}")
-                data = await resp.json()
-                if 'Replay-Nonce' in resp.headers:
-                    self._nonce_by_dir[directory_url] = resp.headers['Replay-Nonce']
-                data['_fetched_at'] = time.time()
-                self._directory_cache[directory_url] = data
-                return data
+        # v1.11.0: recorded in request_logs as an outbound call so an operator
+        # can see exactly which CA was contacted and what it answered.
+        from utils.http_instrumentation import outbound_span, TARGET_ACME
+
+        async with outbound_span(target=TARGET_ACME, method="GET", url=directory_url) as span:
+            async with aiohttp.ClientSession(connector=safe_connector()) as session:
+                async with session.get(directory_url, timeout=aiohttp.ClientTimeout(total=15), allow_redirects=False) as resp:
+                    if resp.status != 200:
+                        span.set_response(resp.status, dict(resp.headers))
+                        raise Exception(f"Failed to fetch ACME directory: HTTP {resp.status}")
+                    data = await resp.json()
+                    span.set_response(resp.status, dict(resp.headers), data)
+                    if 'Replay-Nonce' in resp.headers:
+                        self._nonce_by_dir[directory_url] = resp.headers['Replay-Nonce']
+                    data['_fetched_at'] = time.time()
+                    self._directory_cache[directory_url] = data
+                    return data
 
     async def _get_nonce(self, directory_url: str) -> str:
         # Use a cached nonce for THIS CA only; otherwise fetch a fresh one from THIS CA's newNonce.
@@ -104,9 +111,19 @@ class ACMEService:
         from utils.ssrf_guard import assert_public_url, safe_connector
         nonce_url = directory['newNonce']
         await assert_public_url(nonce_url)
-        async with aiohttp.ClientSession(connector=safe_connector()) as session:
-            async with session.head(nonce_url, timeout=aiohttp.ClientTimeout(total=15), allow_redirects=False) as resp:
-                return resp.headers['Replay-Nonce']
+
+        # v1.11.0: a HEAD with no body and no status check — capture the status
+        # and the allowlisted headers only. `Replay-Nonce` itself is redacted by
+        # the header rules: it is a single-use credential.
+        from utils.http_instrumentation import outbound_span, TARGET_ACME
+
+        async with outbound_span(
+            target=TARGET_ACME, method="HEAD", url=nonce_url, capture_body=False
+        ) as span:
+            async with aiohttp.ClientSession(connector=safe_connector()) as session:
+                async with session.head(nonce_url, timeout=aiohttp.ClientTimeout(total=15), allow_redirects=False) as resp:
+                    span.set_response(resp.status, dict(resp.headers))
+                    return resp.headers['Replay-Nonce']
 
     def _generate_account_key(self) -> Tuple[str, dict]:
         private_key = rsa.generate_private_key(
@@ -208,46 +225,75 @@ class ACMEService:
         from utils.ssrf_guard import assert_public_url, safe_connector
         await assert_public_url(url)
 
+        # v1.11.0: instrument each ATTEMPT separately (the span goes inside the
+        # retry loop, the session stays outside it) so a badNonce retry shows up
+        # as its own row instead of being folded into the successful one.
+        #
+        # capture_body=False is mandatory here. The JWS body is
+        # {protected, payload, signature}: `protected` carries the nonce and the
+        # account kid/jwk, and `signature` is made with the account private key.
+        # The key itself never crosses the wire, but a stored (protected,
+        # signature) pair is a REPLAYABLE ACME credential for the lifetime of the
+        # nonce. We log a description of the request instead of the request.
+        from utils.http_instrumentation import outbound_span, TARGET_ACME
+
         async with aiohttp.ClientSession(connector=safe_connector()) as session:
             for attempt in range(3):
-                async with session.post(
-                    url,
-                    json=body,
-                    headers={"Content-Type": "application/jose+json"},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                    allow_redirects=False,
-                ) as resp:
-                    if 'Replay-Nonce' in resp.headers:
-                        self._nonce_by_dir[directory_url] = resp.headers['Replay-Nonce']
+                jws_summary = {
+                    "jws": True,
+                    "acme_url": protected.get("url"),
+                    "kid_present": bool(protected.get("kid")),
+                    "jwk_present": bool(protected.get("jwk")),
+                    "payload_empty": payload == "",
+                    "attempt": attempt + 1,
+                }
+                async with outbound_span(
+                    target=TARGET_ACME,
+                    method="POST",
+                    url=url,
+                    request_body=jws_summary,
+                    capture_body=False,
+                ) as span:
+                    async with session.post(
+                        url,
+                        json=body,
+                        headers={"Content-Type": "application/jose+json"},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                        allow_redirects=False,
+                    ) as resp:
+                        if 'Replay-Nonce' in resp.headers:
+                            self._nonce_by_dir[directory_url] = resp.headers['Replay-Nonce']
 
-                    if resp.status == 400 and attempt < 2:
-                        err = await resp.json()
-                        etype = (err.get('type') or '')
-                        edetail = (err.get('detail') or '').lower()
-                        # Retry on badNonce, and on any nonce-related malformed rejection (e.g.
-                        # "The Replay Nonce could not be base64url-decoded") — refetch a FRESH nonce
-                        # from the target CA and resign. With per-CA scoping the cross-CA cause is gone;
-                        # this is defense-in-depth so a stale/rejected nonce always self-heals.
-                        if etype.endswith('badNonce') or 'nonce' in edetail:
-                            nonce = resp.headers.get('Replay-Nonce') or await self._get_nonce(directory_url)
-                            protected['nonce'] = nonce
-                            body = self._sign_jws(private_key, protected, payload)
-                            continue
+                        if resp.status == 400 and attempt < 2:
+                            err = await resp.json()
+                            etype = (err.get('type') or '')
+                            edetail = (err.get('detail') or '').lower()
+                            # Retry on badNonce, and on any nonce-related malformed rejection (e.g.
+                            # "The Replay Nonce could not be base64url-decoded") — refetch a FRESH nonce
+                            # from the target CA and resign. With per-CA scoping the cross-CA cause is gone;
+                            # this is defense-in-depth so a stale/rejected nonce always self-heals.
+                            if etype.endswith('badNonce') or 'nonce' in edetail:
+                                span.set_response(resp.status, dict(resp.headers), err)
+                                nonce = resp.headers.get('Replay-Nonce') or await self._get_nonce(directory_url)
+                                protected['nonce'] = nonce
+                                body = self._sign_jws(private_key, protected, payload)
+                                continue
 
-                    resp_data = {}
-                    content_type = resp.headers.get('Content-Type', '')
-                    if 'json' in content_type:
-                        resp_data = await resp.json()
-                    elif resp.status < 300:
-                        text = await resp.text()
-                        if text:
-                            try:
-                                resp_data = json.loads(text)
-                            except json.JSONDecodeError:
-                                resp_data = {"raw": text}
+                        resp_data = {}
+                        content_type = resp.headers.get('Content-Type', '')
+                        if 'json' in content_type:
+                            resp_data = await resp.json()
+                        elif resp.status < 300:
+                            text = await resp.text()
+                            if text:
+                                try:
+                                    resp_data = json.loads(text)
+                                except json.JSONDecodeError:
+                                    resp_data = {"raw": text}
 
-                    headers = dict(resp.headers)
-                    return resp.status, resp_data, headers
+                        headers = dict(resp.headers)
+                        span.set_response(resp.status, headers, resp_data)
+                        return resp.status, resp_data, headers
 
         raise Exception(f"ACME request to {url} failed after retries")
 

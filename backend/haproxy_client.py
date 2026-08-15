@@ -61,14 +61,27 @@ class HAProxyClient:
             if self.stats_username and self.stats_password:
                 auth = aiohttp.BasicAuth(self.stats_username, self.stats_password)
             
+            # v1.11.0: instrumented for completeness. NOTE the CSV body is
+            # deliberately NOT handed to the span — a full stats dump is large,
+            # changes every poll, and has no diagnostic value in an audit row;
+            # status + duration is what matters. `auth` is likewise never logged:
+            # aiohttp.BasicAuth is a NamedTuple whose repr contains the cleartext
+            # password.
+            from utils.http_instrumentation import outbound_span, TARGET_HAPROXY_STATS
+
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, auth=auth, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                    if response.status == 200:
-                        csv_data = await response.text()
-                        return self._parse_csv_stats(csv_data)
-                    else:
-                        logger.warning(f"HTTP stats request failed with status {response.status}")
-                        return self._get_fallback_stats()
+                async with outbound_span(
+                    target=TARGET_HAPROXY_STATS, method="GET", url=url,
+                    capture_body=False, capture_response_body=False,
+                ) as span:
+                    async with session.get(url, auth=auth, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                        span.set_response(response.status, getattr(response, "headers", None))
+                        if response.status == 200:
+                            csv_data = await response.text()
+                            return self._parse_csv_stats(csv_data)
+                        else:
+                            logger.warning(f"HTTP stats request failed with status {response.status}")
+                            return self._get_fallback_stats()
         except Exception as e:
             logger.error(f"HTTP stats request failed: {e}")
             return self._get_fallback_stats()

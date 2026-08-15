@@ -131,6 +131,53 @@ if (window.location) {
 }
 ```
 
+### REQUEST_LOG_ENABLED (v1.11.0)
+
+**Ne İşe Yarar**: Request/Response Log özelliğinin sert (hard) kill-switch'i. `false` yapıldığında
+loglama middleware'i ASGI zincirine **hiç eklenmez**, yazıcı ve retention görevleri başlatılmaz —
+yani sıfır ek yük, ayar okuması bile yapılmaz. Değişiklik için restart gerekir.
+
+**Örnekler**:
+```bash
+# Varsayılan: açık
+REQUEST_LOG_ENABLED=true
+
+# Tamamen kapat (ör. çok yüksek trafikli kurulum, veya regülasyon gereği)
+REQUEST_LOG_ENABLED=false
+```
+
+**Nasıl Kullanılır**:
+1. Restart gerektirmeden kapatmak isterseniz bunun yerine **Settings → Request Log → Enable request
+   log** anahtarını kullanın; o anında etkili olur.
+2. Retention süreleri, gövde (body) yakalama, örnekleme oranı ve hariç tutulan path'ler bu env
+   değişkeniyle değil, veritabanındaki `requestlog.*` ayarlarıyla yönetilir — arayüzden düzenlenir.
+3. Disk büyümesi asıl operasyonel konudur: sırasıyla `sample_rate`'i düşürün, `capture_get`'i
+   kapatın, `capture_bodies`'i kapatın, sonra `success_retention_days`'i kısaltın.
+
+### REQUEST_LOG_QUEUE_MAX / REQUEST_LOG_BATCH_SIZE / REQUEST_LOG_FLUSH_MS (v1.11.0)
+
+**Ne İşe Yarar**: Log satırlarını yazan arka plan görevinin ayarları. Satırlar sınırlı bir kuyruğa
+konur ve toplu (batch) INSERT ile yazılır; böylece istek yolu asla veritabanını beklemez.
+
+**Örnekler**:
+```bash
+# Worker başına kuyruk derinliği. Dolduğunda satırlar DÜŞÜRÜLÜR (sayılır ve
+# Request Log sayfasında gösterilir), istek bloklanmaz.
+REQUEST_LOG_QUEUE_MAX=2000
+
+# Tek INSERT'te kaç satır yazılacağı (havuzdan istek başına değil, batch başına
+# bir bağlantı alınır)
+REQUEST_LOG_BATCH_SIZE=100
+
+# Yarım dolu bir batch'in en fazla ne kadar bekletileceği (ms)
+REQUEST_LOG_FLUSH_MS=500
+```
+
+**Nasıl Kullanılır**:
+1. Request Log sayfasında "rows dropped" uyarısı görüyorsanız önce `REQUEST_LOG_QUEUE_MAX`'ı
+   artırın; sorun devam ederse `sample_rate`'i düşürün.
+2. Bu üç değer worker başınadır — `UVICORN_WORKERS` arttıkça toplam bellek de o oranda artar.
+
 ## 🚀 Deployment Senaryoları
 
 ### Docker Compose

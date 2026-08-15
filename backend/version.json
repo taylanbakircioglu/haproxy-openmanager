@@ -1,5 +1,5 @@
 {
-  "version": "1.10.14",
-  "releaseName": "A converged node keeps acknowledging, so a lost report self-heals",
+  "version": "1.11.0",
+  "releaseName": "Unified request/response log with configurable retention",
   "releaseDate": "2026-08-14"
 }

@@ -23,7 +23,8 @@ import {
   BulbOutlined,
   BulbFilled,
   PlusOutlined,
-  ThunderboltOutlined
+  ThunderboltOutlined,
+  FileSearchOutlined
 } from '@ant-design/icons';
 
 import Dashboard from './components/DashboardV2';
@@ -49,6 +50,7 @@ import APIDocumentation from './components/APIDocumentation';
 import IPInventory from './components/IPInventory';
 import SiteWizard from './components/SiteWizard';
 import SiteDrafts from './components/SiteDrafts';
+import RequestLog from './components/RequestLog';  // v1.11.0 — request/response log
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ClusterProvider } from './contexts/ClusterContext';
 import { ThemeProvider, useTheme } from './contexts/ThemeContext';
@@ -152,6 +154,15 @@ const { Text } = Typography;
       key: '/configuration',
       icon: <FileTextOutlined />,
       label: <Link to="/configuration">Config Versions</Link>,
+    },
+    {
+      key: '/request-log',
+      icon: <FileSearchOutlined />,
+      label: (
+        <Tooltip placement="right" title="Request Log — every API call in, and every HTTP call this backend made out (ACME, DNS, agents)">
+          <Link to="/request-log">Request Log</Link>
+        </Tooltip>
+      ),
     },
     {
       key: '/clusters',
@@ -469,6 +480,9 @@ function AppContent() {
               <Route path="/security" element={<Security />} />
               <Route path="/agents" element={<AgentManagement />} />
               <Route path="/configuration" element={<Configuration />} />
+              {/* v1.11.0 — the page gates itself on requestlog.read; the route
+                  is unconditional like every other route in this app. */}
+              <Route path="/request-log" element={<RequestLog />} />
               <Route path="/api-docs" element={<APIDocumentation />} />
               <Route path="/pools" element={<PoolManagement />} />
               <Route path="/settings" element={<Settings />} />

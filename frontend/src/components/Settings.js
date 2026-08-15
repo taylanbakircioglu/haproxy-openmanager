@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Card, Form, Switch, Button, InputNumber, message, Tabs, Input, Select, Collapse, Space, Alert, Tag, Spin, Tooltip } from 'antd';
-import { SafetyCertificateOutlined, ApiOutlined, CheckCircleOutlined, CloseCircleOutlined, InfoCircleOutlined } from '@ant-design/icons';
+import { SafetyCertificateOutlined, ApiOutlined, CheckCircleOutlined, CloseCircleOutlined, InfoCircleOutlined, FileSearchOutlined } from '@ant-design/icons';
 import { useSearchParams } from 'react-router-dom';
 import axios from 'axios';
 
@@ -43,6 +43,15 @@ const Settings = () => {
   const [testResult, setTestResult] = useState(null);
   const [testing, setTesting] = useState(false);
 
+  // v1.11.0 — request/response log retention. Read/written through
+  // /api/request-logs/settings, NOT the generic /api/settings/{category}: that
+  // endpoint stringifies values with str(), which turns True into 'True' and
+  // fails the ::jsonb cast.
+  const [rlForm] = Form.useForm();
+  const [rlLoading, setRlLoading] = useState(false);
+  const [rlSaving, setRlSaving] = useState(false);
+  const [rlDenied, setRlDenied] = useState(false);
+
   const onFinish = (values) => {
     try {
       localStorage.setItem('app_settings', JSON.stringify({
@@ -70,7 +79,45 @@ const Settings = () => {
 
   useEffect(() => {
     loadAcmeSettings();
+    loadRequestLogSettings();
   }, []);
+
+  const loadRequestLogSettings = async () => {
+    setRlLoading(true);
+    try {
+      const res = await axios.get('/api/request-logs/settings');
+      rlForm.setFieldsValue(res.data?.settings || {});
+      setRlDenied(false);
+    } catch (err) {
+      // A viewer can open Settings but has no requestlog.manage — show the tab
+      // read-only-with-explanation rather than a scary console error.
+      if (err?.response?.status === 403) {
+        setRlDenied(true);
+      } else {
+        console.error('Error loading request log settings:', err);
+      }
+    } finally {
+      setRlLoading(false);
+    }
+  };
+
+  const onRequestLogSave = async (values) => {
+    setRlSaving(true);
+    try {
+      await axios.put('/api/request-logs/settings', {
+        ...values,
+        // Values come back from the InputNumber controls as numbers already;
+        // the endpoint is properly typed, so no per-value JSON.stringify here
+        // (unlike the ACME form above, which talks to the legacy endpoint).
+        exclude_paths: values.exclude_paths || [],
+      });
+      message.success('Request log settings saved');
+    } catch (err) {
+      message.error(err?.response?.data?.detail || 'Failed to save request log settings');
+    } finally {
+      setRlSaving(false);
+    }
+  };
 
   const loadAcmeSettings = async () => {
     setAcmeLoading(true);
@@ -366,6 +413,150 @@ const Settings = () => {
                   }
                 />
               )}
+            </Form>
+          </Card>
+        </Spin>
+      ),
+    },
+    {
+      key: 'requestlog',
+      label: (
+        <span><FileSearchOutlined /> Request Log</span>
+      ),
+      children: (
+        <Spin spinning={rlLoading}>
+          <Card>
+            <Alert
+              message="Request / Response Log"
+              description="Records every inbound API call and every outbound HTTP call this backend makes (ACME, DNS providers, agents), with redacted and size-capped request and response bodies. Browse it under Request Log in the sidebar."
+              type="info"
+              showIcon
+              icon={<FileSearchOutlined />}
+              style={{ marginBottom: 24 }}
+            />
+
+            {rlDenied && (
+              <Alert
+                message="Read-only"
+                description="Changing the request log policy requires the requestlog.manage permission."
+                type="warning"
+                showIcon
+                style={{ marginBottom: 24 }}
+              />
+            )}
+
+            <Form
+              form={rlForm}
+              layout="vertical"
+              onFinish={onRequestLogSave}
+              disabled={rlDenied}
+              initialValues={{
+                enabled: true,
+                capture_inbound: true,
+                capture_outbound: true,
+                capture_get: true,
+                capture_bodies: true,
+                max_body_bytes: 8192,
+                sample_rate: 1.0,
+                success_retention_days: 7,
+                error_retention_days: 30,
+                max_rows: 500000,
+                prune_interval_minutes: 60,
+                exclude_paths: [],
+              }}
+            >
+              <Card size="small" title="Capture" style={{ marginBottom: 24 }}>
+                <Form.Item
+                  name="enabled"
+                  label="Enable request log"
+                  valuePropName="checked"
+                  tooltip="Turning this off stops all capture immediately, without a restart. To remove the middleware entirely set REQUEST_LOG_ENABLED=false in the backend environment."
+                >
+                  <Switch />
+                </Form.Item>
+                <Form.Item name="capture_inbound" label="Log inbound API calls" valuePropName="checked">
+                  <Switch />
+                </Form.Item>
+                <Form.Item
+                  name="capture_outbound"
+                  label="Log outbound HTTP calls"
+                  valuePropName="checked"
+                  tooltip="Calls this backend makes to Let's Encrypt / ACME, Cloudflare, GoDaddy, agents and HAProxy stats."
+                >
+                  <Switch />
+                </Form.Item>
+                <Form.Item
+                  name="capture_get"
+                  label="Include GET requests"
+                  valuePropName="checked"
+                  tooltip="GETs are the bulk of the traffic. Turning this off keeps writes and errors only."
+                >
+                  <Switch />
+                </Form.Item>
+                <Form.Item
+                  name="capture_bodies"
+                  label="Capture bodies (redacted)"
+                  valuePropName="checked"
+                  tooltip="Passwords, tokens, API keys, private-key PEMs and ACME signatures are never stored, whatever this is set to."
+                >
+                  <Switch />
+                </Form.Item>
+                <Form.Item name="max_body_bytes" label="Maximum body size captured (bytes)">
+                  <InputNumber min={0} max={262144} step={1024} style={{ width: 200 }} />
+                </Form.Item>
+                <Form.Item
+                  name="sample_rate"
+                  label="Sampling rate for successful requests"
+                  tooltip="1.0 logs everything. Errors are always captured at 100%, whatever this is set to."
+                >
+                  <InputNumber min={0} max={1} step={0.05} style={{ width: 200 }} />
+                </Form.Item>
+              </Card>
+
+              <Card size="small" title="Retention" style={{ marginBottom: 24 }}>
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="Whichever limit is reached first wins"
+                  description="Rows are removed when they pass their retention window OR when the table exceeds the row cap — the cap is the backstop for a sudden traffic spike."
+                />
+                <Form.Item name="success_retention_days" label="Keep successful requests for (days)">
+                  <InputNumber min={1} max={365} style={{ width: 200 }} />
+                </Form.Item>
+                <Form.Item
+                  name="error_retention_days"
+                  label="Keep failed requests for (days)"
+                  tooltip="4xx, 5xx and calls that got no response at all. Usually set longer than the success window."
+                >
+                  <InputNumber min={1} max={365} style={{ width: 200 }} />
+                </Form.Item>
+                <Form.Item name="max_rows" label="Maximum stored rows">
+                  <InputNumber min={1000} max={50000000} step={10000} style={{ width: 200 }} />
+                </Form.Item>
+                <Form.Item name="prune_interval_minutes" label="Minimum interval between prune passes (minutes)">
+                  <InputNumber min={5} max={1440} style={{ width: 200 }} />
+                </Form.Item>
+              </Card>
+
+              <Card size="small" title="Excluded paths" style={{ marginBottom: 24 }}>
+                <Form.Item
+                  name="exclude_paths"
+                  label="Never log these path prefixes"
+                  tooltip="Health checks, the API docs, the ACME challenge endpoint and the agent heartbeat are excluded by default. The log viewer's own endpoints are always excluded and cannot be re-enabled."
+                >
+                  <Select
+                    mode="tags"
+                    tokenSeparators={[',', ' ']}
+                    placeholder="/api/health"
+                    style={{ width: '100%' }}
+                  />
+                </Form.Item>
+              </Card>
+
+              <Button type="primary" htmlType="submit" loading={rlSaving} disabled={rlDenied}>
+                Save Request Log Settings
+              </Button>
             </Form>
           </Card>
         </Spin>

@@ -163,26 +163,35 @@ async def test_acme_connection(authorization: str = Header(None), directory_url:
     _KNOWN_ACME_FIELDS = ["newNonce", "newAccount", "newOrder", "newAuthz", "revokeCert", "keyChange"]
     try:
         import aiohttp
+        # v1.11.0: this handler returns str(e) to the caller and logs nothing —
+        # the span gives the failed probe a durable record.
+        from utils.http_instrumentation import outbound_span, TARGET_SETTINGS_PROBE
+
         async with aiohttp.ClientSession(connector=safe_connector()) as session:
-            async with session.get(
-                directory_url,
-                timeout=aiohttp.ClientTimeout(total=10),
-                allow_redirects=False,
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    if not isinstance(data, dict):
-                        return {"success": False, "error": "Directory URL did not return a JSON object"}
-                    present = [k for k in _KNOWN_ACME_FIELDS if k in data]
-                    if not present:
-                        return {"success": False, "error": "Response is not a valid ACME directory"}
-                    return {
-                        "success": True,
-                        "directory": directory_url,
-                        "endpoints": present,
-                    }
-                else:
-                    return {"success": False, "error": f"HTTP {resp.status} from directory URL"}
+            async with outbound_span(
+                target=TARGET_SETTINGS_PROBE, method="GET", url=directory_url
+            ) as span:
+                async with session.get(
+                    directory_url,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    allow_redirects=False,
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        span.set_response(resp.status, getattr(resp, "headers", None), data)
+                        if not isinstance(data, dict):
+                            return {"success": False, "error": "Directory URL did not return a JSON object"}
+                        present = [k for k in _KNOWN_ACME_FIELDS if k in data]
+                        if not present:
+                            return {"success": False, "error": "Response is not a valid ACME directory"}
+                        return {
+                            "success": True,
+                            "directory": directory_url,
+                            "endpoints": present,
+                        }
+                    else:
+                        span.set_response(resp.status, getattr(resp, "headers", None))
+                        return {"success": False, "error": f"HTTP {resp.status} from directory URL"}
     except HTTPException:
         raise
     except Exception as e:

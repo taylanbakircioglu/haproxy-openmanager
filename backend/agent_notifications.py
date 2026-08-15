@@ -25,31 +25,42 @@ async def notify_agents_config_change(cluster_id: int, version_name: str) -> Lis
         for agent in agents:
             try:
                 agent_url = f"http://{agent['ip_address']}:8081"  # Agent default port
-                
+
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                     payload = {
                         "cluster_id": cluster_id,
                         "version_name": version_name,
                         "action": "config_update"
                     }
-                    
-                    async with session.post(f"{agent_url}/api/config/update", json=payload) as response:
-                        if response.status == 200:
-                            results.append({
-                                'node': agent['name'],
-                                'success': True,
-                                'message': f'Configuration updated successfully',
-                                'version': version_name
-                            })
-                            logger.info(f"✅ Agent {agent['name']} notified successfully")
-                        else:
-                            error_text = await response.text()
-                            results.append({
-                                'node': agent['name'],
-                                'success': False,
-                                'error': f'HTTP {response.status}: {error_text}'
-                            })
-                            logger.error(f"❌ Agent {agent['name']} notification failed: {response.status}")
+
+                    # v1.11.0: instrumented so the code stays correct if the push
+                    # architecture is ever reverted. Unreachable today — see the
+                    # unconditional early return above.
+                    from utils.http_instrumentation import outbound_span, TARGET_AGENT
+
+                    push_url = f"{agent_url}/api/config/update"
+                    async with outbound_span(
+                        target=TARGET_AGENT, method="POST", url=push_url, request_body=payload
+                    ) as span:
+                        async with session.post(push_url, json=payload) as response:
+                            if response.status == 200:
+                                span.set_response(response.status, getattr(response, "headers", None))
+                                results.append({
+                                    'node': agent['name'],
+                                    'success': True,
+                                    'message': f'Configuration updated successfully',
+                                    'version': version_name
+                                })
+                                logger.info(f"✅ Agent {agent['name']} notified successfully")
+                            else:
+                                error_text = await response.text()
+                                span.set_response(response.status, getattr(response, "headers", None), error_text)
+                                results.append({
+                                    'node': agent['name'],
+                                    'success': False,
+                                    'error': f'HTTP {response.status}: {error_text}'
+                                })
+                                logger.error(f"❌ Agent {agent['name']} notification failed: {response.status}")
                             
             except asyncio.TimeoutError:
                 results.append({

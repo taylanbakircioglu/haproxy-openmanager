@@ -29,7 +29,7 @@ for _vpath in [os.path.join(os.path.dirname(__file__), "version.json"), "/app/ve
 
 # Import configurations and database
 
-from config import CORS_ORIGINS, REDIS_URL, LOG_LEVEL
+from config import CORS_ORIGINS, REDIS_URL, LOG_LEVEL, REQUEST_LOG_ENABLED
 from database.connection import redis_client, get_database_connection, close_database_connection, init_database_pool, close_database_pool
 from database.migrations import run_all_migrations
 
@@ -48,6 +48,7 @@ from routers.site_wizard import router as site_wizard_router
 from routers.mfa import router as mfa_router
 from routers.vip import router as vip_router  # Issue #27 — HA/VIP (Keepalived) management
 from routers.csr import router as csr_router  # v1.9.0 — CSR creation (in-app key+CSR generation, signed-cert import)
+from routers.request_logs import router as request_logs_router  # v1.11.0 — unified request/response log
 
 # Production logging configuration
 from utils.logging_config import setup_production_logging
@@ -56,6 +57,9 @@ from middleware.error_handler import (
     GlobalExceptionHandler, get_error_statistics
 )
 from middleware.activity_logger import log_activity_middleware
+from middleware.request_logger import RequestResponseLogMiddleware  # v1.11.0
+from utils.request_log_settings import refresh_config as refresh_request_log_config
+from utils.request_log_sink import request_log_sink
 
 # Setup structured logging
 logger = setup_production_logging(LOG_LEVEL)
@@ -842,6 +846,41 @@ async def cleanup_stuck_agent_upgrades():
         # Wait 120 seconds (2 minutes) before next check
         await asyncio.sleep(120)
 
+async def prune_request_logs_loop():
+    """v1.11.0 — retention prune for `request_logs`.
+
+    Kept independent of the ACME prune loop on purpose: that one is gated on
+    the `letsencrypt_orders` table existing, which would silently disable this
+    prune on an install that never uses ACME.
+
+    The 5-minute tick is only a heartbeat — the real gate is the DB watermark
+    plus `requestlog.prune_interval_minutes`, so N replicas ticking every 5
+    minutes still produce one pass per configured interval.
+    """
+    # Stagger past startup so migrations and the first request burst are done.
+    await asyncio.sleep(180)
+
+    while True:
+        try:
+            conn = await get_database_connection()
+            try:
+                table_exists = await conn.fetchval("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_name = 'request_logs'
+                    )
+                """)
+            finally:
+                await close_database_connection(conn)
+
+            if table_exists:
+                from utils.request_log_prune import prune_request_logs_if_due
+                await prune_request_logs_if_due()
+        except Exception as e:
+            logger.error(f"Error in request_logs prune loop: {e}")
+
+        await asyncio.sleep(300)
+
 # Production middleware stack (order matters!)
 app.add_middleware(PerformanceMonitoringMiddleware, slow_request_threshold_ms=1000)
 app.add_middleware(RequestLoggingMiddleware, exclude_paths=["/api/health/", "/docs", "/redoc"])
@@ -849,14 +888,34 @@ app.add_middleware(RequestLoggingMiddleware, exclude_paths=["/api/health/", "/do
 # Activity logging middleware - must be before CORS
 app.middleware("http")(log_activity_middleware)
 
-# CORS middleware  
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # v1.11.0: without an explicit expose list, browser JS on a cross-origin
+    # deployment cannot read ANY of these — so an operator could see the
+    # X-Request-ID in devtools but the app could never quote it back. Same-origin
+    # (nginx) deployments were already fine; this fixes the split-origin case.
+    expose_headers=["X-Correlation-ID", "X-Response-Time", "X-Request-ID"],
 )
+
+# v1.11.0 — unified request/response log.
+#
+# MUST be the LAST add_middleware call: Starlette inserts each new middleware at
+# index 0, so the last registration ends up OUTERMOST. Outermost is what we want:
+#   (a) we see the exact status/headers/body the client receives, including the
+#       JSONResponse that RequestLoggingMiddleware fabricates from an exception
+#       it swallowed, and
+#   (b) we seed correlation_id_context BEFORE RequestLoggingMiddleware calls
+#       get_correlation_id(), so X-Correlation-ID matches request_logs.request_id.
+#
+# REQUEST_LOG_ENABLED=false keeps it out of the ASGI stack entirely — not a
+# runtime branch, genuinely zero overhead.
+if REQUEST_LOG_ENABLED:
+    app.add_middleware(RequestResponseLogMiddleware)
 
 # Global exception handlers
 from fastapi.exceptions import RequestValidationError
@@ -894,6 +953,7 @@ app.include_router(agent_router)
 app.include_router(waf_router)
 app.include_router(ssl_router)
 app.include_router(csr_router)  # v1.9.0: CSR creation (in-app key+CSR generation, signed-cert import)
+app.include_router(request_logs_router)  # v1.11.0: unified request/response log
 app.include_router(security_router)
 app.include_router(configuration_router)
 app.include_router(settings_router)
@@ -1031,6 +1091,17 @@ async def startup_event():
         # Decoupled from auto_renew_enabled flag so user-initiated orders also complete.
         asyncio.create_task(complete_pending_acme_orders())
         logger.info("ACME order auto-completion task started (60s checks, replica-safe)")
+
+        # v1.11.0 — request/response log: load the operator's capture/retention
+        # policy, then start the batching writer and the retention prune.
+        # Guarded by the env kill-switch so a deployment that turned the log off
+        # pays for neither task.
+        if REQUEST_LOG_ENABLED:
+            await refresh_request_log_config()
+            asyncio.create_task(request_log_sink.run())
+            logger.info("Request/response log sink started (batching writer)")
+            asyncio.create_task(prune_request_logs_loop())
+            logger.info("Request/response log retention prune task started")
         
         # Create test activity log entry to verify system is working
         try:
@@ -1058,6 +1129,16 @@ async def startup_event():
 async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("HAProxy OpenManager API shutting down...")
+
+    # v1.11.0: flush queued request-log rows FIRST. The sink's writer is a
+    # `while True` loop, so it can never satisfy the asyncio.wait below — the
+    # rows still sitting in its queue would be lost when the pool closes.
+    try:
+        flushed = await request_log_sink.flush(timeout=3.0)
+        if flushed:
+            logger.info(f"Flushed {flushed} queued request-log row(s)")
+    except Exception as flush_err:
+        logger.warning(f"request-log flush skipped: {flush_err}")
 
     # R18c audit fix (round 3 #5): drain pending fire-and-forget
     # background tasks BEFORE closing the DB pool. The audit
