@@ -278,16 +278,40 @@ def test_queue_memory_is_bounded_even_at_the_max_body_size_ceiling():
     )
 
 
+_DRAIN_ROWS = 50
+
+
 def test_the_byte_budget_is_released_as_rows_drain():
-    """A budget that only ever counts up is a slow leak, not a limit."""
+    """A budget that only ever counts up is a slow leak, not a limit.
+
+    Deliberately time-INDEPENDENT. `_collect()` stops at whichever comes first,
+    `batch_size` rows or the `flush_ms` deadline, so a batch size larger than
+    the row count makes the result a function of how fast the runner happens to
+    be. The first version of this test used batch=100/flush=10ms for 50 rows and
+    passed on a native build while failing in CI, which builds
+    linux/amd64 + linux/arm64 and therefore runs one of them under qemu
+    emulation: 25 iterations of `asyncio.wait_for` were enough to exhaust 10 ms
+    there, `_collect()` returned half a batch, and the assertion read
+    `239800 == 0` - measuring the scheduler, not the sink.
+
+    So: batch size EQUAL to the row count, so the loop exits on the count and
+    never consults the deadline; a generous flush window in case it somehow
+    does; and a drain loop rather than a single call. Nothing here depends on
+    wall-clock speed.
+    """
     async def drain():
-        sink = RequestLogSink(2000, 100, 10, max_bytes=8 * 1024 * 1024)
+        sink = RequestLogSink(2000, _DRAIN_ROWS, 5000, max_bytes=8 * 1024 * 1024)
         blob = b"x" * 4096
         set_config(replace(get_config(), capture_agent_success=True))
-        for _ in range(50):
+        for _ in range(_DRAIN_ROWS):
             sink.offer(_row(target=None, request_body_raw=blob, response_body_raw=blob))
-        assert sink.stats["queued_bytes"] > 0
-        await sink._collect()
+        assert sink.stats["queued_bytes"] > 0, "nothing was queued, so nothing is being measured"
+        assert sink._queue.qsize() == _DRAIN_ROWS, "the queue did not take every row"
+
+        drained = 0
+        while not sink._queue.empty():
+            drained += len(await sink._collect())
+        assert drained == _DRAIN_ROWS, f"drained {drained} of {_DRAIN_ROWS} rows"
         return sink.stats["queued_bytes"]
 
     assert asyncio.run(drain()) == 0
