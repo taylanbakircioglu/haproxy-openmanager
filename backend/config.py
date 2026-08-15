@@ -78,7 +78,24 @@ REQUEST_LOG_ENABLED = _bool_env("REQUEST_LOG_ENABLED", True)
 # reported through GET /api/request-logs/stats) — the request path never blocks
 # on the database.
 REQUEST_LOG_QUEUE_MAX = _int_env("REQUEST_LOG_QUEUE_MAX", 2000, 100, 100000)
+# HARD memory ceiling for the same queue, per worker. The row count above does
+# NOT bound memory on its own, because how much a row weighs is an operator
+# setting: `requestlog.max_body_bytes` is editable from Settings and its stated
+# ceiling is 256 KB, which a row can carry twice (request + response). Measured
+# on the real dataclass, the two limits multiply out to:
+#
+#     defaults (2 000 rows x 8 KB)          33.9 MiB   3.3% of the 1 GiB pod limit
+#     max_body_bytes at its 256 KB ceiling   1003 MiB   at the pod limit
+#     REQUEST_LOG_QUEUE_MAX at its ceiling   1695 MiB   over the pod limit
+#
+# Both of those are reachable from documented, in-range values, and the drop
+# warning used to advise raising the queue - so following the tool's own advice
+# could OOM the worker. Whichever limit is hit FIRST now stops the queue, so
+# memory stays bounded no matter what the other is set to.
+REQUEST_LOG_QUEUE_MAX_BYTES = _int_env(
+    "REQUEST_LOG_QUEUE_MAX_BYTES", 64 * 1024 * 1024, 1024 * 1024, 1024 * 1024 * 1024
+)
 # Rows per batched INSERT: one pool acquire per batch, not per request.
 REQUEST_LOG_BATCH_SIZE = _int_env("REQUEST_LOG_BATCH_SIZE", 100, 1, 1000)
 # Max wait before a partial batch is flushed (milliseconds).
-REQUEST_LOG_FLUSH_MS = _int_env("REQUEST_LOG_FLUSH_MS", 500, 50, 10000) 
+REQUEST_LOG_FLUSH_MS = _int_env("REQUEST_LOG_FLUSH_MS", 500, 50, 10000)

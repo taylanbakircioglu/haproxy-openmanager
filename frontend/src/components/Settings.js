@@ -104,13 +104,29 @@ const Settings = () => {
   const onRequestLogSave = async (values) => {
     setRlSaving(true);
     try {
-      await axios.put('/api/request-logs/settings', {
+      const res = await axios.put('/api/request-logs/settings', {
         ...values,
         // Values come back from the InputNumber controls as numbers already;
         // the endpoint is properly typed, so no per-value JSON.stringify here
         // (unlike the ACME form above, which talks to the legacy endpoint).
         exclude_paths: values.exclude_paths || [],
       });
+      // Show what the server ACTUALLY applied, not what was typed. Values are
+      // clamped server-side, and clearing the exclude list does not mean "log
+      // everything": normalize_exclude_paths() falls back to the shipped
+      // defaults so the log viewer and the raw-body heartbeat stay excluded.
+      // Without this the form would keep displaying an empty list that is not
+      // in effect.
+      const applied = res?.data?.settings;
+      if (applied) {
+        rlForm.setFieldsValue(applied);
+        const typed = values.exclude_paths || [];
+        if (typed.length === 0 && (applied.exclude_paths || []).length > 0) {
+          message.warning(
+            'An empty exclude list is not applied as "log everything" — the shipped defaults were restored.'
+          );
+        }
+      }
       message.success('Request log settings saved');
     } catch (err) {
       message.error(err?.response?.data?.detail || 'Failed to save request log settings');

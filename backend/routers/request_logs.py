@@ -292,7 +292,13 @@ async def get_request_log_stats(
             "total_rows": (totals or {}).get("total_rows", 0),
             "oldest_at": totals["oldest_at"].isoformat() if totals and totals["oldest_at"] else None,
             "newest_at": totals["newest_at"].isoformat() if totals and totals["newest_at"] else None,
-            "sink": request_log_sink.stats,
+            # THIS WORKER only. The sink is a module global, so with
+            # UVICORN_WORKERS > 1 each process keeps its own queue and its own
+            # counters, and whichever worker happens to serve this request is
+            # the one being reported. Labelled rather than aggregated: there is
+            # no cross-process channel here, and a number that looks fleet-wide
+            # but is not would understate drops by exactly the worker count.
+            "sink": {**request_log_sink.stats, "scope": "this worker only"},
             "retention": {
                 "success_retention_days": get_config().success_retention_days,
                 "error_retention_days": get_config().error_retention_days,

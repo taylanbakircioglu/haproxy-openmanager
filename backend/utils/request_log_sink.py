@@ -25,7 +25,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from config import REQUEST_LOG_BATCH_SIZE, REQUEST_LOG_FLUSH_MS, REQUEST_LOG_QUEUE_MAX
+from config import (
+    REQUEST_LOG_BATCH_SIZE,
+    REQUEST_LOG_FLUSH_MS,
+    REQUEST_LOG_QUEUE_MAX,
+    REQUEST_LOG_QUEUE_MAX_BYTES,
+)
 from database.connection import get_database_connection, close_database_connection
 from utils.request_log_redaction import decode_body, redact_headers
 from utils.request_log_settings import get_config, maybe_refresh_config
@@ -113,6 +118,22 @@ class RequestLogRow:
     error: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    def queue_weight(self) -> int:
+        """Approximate bytes this row holds while it waits in the queue.
+
+        The buffered bodies are the only part that varies by orders of
+        magnitude (0 to 2 x max_body_bytes); everything else is a handful of
+        short strings and two small header dicts, measured at ~1.4 KB per row.
+        Used to enforce a byte budget alongside the row count, so memory does
+        not become a function of an operator-editable setting.
+        """
+        weight = 1400
+        if self.request_body_raw:
+            weight += len(self.request_body_raw)
+        if self.response_body_raw:
+            weight += len(self.response_body_raw)
+        return weight
+
     @property
     def status_class(self) -> int:
         """`status_code // 100`, or 0 when there was no HTTP response at all
@@ -165,8 +186,11 @@ class RequestLogRow:
 class RequestLogSink:
     """Bounded queue + single batching writer task (one per uvicorn worker)."""
 
-    def __init__(self, maxsize: int, batch_size: int, flush_ms: int):
+    def __init__(self, maxsize: int, batch_size: int, flush_ms: int,
+                 max_bytes: int = REQUEST_LOG_QUEUE_MAX_BYTES):
         self._maxsize = maxsize
+        self._max_bytes = max_bytes
+        self._queued_bytes = 0
         self._batch_size = batch_size
         self._flush_seconds = flush_ms / 1000.0
         self._queue: Optional[asyncio.Queue] = None
@@ -189,6 +213,8 @@ class RequestLogSink:
         return {
             "queued": self._queue.qsize() if self._queue is not None else 0,
             "queue_capacity": self._maxsize,
+            "queued_bytes": self._queued_bytes,
+            "queue_capacity_bytes": self._max_bytes,
             "written": self._written,
             "dropped": self._dropped,
             "failed_batches": self._failed,
@@ -240,14 +266,27 @@ class RequestLogSink:
                 row.request_body_value = None
                 row.response_body_value = None
 
+            # Byte budget, checked BEFORE the row count. The count alone does
+            # not bound memory: how much a row weighs is an operator setting,
+            # and `max_body_bytes` at its documented 256 KB ceiling puts the
+            # default 2 000-row queue at ~1 GiB, which is the whole pod limit.
+            # Dropping here is the same visible, counted drop as a full queue.
+            weight = row.queue_weight()
+            if self._queued_bytes + weight > self._max_bytes:
+                raise asyncio.QueueFull
+
             self._ensure_queue().put_nowait(row)
+            self._queued_bytes += weight
         except asyncio.QueueFull:
             self._dropped += 1
             if self._dropped % 500 == 1:
                 logger.warning(
                     f"request_log: queue full, {self._dropped} row(s) dropped so far "
-                    f"(capacity {self._maxsize}; raise REQUEST_LOG_QUEUE_MAX or lower "
-                    f"requestlog.sample_rate)"
+                    f"({self._queue.qsize() if self._queue is not None else 0}/{self._maxsize} rows, "
+                    f"{self._queued_bytes // 1024} KiB/{self._max_bytes // 1024} KiB). "
+                    f"Lower requestlog.max_body_bytes or requestlog.sample_rate. "
+                    f"Raising REQUEST_LOG_QUEUE_MAX also raises the memory this "
+                    f"worker can hold, so raise REQUEST_LOG_QUEUE_MAX_BYTES with it."
                 )
         except Exception as exc:
             # Instrumentation must never break the thing it instruments.
@@ -259,6 +298,7 @@ class RequestLogSink:
         """Wait for at least one row, then drain up to batch_size or flush_ms."""
         queue = self._ensure_queue()
         first = await queue.get()
+        self._queued_bytes = max(0, self._queued_bytes - first.queue_weight())
         batch = [first]
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._flush_seconds
@@ -267,7 +307,9 @@ class RequestLogSink:
             if remaining <= 0:
                 break
             try:
-                batch.append(await asyncio.wait_for(queue.get(), timeout=remaining))
+                nxt = await asyncio.wait_for(queue.get(), timeout=remaining)
+                self._queued_bytes = max(0, self._queued_bytes - nxt.queue_weight())
+                batch.append(nxt)
             except asyncio.TimeoutError:
                 break
         return batch
@@ -333,7 +375,9 @@ class RequestLogSink:
         while not queue.empty() and loop.time() < deadline:
             batch: List[RequestLogRow] = []
             while not queue.empty() and len(batch) < self._batch_size:
-                batch.append(queue.get_nowait())
+                row = queue.get_nowait()
+                self._queued_bytes = max(0, self._queued_bytes - row.queue_weight())
+                batch.append(row)
             await self._write(batch)
             written += len(batch)
         return written
