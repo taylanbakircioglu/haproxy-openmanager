@@ -98,8 +98,23 @@ _JWT_RE = re.compile(r"^[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16
 # `re.sub` with no match costs one scan, whereas a pre-filter plus N patterns
 # costs a scan each. Mask the WHOLE remainder of the line (vip.py's reasoning),
 # so a secret containing whitespace cannot partially leak.
+#
+# The `uri` branch is the same class of miss in a different shape. Redacting a
+# key called `secret` does nothing when the SAME secret is also handed back
+# inside a URI under a key called `otpauth_uri`:
+#
+#   POST /api/mfa/enroll -> {"secret": "***REDACTED***",
+#                            "otpauth_uri": "otpauth://totp/X?secret=JBSWY3DP..."}
+#
+# routers/mfa.py's own activity log says "NEVER log the secret itself" and
+# records only `secret_len`. scrub_query_string already knows `secret` is a
+# credential; it was simply never pointed at query strings that arrive inside a
+# body value rather than on the request line. Any URI in any captured string is
+# now run through scrub_url, which also strips userinfo (`https://u:p@host`)
+# and drops the fragment.
 _EMBEDDED_SECRET_RE = re.compile(
-    r"(?P<kw>\bauth_pass[ \t]+)(?P<v>\S[^\r\n]*)",
+    r"(?P<kw>\bauth_pass[ \t]+)(?P<v>\S[^\r\n]*)"
+    r"|(?P<uri>\b[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s\"'<>\\]+)",
     re.IGNORECASE,
 )
 _EMBEDDED_MASK = "********"
@@ -109,7 +124,25 @@ _EMBEDDED_MIN_LENGTH = 11
 
 
 def _mask_embedded(match: "re.Match") -> str:
-    return f"{match.group('kw')}{_EMBEDDED_MASK}"
+    kw = match.group("kw")
+    if kw is not None:
+        return f"{kw}{_EMBEDDED_MASK}"
+
+    uri = match.group("uri")
+    # A URI with no query cannot carry a credential in the place we scrub, and
+    # rebuilding it would only risk changing a value for no benefit.
+    if "?" not in uri and "@" not in uri:
+        return uri
+    try:
+        scrubbed = scrub_url(uri)
+    except Exception:  # pragma: no cover - scrub_url already swallows
+        return uri
+    # scrub_url reports its own failure as a placeholder string. Inside a larger
+    # text value that would corrupt the surrounding sentence, so keep the
+    # original: it parsed badly enough that urlsplit found no query to scrub.
+    if not scrubbed or scrubbed == "***URL_PARSE_ERROR***":
+        return uri
+    return scrubbed
 
 
 def scrub_embedded_secrets(text: str) -> str:
