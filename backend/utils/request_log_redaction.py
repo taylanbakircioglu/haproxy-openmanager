@@ -112,8 +112,39 @@ _JWT_RE = re.compile(r"^[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16
 # body value rather than on the request line. Any URI in any captured string is
 # now run through scrub_url, which also strips userinfo (`https://u:p@host`)
 # and drops the fragment.
+#
+# The `statsauth` / `userlist` branches cover the same shape for HAProxy. This
+# application never RENDERS a credential into a haproxy.cfg, so nothing we
+# generate is at risk - but the agent uploads the node's REAL on-disk file:
+#
+#   linux_install.sh: config_content=$(cat "$config_path")
+#                     -> POST /api/configuration/agents/{n}/config-response
+#
+# plus `POST /api/config/validate` and the bulk import, which take whatever the
+# operator pastes. A production haproxy.cfg routinely carries `stats auth
+# admin:<password>` and a `userlist` block, so the content is credential-bearing
+# even though our generator's output is not. Patterns are anchored to HAProxy
+# keyword syntax rather than the bare word "password", so ordinary prose in an
+# error message ("invalid password format") is left alone.
+#
+# `_EOL` instead of a plain `[^\r\n]` / `\S`: a captured body is only decoded
+# from JSON when it PARSES, and a config upload is routinely larger than the
+# capture cap, so the common case for exactly these payloads is the truncated
+# `{"_raw": ...}` fallback - where the line breaks are still the two-character
+# escape `\n`, not real newlines. Matching to "end of line" without knowing that
+# makes `auth_pass ...` swallow the entire rest of the string: no leak, but the
+# whole remainder of the config is masked and the row becomes useless. So every
+# value here stops at a real newline OR at a literal backslash-n.
+_EOL = r"(?:(?!\\n)[^\r\n])"
 _EMBEDDED_SECRET_RE = re.compile(
-    r"(?P<kw>\bauth_pass[ \t]+)(?P<v>\S[^\r\n]*)"
+    r"(?P<kw>\bauth_pass[ \t]+)(?P<v>\S" + _EOL + r"*)"
+    # `stats auth <user>:<passwd>` - keep the user, mask the password half, so
+    # an operator can still tell WHICH account a 401 was about.
+    r"|(?P<statsauth>\bstats[ \t]+auth[ \t]+)(?P<statsuser>[^\s:]*:)"
+    r"(?P<statspw>(?:(?!\\n)\S)+)"
+    # `user <name> password <hash>` / `user <name> insecure-password <plain>`
+    r"|(?P<userlist>\buser[ \t]+(?:(?!\\n)\S)+[ \t]+(?:insecure-)?password[ \t]+)"
+    r"(?P<userpw>(?:(?!\\n)\S)+)"
     r"|(?P<uri>\b[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s\"'<>\\]+)",
     re.IGNORECASE,
 )
@@ -127,6 +158,14 @@ def _mask_embedded(match: "re.Match") -> str:
     kw = match.group("kw")
     if kw is not None:
         return f"{kw}{_EMBEDDED_MASK}"
+
+    statsauth = match.group("statsauth")
+    if statsauth is not None:
+        return f"{statsauth}{match.group('statsuser')}{_EMBEDDED_MASK}"
+
+    userlist = match.group("userlist")
+    if userlist is not None:
+        return f"{userlist}{_EMBEDDED_MASK}"
 
     uri = match.group("uri")
     # A URI with no query cannot carry a credential in the place we scrub, and
