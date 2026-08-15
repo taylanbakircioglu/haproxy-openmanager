@@ -32,7 +32,12 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from utils.logging_config import correlation_id_context
 from utils.request_log_redaction import is_capturable_content_type, scrub_query_string
 from utils.request_log_settings import get_config
-from utils.request_log_sink import RequestLogRow, request_id_context, request_log_sink
+from utils.request_log_sink import (
+    TARGET_INBOUND_AGENT,
+    RequestLogRow,
+    request_id_context,
+    request_log_sink,
+)
 
 logger = logging.getLogger("haproxy_openmanager.request_log")
 
@@ -86,6 +91,25 @@ def _identify(scope: Scope) -> Tuple[Optional[int], Optional[str]]:
         user_id = None
     username = payload.get("username")
     return user_id, (str(username) if username else None)
+
+
+def _is_agent_call(scope: Scope) -> bool:
+    """True when the caller authenticated as an AGENT rather than as a user.
+
+    Every call the installed agent makes carries `X-API-Key` and never an
+    `Authorization` header (linux_install.sh / macos_install.sh: heartbeat,
+    config, pending-requests, upgrade-status, keepalived-*, config-response are
+    all `-H "X-API-Key: $AGENT_TOKEN"`), while the UI carries a JWT and never an
+    agent key. The one endpoint that accepts either -
+    `POST /api/agents/generate-install-script`, used by agent self-upgrade -
+    is correctly classified by the same rule: an operator generating a script
+    sends Authorization, the self-upgrading agent sends only the key.
+
+    Header-only, so it costs two scope reads and no database round-trip.
+    """
+    if _header(scope, b"authorization"):
+        return False
+    return bool(_header(scope, b"x-api-key"))
 
 
 def _client_ip(scope: Scope) -> Optional[str]:
@@ -269,6 +293,10 @@ class RequestResponseLogMiddleware:
             RequestLogRow(
                 request_id=request_id,
                 direction="inbound",
+                # Who was on the other end. `offer()` uses this to drop
+                # SUCCESSFUL agent polls, which are ~9 800 rows/day per node and
+                # would otherwise make the table's size a function of fleet size.
+                target=TARGET_INBOUND_AGENT if _is_agent_call(scope) else None,
                 method=method,
                 url=path + (("?" + scrubbed_query) if scrubbed_query else ""),
                 path=path,

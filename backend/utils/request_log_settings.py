@@ -49,6 +49,17 @@ class RequestLogConfig:
     capture_outbound: bool = True
     capture_bodies: bool = True
     capture_get: bool = True
+    # SUCCESSFUL agent polls only. Off by default because the row rate of this
+    # table is otherwise a linear function of fleet size, not of operator
+    # activity: each agent runs a 30s cycle that issues three logged calls
+    # (config, pending-requests, upgrade-status; the heartbeat is already
+    # excluded) plus two more every fifth cycle. Measured, that is ~9 800 rows
+    # per day PER AGENT, so a 200-node fleet writes ~2M rows/day and reaches the
+    # 500 000 max_rows cap in about six hours - at which point the shipped
+    # "7 days of successes, 30 days of failures" is not 7 and 30, it is 0.25.
+    # FAILED agent calls are always kept regardless of this flag: they are the
+    # half an operator actually needs, and they are rare.
+    capture_agent_success: bool = False
     max_body_bytes: int = 8192
     sample_rate: float = 1.0
     exclude_paths: Tuple[str, ...] = DEFAULT_EXCLUDE_PATHS
@@ -64,6 +75,7 @@ class RequestLogConfig:
             "capture_outbound": self.capture_outbound,
             "capture_bodies": self.capture_bodies,
             "capture_get": self.capture_get,
+            "capture_agent_success": self.capture_agent_success,
             "max_body_bytes": self.max_body_bytes,
             "sample_rate": self.sample_rate,
             "exclude_paths": list(self.exclude_paths),
@@ -171,6 +183,10 @@ def config_from_mapping(values: Dict[str, Any], base: Optional[RequestLogConfig]
         capture_outbound=_as_bool(values.get("capture_outbound", base.capture_outbound), base.capture_outbound),
         capture_bodies=_as_bool(values.get("capture_bodies", base.capture_bodies), base.capture_bodies),
         capture_get=_as_bool(values.get("capture_get", base.capture_get), base.capture_get),
+        capture_agent_success=_as_bool(
+            values.get("capture_agent_success", base.capture_agent_success),
+            base.capture_agent_success,
+        ),
         max_body_bytes=_clamp_int(values.get("max_body_bytes", base.max_body_bytes), "max_body_bytes", base.max_body_bytes),
         sample_rate=_clamp_float(values.get("sample_rate", base.sample_rate), base.sample_rate, 0.0, 1.0),
         exclude_paths=normalize_exclude_paths(values.get("exclude_paths"), base.exclude_paths),

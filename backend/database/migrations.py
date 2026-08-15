@@ -2154,6 +2154,7 @@ async def ensure_request_log_settings():
             ('requestlog.capture_outbound', 'true', 'requestlog', 'Log outbound HTTP calls made by the backend'),
             ('requestlog.capture_bodies', 'true', 'requestlog', 'Capture redacted, size-capped request/response bodies'),
             ('requestlog.capture_get', 'true', 'requestlog', 'Log inbound GET requests'),
+            ('requestlog.capture_agent_success', 'false', 'requestlog', 'Log SUCCESSFUL agent polls too (failures are always logged); off by default because the row rate scales with fleet size, not operator activity'),
             ('requestlog.max_body_bytes', '8192', 'requestlog', 'Per-body capture cap in bytes'),
             ('requestlog.sample_rate', '1.0', 'requestlog', 'Sampling rate for successful inbound requests (errors always 1.0)'),
             ('requestlog.exclude_paths', '["/api/request-logs","/api/health","/api/docs","/api/redoc","/api/openapi.json","/.well-known/acme-challenge","/api/agents/heartbeat","/static","/favicon.ico"]', 'requestlog', 'Path prefixes that are never logged'),

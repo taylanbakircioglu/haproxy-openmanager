@@ -494,6 +494,14 @@ const Settings = () => {
                   <Switch />
                 </Form.Item>
                 <Form.Item
+                  name="capture_agent_success"
+                  label="Include successful agent polls"
+                  valuePropName="checked"
+                  tooltip="Each agent writes about 9,800 rows a day just saying nothing changed, so on a large fleet this fills the row cap in hours and shortens retention for everything else. FAILED agent calls are always logged regardless. Turn this on only while debugging a specific node, and turn it back off."
+                >
+                  <Switch />
+                </Form.Item>
+                <Form.Item
                   name="capture_bodies"
                   label="Capture bodies (redacted)"
                   valuePropName="checked"

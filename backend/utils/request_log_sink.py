@@ -40,6 +40,15 @@ request_id_context: ContextVar[Optional[str]] = ContextVar(
     "request_log_request_id", default=None
 )
 
+# `target` on an INBOUND row means the same thing it means on an outbound one:
+# who was on the other end. Set by the middleware when the caller authenticated
+# with an agent API key rather than a user JWT, which is how agent traffic is
+# told apart from operator traffic without a database lookup on the hot path.
+# Deliberately the same literal as http_instrumentation.TARGET_AGENT, so
+# `target = 'agent'` selects the whole conversation with the fleet in both
+# directions; `direction` separates them when that matters.
+TARGET_INBOUND_AGENT = "agent"
+
 _INSERT_SQL = """
 INSERT INTO request_logs (
     request_id, direction, target, method, url, path, query_params,
@@ -202,6 +211,21 @@ class RequestLogSink:
             if row.direction == "inbound" and not cfg.capture_inbound:
                 return
             if row.direction == "outbound" and not cfg.capture_outbound:
+                return
+            # Fleet-scale gate, and the reason this table's size is a function of
+            # operator activity rather than of node count. An agent's 30s cycle
+            # issues three logged calls, plus two more every fifth cycle: ~9 800
+            # rows/day PER AGENT, all of them 200s saying "nothing changed". At a
+            # few hundred nodes that is millions of rows a day, and the row cap is
+            # then reached in hours, which silently shortens the configured
+            # retention for EVERYTHING else in the table - including the failures
+            # the log exists for. Successes are dropped, failures never are.
+            if (
+                row.direction == "inbound"
+                and row.target == TARGET_INBOUND_AGENT
+                and not cfg.capture_agent_success
+                and row.status_class in (1, 2, 3)
+            ):
                 return
             if (
                 row.direction == "inbound"

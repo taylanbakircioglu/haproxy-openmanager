@@ -43,7 +43,7 @@ from utils.request_log_settings import (
     refresh_config,
     set_config,
 )
-from utils.request_log_sink import request_log_sink
+from utils.request_log_sink import TARGET_INBOUND_AGENT, request_log_sink
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,7 @@ class RequestLogSettings(BaseModel):
     capture_outbound: bool = True
     capture_bodies: bool = True
     capture_get: bool = True
+    capture_agent_success: bool = False
     max_body_bytes: int = Field(8192, ge=0, le=262144)
     sample_rate: float = Field(1.0, ge=0.0, le=1.0)
     exclude_paths: List[str] = Field(
@@ -396,11 +397,25 @@ async def list_request_logs(
 
     # Self-scoping. Captured bodies are a broader disclosure surface than the
     # existing activity log, so a caller holding only `requestlog.read` sees
-    # their OWN inbound requests and nothing else. `requestlog.manage` (and the
+    # their OWN inbound requests, plus the fleet's. `requestlog.manage` (and the
     # is_admin bypass inside it) lifts the restriction.
+    #
+    # The agent clause is not a widening for its own sake, it is what makes the
+    # `operator` grant do what the migration says it is for: "operators debug
+    # failing applies and ACME orders, so they get read access to the request
+    # log". An apply fails on the NODE, and the node reports that back over its
+    # own API key - so the row carrying the diagnosis is an agent row with
+    # `user_id IS NULL`, which own-rows-only scoping hid from exactly the role
+    # the grant was written for. Scoped on `target`, not on `user_id IS NULL`:
+    # anonymous inbound traffic (failed logins and their usernames, unauthorised
+    # probes) is NOT agent traffic and stays admin-only.
     if not can_manage:
         params.append(current_user["id"])
-        where.append(f"(direction = 'inbound' AND user_id = ${len(params)})")
+        own = f"user_id = ${len(params)}"
+        params.append(TARGET_INBOUND_AGENT)
+        where.append(
+            f"(direction = 'inbound' AND ({own} OR target = ${len(params)}))"
+        )
 
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
@@ -466,7 +481,11 @@ async def get_request_log(log_id: int, authorization: Optional[str] = Header(Non
         record["client_ip"] = record.pop("client_ip_text", None)
 
         if not can_manage and not (
-            record.get("direction") == "inbound" and record.get("user_id") == current_user["id"]
+            record.get("direction") == "inbound"
+            and (
+                record.get("user_id") == current_user["id"]
+                or record.get("target") == TARGET_INBOUND_AGENT
+            )
         ):
             # Same self-scoping rule as the list endpoint. 404 rather than 403
             # so the endpoint does not confirm that a given id exists.
