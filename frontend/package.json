@@ -11,7 +11,7 @@
     "antd": "^5.2.0",
     "@ant-design/icons": "^5.0.0",
     "recharts": "^2.5.0",
-    "moment": "^2.29.0",
+    "moment": "^2.31.0",
     "react18-json-view": "^0.2.9",
     "monaco-editor": "^0.36.0",
     "@monaco-editor/react": "^4.6.0",
