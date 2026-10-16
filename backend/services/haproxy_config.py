@@ -1379,7 +1379,27 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                 logger.info(f"CONFIG GENERATION: Backend '{backend['name']}' has NO ACTIVE SERVERS. Writing backend block (will show as DOWN until servers added).")
             
             config_lines.append(f"backend {backend['name']}")
-            
+
+            # Issue #72: a second `stick-table` in one backend is FATAL in HAProxy
+            # ("stick-table name ... conflicts with table declared"), which makes the
+            # agent reject the WHOLE cluster config. Can happen when an imported table
+            # (options) meets one entered by hand in request/response headers. Keep the
+            # first one, like the frontend R3.3 dedup; configs with a single table are
+            # rendered byte-identical.
+            _be_stick_table_emitted = False
+
+            def _append_be_free_form(line_stripped: str) -> None:
+                nonlocal _be_stick_table_emitted
+                if line_stripped.startswith("stick-table"):
+                    if _be_stick_table_emitted:
+                        logger.warning(
+                            f"BACKEND STICK-TABLE DEDUP: skipping duplicate declaration in "
+                            f"backend '{backend['name']}': {line_stripped}"
+                        )
+                        return
+                    _be_stick_table_emitted = True
+                config_lines.append(f"    {line_stripped}")
+
             # --- HAProxy Configuration Best Practice Order ---
             # 1. Mode and balance method
             if backend.get('balance_method'):
@@ -1396,7 +1416,7 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     if line_stripped and line_stripped not in ('[]', '{}', 'null', 'None'):
                         # Lines are complete HAProxy option directives
                         # Examples: "option http-keep-alive", "option forwardfor"
-                        config_lines.append(f"    {line_stripped}")
+                        _append_be_free_form(line_stripped)
             
             # 3. Health check configuration
             if backend.get('health_check_uri'):
@@ -1452,7 +1472,7 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     # Skip empty strings, "[]", or invalid rules
                     if line_stripped and line_stripped not in ('[]', '{}', 'null', 'None'):
                         # Lines are already complete directives (e.g., "http-request set-header X-Backend test")
-                        config_lines.append(f"    {line_stripped}")
+                        _append_be_free_form(line_stripped)
             
             # 9. HTTP Response Headers
             if backend.get('response_headers'):
@@ -1461,7 +1481,7 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     # Skip empty strings, "[]", or invalid rules
                     if line_stripped and line_stripped not in ('[]', '{}', 'null', 'None'):
                         # Lines are already complete directives (e.g., "http-response add-header X-Powered-By Backend")
-                        config_lines.append(f"    {line_stripped}")
+                        _append_be_free_form(line_stripped)
 
             # Get all servers for this backend (including inactive ones for commenting)
             # CRITICAL FIX: Handle servers with NULL cluster_id (legacy data)

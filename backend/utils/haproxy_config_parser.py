@@ -11,6 +11,9 @@ from dataclasses import dataclass, asdict
 
 logger = logging.getLogger(__name__)
 
+_STICK_TABLE_LINE_RE = re.compile(r'^stick-table\s')
+_STICK_RULE_LINE_RE = re.compile(r'^stick\s+(on|match|store-request|store-response)\s')
+
 
 @dataclass
 class ParsedServer:
@@ -276,6 +279,17 @@ class HAProxyConfigParser:
                     continue
                 if re.match(r'^log-format(-sd)?\s', line, re.IGNORECASE):
                     log_format_list.append(line.strip())
+                    continue
+                # Issue #72: `stick-table` matched no branch below and was dropped
+                # without a warning, so the renderer's auto-inject replaced the
+                # operator's table with the 100k/30s default. Kept verbatim in
+                # `options`; the renderer routes it to the `stick` bucket.
+                if _STICK_TABLE_LINE_RE.match(line):
+                    options_list.append(line.strip())
+                    self.warnings.append(
+                        f"Frontend '{name}': stick-table imported as-is into Frontend Options: "
+                        f"'{line.strip()}'."
+                    )
                     continue
 
                 # Parse bind directive
@@ -585,6 +599,17 @@ class HAProxyConfigParser:
             options_list = []
 
             for line in lines:
+                # Issue #72: `stick-table` and `stick on|match|store-*` were dropped
+                # without a warning. Kept verbatim in `options`, which the renderer
+                # writes as-is.
+                if _STICK_TABLE_LINE_RE.match(line) or _STICK_RULE_LINE_RE.match(line):
+                    options_list.append(line.strip())
+                    self.warnings.append(
+                        f"Backend '{name}': stick directive imported as-is into Backend Options: "
+                        f"'{line.strip()}'."
+                    )
+                    continue
+
                 # Parse mode
                 mode_match = re.match(r'^mode\s+(\S+)', line, re.IGNORECASE)
                 if mode_match:

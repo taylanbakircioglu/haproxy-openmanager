@@ -1,3 +1,38 @@
+# Upgrade Notes — v1.11.3 (Config Import keeps `stick-table` and `stick` rules)
+
+**Backend change, no schema change, no agent change.** No `SCHEMA_VERSION` bump and no agent
+upgrade is needed.
+
+- **`stick-table` is no longer dropped on Config Import.** Frontend `stick-table` and backend
+  `stick-table` / `stick on|match|store-request|store-response` lines are imported as-is into the
+  entity's **Options** field and listed as import warnings. Before this release they were discarded
+  silently, and a frontend that still used `track-sc` / `sc_*` counters rendered the default table
+  `stick-table type ip size 100k expire 30s store http_req_rate(10s)` instead of the imported one.
+- **Re-import affected frontends and backends.** Entities imported with a custom `stick-table` on an
+  earlier version do not hold it; import the section again (the full frontend/backend block) to
+  store it. If you worked around the bug by putting a `stick-table` into Request Headers, remove it
+  from there after the re-import — the preview warns when both are present.
+- **Options are merged by kind.** An import that carries only stick lines keeps the existing option
+  lines, and an import that carries only option lines keeps the existing stick lines. An import
+  carrying both replaces both, as before.
+- **Generated lines are recognised, not stored.** The `stick-table type ip size 100k expire <N>s
+  store http_req_rate(10s)` the platform renders for Rate Limit / WAF `rate_limit` rules, and the
+  matching `track-sc0 src` / `sc_http_req_rate(0)` rules, are skipped (with an ℹ️ note) only where
+  the platform regenerates them. A `track-sc0` tracker on a frontend without Rate Limit or a WAF
+  `rate_limit` rule is now kept; earlier versions removed it from the preview.
+- **One stick-table per backend.** HAProxy rejects a second `stick-table` in the same proxy as a
+  fatal error; backends now render the first one and log the skipped duplicate, as frontends already
+  did.
+- **`peers`:** a stick-table that references `peers <name>` needs that section in each node's
+  `haproxy.cfg` above the first `defaults`/`frontend`/`backend`/`listen` section, which the agent
+  preserves. The platform does not manage `peers` sections.
+- Configs without stick lines parse, import and render exactly as before.
+
+**Rollback:** safe. No schema change. After a rollback the stick lines stay in Options and are still
+rendered (Options is free-form); only the import behaviour returns to dropping them.
+
+---
+
 # Upgrade Notes — v1.11.2 (read-only roles read SSL; private keys need `ssl.download`)
 
 **Backend and frontend change, no schema change, no agent change.** No `SCHEMA_VERSION` bump, so the

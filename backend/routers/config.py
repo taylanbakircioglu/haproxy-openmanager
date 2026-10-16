@@ -17,6 +17,13 @@ from utils.config_templates import (
     generate_config_from_template, TemplateCategory
 )
 from utils.haproxy_config_parser import parse_haproxy_config
+from utils.stick_table_import import (
+    drop_platform_stick_tables,
+    frontend_uses_counter,
+    merge_options,
+    stick_advisories,
+    strip_auto_headers,
+)
 from utils.logging_config import log_with_correlation, PerformanceLogger
 from auth_middleware import get_current_user_from_token, require_authenticated_user
 from database.connection import get_database_connection, close_database_connection
@@ -978,26 +985,61 @@ async def parse_bulk_config(
         # field, WAF rules table) that the parser cannot distinguish from user-defined
         # configuration. Strip all auto-managed patterns so the preview and comparison
         # only reflect user-defined configuration.
-        def _is_auto_header(line):
-            s = line.strip()
-            if "is_acme_challenge" in s:
-                return True
-            if "track-sc0 src" in s:
-                return True
-            if "sc_http_req_rate(0)" in s:
-                return True
-            if s.startswith("http-request") and " waf_" in s:
-                return True
-            return False
-
-        def _strip_auto_headers(headers_str):
-            if not headers_str:
-                return None
-            lines = [l for l in headers_str.split("\n") if not _is_auto_header(l)]
-            return "\n".join(lines) if lines else None
+        #
+        # Issue #72: the rate-limit lines (track-sc0 src / sc_http_req_rate(0)) are
+        # generator-owned only when the generator will emit them again for this
+        # frontend: its rate_limit is set or an active rate_limit WAF rule applies
+        # (same rule selection as services/haproxy_config.py). Otherwise they are
+        # the operator's own and were silently deleted on update. Errors fall back
+        # to "regenerates", i.e. the previous always-strip behaviour.
+        existing_frontend_rows = {}
+        platform_regenerates = {}
+        try:
+            global_rate_limit_waf = bool(await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1 FROM waf_rules w
+                    WHERE w.is_active = TRUE AND w.rule_type = 'rate_limit'
+                      AND (w.cluster_id = $1 OR w.cluster_id IS NULL)
+                      AND NOT EXISTS (
+                            SELECT 1 FROM frontend_waf_rules fwr WHERE fwr.waf_rule_id = w.id
+                      )
+                )
+            """, request.cluster_id))
+        except Exception as _waf_err:
+            logger.warning(f"BULK IMPORT: global rate_limit WAF lookup failed, assuming present: {_waf_err}")
+            global_rate_limit_waf = True
+        for frontend in frontends_data:
+            existing_frontend_rows[frontend["name"]] = await conn.fetchrow("""
+                SELECT * FROM frontends 
+                WHERE name = $1 AND cluster_id = $2
+                ORDER BY is_active DESC
+            """, frontend["name"], request.cluster_id)
+        existing_frontend_ids = [r["id"] for r in existing_frontend_rows.values() if r]
+        frontends_with_rate_limit_waf = set()
+        if existing_frontend_ids and not global_rate_limit_waf:
+            try:
+                rows = await conn.fetch("""
+                    SELECT DISTINCT fw.frontend_id
+                    FROM waf_rules w
+                    JOIN frontend_waf_rules fw ON w.id = fw.waf_rule_id
+                    WHERE w.is_active = TRUE AND w.rule_type = 'rate_limit'
+                      AND fw.frontend_id = ANY($1::int[])
+                """, existing_frontend_ids)
+                frontends_with_rate_limit_waf = {r["frontend_id"] for r in rows}
+            except Exception as _waf_err:
+                logger.warning(f"BULK IMPORT: assigned rate_limit WAF lookup failed, assuming present: {_waf_err}")
+                frontends_with_rate_limit_waf = set(existing_frontend_ids)
+        for frontend in frontends_data:
+            row = existing_frontend_rows[frontend["name"]]
+            platform_regenerates[frontend["name"]] = bool(
+                global_rate_limit_waf
+                or (row and row["rate_limit"])
+                or (row and row["id"] in frontends_with_rate_limit_waf)
+            )
 
         backends_data = [b for b in backends_data if b["name"] != "_acme_challenge_backend"]
 
+        stick_policy_warnings = []
         for frontend in frontends_data:
             frontend["acl_rules"] = [
                 r for r in (frontend.get("acl_rules") or [])
@@ -1007,7 +1049,9 @@ async def parse_bulk_config(
                 r for r in (frontend.get("use_backend_rules") or [])
                 if "_acme_challenge_backend" not in r
             ]
-            frontend["request_headers"] = _strip_auto_headers(frontend.get("request_headers"))
+            fe_regenerates = platform_regenerates[frontend["name"]]
+            frontend["request_headers"] = strip_auto_headers(
+                frontend.get("request_headers"), fe_regenerates)
             if frontend.get("tcp_request_rules"):
                 lines = [
                     l for l in frontend["tcp_request_rules"].split("\n")
@@ -1021,6 +1065,31 @@ async def parse_bulk_config(
                     frontend["default_backend"] = m.group(1) if m else None
                 else:
                     frontend["default_backend"] = None
+
+            # Issue #72: a generator-shaped stick-table that the generator will render
+            # itself must not be stored, or it would freeze later rate_limit / WAF
+            # window changes (Options are emitted first and win the dedup).
+            fe_uses_counter = frontend_uses_counter([
+                frontend.get(k) for k in (
+                    "options", "request_headers", "response_headers", "tcp_request_rules",
+                    "acl_rules", "use_backend_rules", "filters", "log_format",
+                )
+            ])
+            frontend["options"], dropped_tables = drop_platform_stick_tables(
+                frontend.get("options"), fe_regenerates, fe_uses_counter)
+            for table_line in dropped_tables:
+                parse_result.warnings = [
+                    w for w in parse_result.warnings
+                    if not (w.startswith(f"Frontend '{frontend['name']}': stick-table imported as-is")
+                            and table_line in w)
+                ]
+                stick_policy_warnings.append(
+                    f"ℹ️ Frontend '{frontend['name']}': stick-table '{table_line}' matches the "
+                    f"table HAProxy OpenManager generates for Rate Limit / WAF rate_limit rules "
+                    f"and is generated automatically for this frontend, so it is not stored."
+                )
+
+        parse_result.warnings.extend(stick_policy_warnings)
 
         parse_result.warnings = [
             w for w in parse_result.warnings if "_acme_challenge_backend" not in w
@@ -1166,12 +1235,27 @@ async def parse_bulk_config(
         update_servers = 0
         
         for frontend in frontends_data:
-            existing = await conn.fetchrow("""
-                SELECT * FROM frontends 
-                WHERE name = $1 AND cluster_id = $2
-                ORDER BY is_active DESC
-            """, frontend["name"], request.cluster_id)
-            
+            existing = existing_frontend_rows[frontend["name"]]
+            imported_options = frontend.get("options")
+            if existing:
+                frontend["options"] = merge_options(imported_options, existing.get("options"))
+
+            def _final(field):
+                # Bulk-create only overwrites a free-form field when the import carries it.
+                if frontend.get(field):
+                    return frontend.get(field)
+                return existing.get(field) if existing else None
+
+            enhanced_warnings.extend(stick_advisories(
+                "Frontend", frontend["name"], frontend.get("options"), imported_options,
+                {
+                    "Request Headers": _final("request_headers"),
+                    "Response Headers": _final("response_headers"),
+                    "TCP Request Rules": _final("tcp_request_rules"),
+                },
+                platform_regenerates[frontend["name"]],
+            ))
+
             if existing:
                 # Check if any field has actually changed AND track which fields changed
                 has_changes = False
@@ -1202,7 +1286,8 @@ async def parse_bulk_config(
                     has_changes = True
                     changes["maxconn"] = {"old": existing["maxconn"], "new": frontend["maxconn"]}
                 parsed_rh = frontend.get("request_headers")
-                db_rh = _strip_auto_headers(existing["request_headers"])
+                db_rh = strip_auto_headers(
+                    existing["request_headers"], platform_regenerates[frontend["name"]])
                 if parsed_rh and parsed_rh != db_rh:
                     has_changes = True
                     changes["request_headers"] = {"old": db_rh, "new": parsed_rh}
@@ -1292,6 +1377,24 @@ async def parse_bulk_config(
                 WHERE name = $1 AND cluster_id = $2
                 ORDER BY is_active DESC
             """, backend["name"], request.cluster_id)
+
+            imported_options = backend.get("options")
+            if existing:
+                backend["options"] = merge_options(imported_options, existing.get("options"))
+
+            def _final_be(field):
+                if backend.get(field):
+                    return backend.get(field)
+                return existing.get(field) if existing else None
+
+            enhanced_warnings.extend(stick_advisories(
+                "Backend", backend["name"], backend.get("options"), imported_options,
+                {
+                    "Request Headers": _final_be("request_headers"),
+                    "Response Headers": _final_be("response_headers"),
+                },
+                False,
+            ))
             
             if existing:
                 # Check if any field has actually changed AND track which fields changed
