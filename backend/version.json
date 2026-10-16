@@ -1,5 +1,5 @@
 {
-  "version": "1.11.1",
-  "releaseName": "Adoption cannot hide a node; Config Import on fresh installs",
-  "releaseDate": "2026-08-15"
+  "version": "1.11.2",
+  "releaseName": "Read-only roles read SSL without pool access; private keys need ssl.download",
+  "releaseDate": "2026-10-01"
 }

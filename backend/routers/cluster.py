@@ -2646,9 +2646,25 @@ async def get_config_version_diff(cluster_id: int, version_id: int, authorizatio
                     cert_file_content_lines.append("")
                     cert_file_content_lines.append("# Private Key Content:")
                     
-                    # Add private key content
+                    # Add private key content. Only ssl.download holders with
+                    # pool access to this cluster see the key; for everyone else
+                    # (e.g. the read-only viewer role) it is redacted.
                     if ssl_cert['private_key_content']:
-                        cert_file_content_lines.extend(ssl_cert['private_key_content'].strip().split('\n'))
+                        from auth_middleware import check_user_permission
+                        can_view_private_key = await check_user_permission(
+                            current_user['id'], "ssl", "download", current_user=current_user
+                        )
+                        if can_view_private_key:
+                            try:
+                                await validate_user_cluster_access(current_user['id'], cluster_id, conn)
+                            except HTTPException as access_error:
+                                if access_error.status_code != 403:
+                                    raise
+                                can_view_private_key = False
+                        if can_view_private_key:
+                            cert_file_content_lines.extend(ssl_cert['private_key_content'].strip().split('\n'))
+                        else:
+                            cert_file_content_lines.append("# [redacted: ssl.download permission required]")
                     
                     # Add chain content if exists
                     if ssl_cert['chain_content'] and ssl_cert['chain_content'].strip():

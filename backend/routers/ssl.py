@@ -9,7 +9,11 @@ from datetime import datetime, timezone
 
 # Import database and models
 from database.connection import get_database_connection, close_database_connection
-from auth_middleware import get_current_user_from_token, require_authenticated_user
+from auth_middleware import (
+    get_current_user_from_token,
+    require_authenticated_user,
+    validate_cluster_read_access,
+)
 from models.ssl import SSLCertificate, SSLCertificateCreate, SSLCertificateUpdate, SSLCertificateResponse
 from utils.ssl_parser import parse_ssl_certificate, validate_private_key, validate_certificate_chain, format_certificate_info
 from utils.activity_log import log_user_activity
@@ -226,10 +230,14 @@ async def get_ssl_certificates(
     try:
         conn = await get_database_connection()
         if current_user and cluster_id:
-            # Cluster-scoped enumeration must respect cluster access.
-            # Re-raises HTTPException(403/404) cleanly; finally below
-            # releases the connection.
-            await validate_user_cluster_access(current_user["id"], cluster_id, conn)
+            # Cluster-scoped enumeration must respect cluster access:
+            # an ssl.read role reads every cluster, anyone else needs
+            # validate_user_cluster_access (user_pool_access). Re-raises
+            # HTTPException(403/404) cleanly; finally below releases the
+            # connection.
+            await validate_cluster_read_access(
+                current_user, cluster_id, conn, "ssl", validate_user_cluster_access
+            )
 
         # First check if ssl_certificates table exists
         try:
@@ -761,10 +769,28 @@ async def get_ssl_certificate(cert_id: int, authorization: str = Header(None)):
             await close_database_connection(conn)
             raise HTTPException(status_code=404, detail="SSL certificate not found")
         
-        # Validate user access to cluster
+        # Validate user access to cluster (an ssl.read role reads every cluster)
         if certificate['cluster_id']:
-            await validate_user_cluster_access(current_user['id'], certificate['cluster_id'], conn)
-        
+            await validate_cluster_read_access(
+                current_user, certificate['cluster_id'], conn, "ssl", validate_user_cluster_access
+            )
+
+        # The private key is returned only to ssl.download holders who also
+        # pass the pool check that guarded this route before read access was
+        # widened. Everyone else (e.g. the read-only viewer role) gets the
+        # certificate without its key.
+        from auth_middleware import check_user_permission
+        can_view_private_key = await check_user_permission(
+            current_user['id'], "ssl", "download", current_user=current_user
+        )
+        if can_view_private_key and certificate['cluster_id']:
+            try:
+                await validate_user_cluster_access(current_user['id'], certificate['cluster_id'], conn)
+            except HTTPException as access_error:
+                if access_error.status_code != 403:
+                    raise
+                can_view_private_key = False
+
         # For now, assume no pending changes (SSL config versions need separate implementation)
         pending_versions = 0
         
@@ -805,7 +831,13 @@ async def get_ssl_certificate(cert_id: int, authorization: str = Header(None)):
             cert_dict['all_domains'] = []
         
         cert_dict['has_pending_config'] = pending_versions > 0
-        
+
+        cert_dict['private_key_redacted'] = (
+            not can_view_private_key and bool(cert_dict.get('private_key_content'))
+        )
+        if not can_view_private_key:
+            cert_dict['private_key_content'] = None
+
         cert_dict['usage_count'] = len(used_by_frontends) + len(used_by_servers)
         cert_dict['used_by_frontends'] = [
             {'id': f['id'], 'name': f['name'], 'cluster_name': f['cluster_name']}

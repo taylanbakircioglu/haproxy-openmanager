@@ -1188,11 +1188,16 @@ const SSLManagement = () => {
             {({ getFieldValue }) => {
               const usageType = getFieldValue('usage_type');
               const privateKeyValue = getFieldValue('private_key_content');
-              const isRequired = usageType === 'frontend';
+              // The stored key is withheld from users without ssl.download; leaving
+              // the field empty on edit keeps it (the backend falls back to it).
+              const storedKeyKept = !!selectedCertificate?.private_key_redacted;
+              const isRequired = usageType === 'frontend' && !storedKeyKept;
               const hasValue = privateKeyValue && privateKeyValue.trim();
               
               let extraMessage;
-              if (isRequired) {
+              if (storedKeyKept && !hasValue) {
+                extraMessage = <span style={{ color: '#999' }}>Stored private key is hidden and will be kept. Paste a new key only to replace it.</span>;
+              } else if (isRequired) {
                 extraMessage = hasValue 
                   ? <span style={{ color: '#52c41a' }}>Private key provided</span>
                   : <span style={{ color: '#ff4d4f' }}>Required for Frontend SSL</span>;
@@ -1233,7 +1238,7 @@ const SSLManagement = () => {
                   <TextArea
                     rows={8}
                     disabled={isLetsEncryptCert}
-                    placeholder={isLetsEncryptCert ? "Managed by ACME automation" : "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEF...\n-----END PRIVATE KEY-----"}
+                    placeholder={isLetsEncryptCert ? "Managed by ACME automation" : storedKeyKept ? "Stored private key hidden (ssl.download permission required)" : "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEF...\n-----END PRIVATE KEY-----"}
                   />
                 </Form.Item>
               );
@@ -1361,19 +1366,30 @@ const SSLManagement = () => {
               )}
             </TabPane>
             <TabPane tab="Private Key" key="3">
-              <Alert
-                message="Security Warning"
-                description="Private key content is sensitive. Only view when necessary and ensure secure handling."
-                type="warning"
-                showIcon
-                style={{ marginBottom: 16 }}
-              />
-              <TextArea
-                value={selectedCertificate.private_key_content}
-                rows={12}
-                readOnly
-                style={{ fontFamily: 'monospace' }}
-              />
+              {selectedCertificate.private_key_redacted ? (
+                <Alert
+                  message="Private key hidden"
+                  description="A private key is stored for this certificate, but viewing it requires the ssl.download permission."
+                  type="info"
+                  showIcon
+                />
+              ) : (
+                <>
+                  <Alert
+                    message="Security Warning"
+                    description="Private key content is sensitive. Only view when necessary and ensure secure handling."
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                  />
+                  <TextArea
+                    value={selectedCertificate.private_key_content}
+                    rows={12}
+                    readOnly
+                    style={{ fontFamily: 'monospace' }}
+                  />
+                </>
+              )}
             </TabPane>
             <TabPane tab={
               <span>

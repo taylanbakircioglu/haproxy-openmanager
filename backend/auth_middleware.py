@@ -299,6 +299,28 @@ async def check_user_permission(
         logger.error(f"Error checking permission for user {user_id}: {e}")
         return False
 
+async def validate_cluster_read_access(
+    current_user: Dict[str, Any],
+    cluster_id: int,
+    conn,
+    resource: str,
+    validate_pool_access,
+) -> bool:
+    """Cluster gate for READ endpoints.
+
+    A role that grants ``<resource>.read`` (e.g. the built-in read-only
+    ``viewer``) can read that resource on every cluster, the same way the
+    cluster, frontend, backend and WAF rule lists already behave. Without
+    the role permission the caller falls back to ``validate_pool_access``
+    (the router's ``user_pool_access`` check). Write endpoints keep using
+    the pool check directly; this helper must not be used for them.
+    """
+    if await check_user_permission(current_user["id"], resource, "read", current_user=current_user):
+        if not await conn.fetchval("SELECT id FROM haproxy_clusters WHERE id = $1", cluster_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cluster not found")
+        return True
+    return await validate_pool_access(current_user["id"], cluster_id, conn)
+
 async def get_current_user_with_permissions(authorization: Optional[str] = None) -> Dict[str, Any]:
     """
     Get current user with their permissions included

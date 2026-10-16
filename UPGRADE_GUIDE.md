@@ -1,3 +1,33 @@
+# Upgrade Notes — v1.11.2 (read-only roles read SSL; private keys need `ssl.download`)
+
+**Backend and frontend change, no schema change, no agent change.** No `SCHEMA_VERSION` bump, so the
+built-in roles are **not** re-seeded and no agent upgrade is needed.
+
+- **A read-only user can read SSL certificates through the API and the UI.** `user_pool_access` is
+  never filled in by the UI, so every non-admin user created there has no pool access. The SSL list
+  with `?cluster_id=` and the SSL detail required pool access on read and answered **403**, while
+  clusters, frontends, backends, WAF rules, agents and VIPs were readable. Now a role that grants
+  `ssl.read` (or `waf.read` for `GET /api/waf/stats?cluster_id=`) reads that resource on every
+  cluster; a role without it still needs pool access. Write endpoints are unchanged.
+- **The SSL private key is returned only with `ssl.download`.** Before this release
+  `GET /api/ssl/certificates/{id}` and the SSL change diff in Apply Management
+  (`GET /api/clusters/{id}/config-versions/{version_id}/diff`) returned the private key to **any**
+  authenticated user, including the `viewer` role. The key is now included only when the caller has
+  `ssl.download` **and** passes the pool check that guarded the detail route before. Otherwise the
+  detail returns `private_key_content: null` with `private_key_redacted: true`, and the diff shows a
+  redaction line in place of the key. Of the built-in roles, `super_admin`, `operator` and
+  `security_admin` hold `ssl.download`; `viewer` does not.
+- **Check custom roles.** A custom role with `ssl.update` but without `ssl.download` no longer sees
+  the private key. Editing still works: the key field becomes optional and an empty field keeps the
+  stored key. Add `ssl.download` to the role if its users must see or copy the key.
+- `GET /api/waf/stats` now returns 403/404 as such instead of wrapping them in a 500.
+
+**Rollback:** safe. No schema or data change; reverting restores the previous behaviour, in which a
+read-only user without pool access gets 403 on SSL reads and every authenticated user can read
+private keys.
+
+---
+
 # Upgrade Notes — v1.11.1 (adoption cannot hide a node; Config Import on fresh installs)
 
 **Agent-script change, no schema change.** No `SCHEMA_VERSION` bump, so the built-in roles are

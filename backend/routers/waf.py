@@ -91,6 +91,7 @@ async def validate_user_cluster_access(user_id: int, cluster_id: int, conn):
 @router.get("/stats")
 async def get_waf_stats(cluster_id: Optional[int] = None, authorization: str = Header(None)):
     """Get WAF statistics and overview, optionally filtered by cluster"""
+    conn = None
     try:
         # Get current user for cluster validation
         from auth_middleware import get_current_user_from_token
@@ -98,9 +99,12 @@ async def get_waf_stats(cluster_id: Optional[int] = None, authorization: str = H
         
         conn = await get_database_connection()
         
-        # Validate cluster access if cluster_id provided
+        # Validate cluster access if cluster_id provided (a waf.read role reads every cluster)
         if cluster_id:
-            await validate_user_cluster_access(current_user['id'], cluster_id, conn)
+            from auth_middleware import validate_cluster_read_access
+            await validate_cluster_read_access(
+                current_user, cluster_id, conn, "waf", validate_user_cluster_access
+            )
         
         # Build cluster filter condition
         cluster_filter = ""
@@ -179,6 +183,12 @@ async def get_waf_stats(cluster_id: Optional[int] = None, authorization: str = H
             ]
         }
         
+    except HTTPException:
+        # Keep 401/403/404 as-is instead of re-wrapping them as 500. These are
+        # only raised before the success-path close, so release the handle here.
+        if conn is not None:
+            await close_database_connection(conn)
+        raise
     except Exception as e:
         logger.error(f"Error fetching WAF stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
