@@ -1796,7 +1796,24 @@ async def ensure_agent_activity_logs_table():
 # Additive + idempotent; no existing table is altered, agents never read this
 # table. Same caveat as v1.10.4: this bump re-seeds the four built-in roles to
 # their defaults, so export role customizations before upgrading.
-SCHEMA_VERSION = 12
+#
+# v1.12.0 (issue #73 — several VIPs per node, several addresses per VIP): bumped
+# 12 -> 13 as a DELTA. A database already at 12 runs only the steps listed in
+# _delta_steps() — two additive columns — and keeps its role customizations; the full
+# sequence (and with it the built-in role re-seed) runs only for databases older than
+# _DELTA_BASE_VERSION or without a marker, exactly as before. Every delta step is ALSO
+# called from _run_all_migrations_inner(), so both paths end at the same schema.
+# A future change that alters seeded/role data needs a full bump: raise
+# _DELTA_BASE_VERSION to the new SCHEMA_VERSION instead of adding a delta step.
+SCHEMA_VERSION = 13
+_DELTA_BASE_VERSION = 12
+
+
+def _delta_steps():
+    """(version, step) pairs a database at >= _DELTA_BASE_VERSION runs instead of the full
+    sequence. Each step takes the migration connection and raises on failure, so the version
+    marker is not written and the next start retries."""
+    return [(13, ensure_vip_multi_address_columns)]
 
 
 async def run_all_migrations():
@@ -1845,7 +1862,13 @@ async def run_all_migrations():
             logger.info(f"Schema already at version {applied_version} (>= {SCHEMA_VERSION}); skipping migration run.")
             return
 
-        await _run_all_migrations_inner()
+        if applied_version is not None and applied_version >= _DELTA_BASE_VERSION:
+            for version, step in _delta_steps():
+                if version > applied_version:
+                    logger.info(f"Applying schema delta {applied_version} -> {version}")
+                    await step(lock_conn)
+        else:
+            await _run_all_migrations_inner()
 
         try:
             await lock_conn.execute("""
@@ -1935,6 +1958,7 @@ async def _run_all_migrations_inner():
     # Issue #27 — HA/VIP Keepalived management (v1.7.0): two brand-new tables.
     # MUST run after its FK targets (haproxy_cluster_pools/agents/users), all created above.
     await ensure_vip_tables()
+    await ensure_vip_multi_address_columns()
 
     # v1.9.0 — CSR creation: brand-new ssl_csrs table. FK-references
     # ssl_certificates/users, both created above.
@@ -2406,6 +2430,36 @@ async def ensure_vip_tables():
         # Don't raise — follow the same defensive pattern as ensure_mfa_columns
     finally:
         if conn:
+            await close_database_connection(conn)
+
+
+async def ensure_vip_multi_address_columns(conn=None):
+    """v1.12.0 (issue #73). Additive + idempotent:
+
+      * vip_instances.additional_ips — the VIP's addresses beyond virtual_ip, as a JSON list
+        of {"address", "prefix_length"}. Empty for every existing VIP, which renders exactly
+        as before.
+      * vip_discoveries.analysis_version — which parser produced the stored analysis. Rows
+        written by an older parser read 0, and the agent is asked to re-report them once.
+
+    Raises on failure (unlike ensure_vip_tables): code reads these columns unconditionally,
+    so the schema version must not be recorded without them.
+    """
+    own = conn is None
+    if own:
+        conn = await get_database_connection()
+    try:
+        # IF EXISTS: ensure_vip_tables() tolerates its own failure, and a missing VIP table
+        # must keep degrading only the VIP feature, not stop the backend from starting.
+        await conn.execute(
+            "ALTER TABLE IF EXISTS vip_instances ADD COLUMN IF NOT EXISTS additional_ips "
+            "JSONB NOT NULL DEFAULT '[]'::jsonb;")
+        await conn.execute(
+            "ALTER TABLE IF EXISTS vip_discoveries ADD COLUMN IF NOT EXISTS analysis_version "
+            "SMALLINT NOT NULL DEFAULT 0;")
+        logger.info("✅ VIP multi-address columns ensured (issue #73)")
+    finally:
+        if own:
             await close_database_connection(conn)
 
 async def add_ssl_certificate_id_to_backend_servers():

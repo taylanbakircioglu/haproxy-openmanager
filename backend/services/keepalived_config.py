@@ -190,3 +190,101 @@ def render_keepalived_conf(*, vip: dict, members: List[dict], this_agent: dict,
         lines.append("    }")
     lines.append("}")
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Issue #73 — several VIPs on one node
+# ---------------------------------------------------------------------------
+# A node deploys ONE keepalived.conf, and each member row stores the full single-VIP file
+# render_keepalived_conf produced at apply time. A node that belongs to several VIPs gets
+# those applied files merged into one: global_defs once, then every VIP's vrrp_script and
+# vrrp_instance. The health-check script is renamed per VIP (chk_haproxy_<id>) because each
+# VIP's failover weight is derived from its own priorities, and keepalived needs unique
+# script names. A node with a single VIP is served its applied file unchanged.
+class KeepalivedComposeError(ValueError):
+    """An applied snapshot is not in the shape render_keepalived_conf produces."""
+
+
+def _top_level_blocks(conf: str) -> List[tuple]:
+    """Split our own render into (name, lines) top-level blocks; comment lines are skipped."""
+    blocks: List[tuple] = []
+    current: Optional[List[str]] = None
+    depth = 0
+    for line in conf.split("\n"):
+        stripped = line.strip()
+        if current is None:
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not stripped.endswith("{"):
+                raise KeepalivedComposeError(f"unexpected top-level line: {stripped[:60]}")
+            current = [line]
+            depth = 1
+            continue
+        current.append(line)
+        if stripped.startswith("auth_pass "):
+            continue  # the secret may contain braces; it is a single token, never a block
+        depth += stripped.count("{") - stripped.count("}")
+        if depth == 0:
+            blocks.append((" ".join(current[0].strip().rstrip("{").split()), current))
+            current = None
+        elif depth < 0:
+            raise KeepalivedComposeError("unbalanced braces")
+    if current is not None:
+        raise KeepalivedComposeError("unterminated block")
+    return blocks
+
+
+def compose_node_keepalived_conf(applied: List[tuple]) -> str:
+    """Merge the applied single-VIP files of one node into the file the node deploys.
+
+    `applied` is [(vip_id, applied_config_content), ...]. One entry is returned unchanged,
+    so nodes with a single VIP keep the exact bytes (and hash) they already run. Raises
+    KeepalivedComposeError when a snapshot does not have the expected shape; the caller
+    must then leave the node alone rather than deploy a partial file.
+    """
+    if not applied:
+        raise KeepalivedComposeError("nothing to compose")
+    if len(applied) == 1:
+        return applied[0][1]
+
+    header: List[str] = [f"{OWNERSHIP_MARKER} — DO NOT EDIT"]
+    global_defs: Optional[List[str]] = None
+    scripts: List[str] = []
+    instances: List[str] = []
+    for vip_id, conf in sorted(applied, key=lambda item: int(item[0])):
+        vip_id = int(vip_id)
+        for line in (conf or "").split("\n"):
+            if line.startswith("# VIP "):
+                header.append(line)
+        blocks = _top_level_blocks(conf or "")
+        names = [name for name, _ in blocks]
+        if names.count("global_defs") != 1 or names.count(f"vrrp_instance {_vrrp_instance_name(vip_id)}") != 1:
+            raise KeepalivedComposeError(f"VIP {vip_id}: applied config has an unexpected layout")
+        if any(n not in ("global_defs", "vrrp_script chk_haproxy", f"vrrp_instance {_vrrp_instance_name(vip_id)}")
+               for n in names):
+            raise KeepalivedComposeError(f"VIP {vip_id}: applied config has an unexpected block")
+        script_name = f"chk_haproxy_{vip_id}"
+        for name, body in blocks:
+            if name == "global_defs":
+                if global_defs is None:
+                    global_defs = body
+            elif name == "vrrp_script chk_haproxy":
+                scripts.append("\n".join([f"vrrp_script {script_name} {{"] + body[1:]))
+            else:
+                renamed, in_track = [], False
+                for line in body:
+                    s = line.strip()
+                    if s == "track_script {":
+                        in_track = True
+                    elif in_track and s == "}":
+                        in_track = False
+                    elif in_track and s == "chk_haproxy":
+                        line = line.replace("chk_haproxy", script_name)
+                    renamed.append(line)
+                instances.append("\n".join(renamed))
+
+    out: List[str] = header + global_defs + [""]
+    for block in scripts:
+        out.extend([block, ""])
+    out.append("\n\n".join(instances))
+    return "\n".join(out) + "\n"

@@ -78,7 +78,7 @@ const mergeBlockers = (lists) => {
 
 // This component uses raw fetch(), but extractApiError expects an axios-shaped error
 // (err.response.data). Read the fetch Response body and reuse the envelope-aware extractor
-// so backend messages — e.g. the 409 "node already in VIP X" — actually reach the user.
+// so backend messages — e.g. the 409 "address already used by VIP X" — actually reach the user.
 const fetchApiError = async (res, fallback) => {
   try { const data = await res.json(); return extractApiError({ response: { data } }, fallback); }
   catch { return fallback; }

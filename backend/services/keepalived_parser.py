@@ -31,6 +31,10 @@ import ipaddress
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+# Stored with every discovery (vip_discoveries.analysis_version). Bump it whenever the
+# analysis or its blockers change: rows from an older parser make the agent re-report once.
+ANALYSIS_VERSION = 1
+
 # Directives `render_keepalived_conf` emits, and therefore the only ones a takeover can
 # reproduce. Anything else found in a vrrp_instance is reported in `unsupported`.
 _SUPPORTED_INSTANCE_KEYS = {
@@ -379,6 +383,17 @@ _DEFAULT_STATE = "BACKUP"
 OUR_CHECK_SCRIPT_NAME = "chk_haproxy"
 
 
+MULTI_INSTANCE_MARKER = "vrrp_instance blocks"
+
+
+def multi_instance_blocker(count: int) -> str:
+    """Adoption replaces the node's whole keepalived.conf with ONE instance. Not resolvable:
+    the text must contain neither _LOSS_MARKER nor _PREFIX_MARKER."""
+    return (f"the file declares {count} {MULTI_INSTANCE_MARKER}; adoption takes over the whole "
+            f"file, so the other instances would be removed from the node — adopting from a "
+            f"keepalived.conf with several instances is not supported")
+
+
 def build_adoption_candidate(parsed: Dict[str, Any], instance: Dict[str, Any]) -> Dict[str, Any]:
     """Map one parsed `vrrp_instance` onto vip_instances / vip_members fields.
 
@@ -398,6 +413,13 @@ def build_adoption_candidate(parsed: Dict[str, Any], instance: Dict[str, Any]) -
         blockers.append(
             f"line {d['line']}: `{d['directive']}` — OpenManager's renderer cannot reproduce "
             f"this, so adopting would delete it")
+
+    # Adoption replaces the node's whole keepalived.conf with the render of ONE instance, so
+    # every other instance in the file would disappear from the node. Not resolvable: none of
+    # the wording below may contain _LOSS_MARKER or _PREFIX_MARKER.
+    instance_total = len(parsed.get("instances") or [])
+    if instance_total > 1:
+        blockers.append(multi_instance_blocker(instance_total))
 
     vips = instance.get("virtual_ips") or []
     if len(vips) == 0:
@@ -526,6 +548,7 @@ def analyse_keepalived_conf(text: str) -> Dict[str, Any]:
     """Parse + map in one call: the shape the discovery endpoint stores and the UI renders."""
     parsed = parse_keepalived_conf(text)
     return {
+        "analysis_version": ANALYSIS_VERSION,
         "instance_count": len(parsed["instances"]),
         "sync_groups": parsed["sync_groups"],
         "global_defs": parsed["global_defs"],

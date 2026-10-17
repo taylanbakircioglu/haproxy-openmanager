@@ -282,21 +282,9 @@ async def restore_vip_from_rejected_version(conn, version_id: int):
     if not await conn.fetchrow("SELECT 1 FROM vip_instances WHERE id=$1", vip_id):
         return "the VIP no longer exists — re-create it from the HA/VIP page"
     sv, sm = ps["vip"], ps.get("members", [])
-    # One-VIP-per-agent must STILL hold after reactivation: if a member was meanwhile added
-    # to another active VIP (while this one was rejected/soft-deleted), undoing here would
-    # create a double-membership — and since the delivery endpoint serves one VIP per agent,
-    # reactivating this (never-applied → not_configured) VIP would tear down the other live
-    # VIP on that node. Block it with a clear message (review round-3 FINDING 2).
-    member_ids = [m["agent_id"] for m in sm]
-    if member_ids:
-        dup = await conn.fetchrow(
-            "SELECT a.name AS agent_name, v.name AS vip_name FROM vip_members vm "
-            "JOIN vip_instances v ON v.id = vm.vip_id JOIN agents a ON a.id = vm.agent_id "
-            "WHERE vm.agent_id = ANY($1) AND v.is_active = TRUE AND v.id <> $2 LIMIT 1",
-            member_ids, vip_id)
-        if dup:
-            return (f"node '{dup['agent_name']}' now belongs to active VIP '{dup['vip_name']}' — "
-                    f"remove it there first, then undo")
+    # Issue #73: a member that meanwhile joined another active VIP keeps it. The delivery
+    # endpoint serves a node every active VIP that has an applied snapshot, so reactivating
+    # this one (never applied, or applied earlier) cannot displace the other.
     # Preserve the running (applied) snapshot for members that remain, so undo of an edit
     # never momentarily flips a live node to not_configured (T-1).
     prev = {r["agent_id"]: r for r in await conn.fetch(
@@ -540,24 +528,9 @@ async def _validate_members_against_pool(conn, pool_id: int, members: List, vip_
         if row["pool_id"] != pool_id:
             raise HTTPException(status_code=400,
                                 detail=f"agent {m.agent_id} is not in pool {pool_id}")
-    # One active VIP per agent (v1): a node deploys a single keepalived.conf, and the
-    # delivery endpoint serves one VIP per agent — a second active membership would never
-    # converge (stuck SYNCING) instead of erroring. Reject it up front (review MED-2).
-    agent_ids = [m.agent_id for m in members]
-    if agent_ids:
-        dq = ("SELECT a.name AS agent_name, v.name AS vip_name "
-              "FROM vip_members vm JOIN vip_instances v ON v.id = vm.vip_id "
-              "JOIN agents a ON a.id = vm.agent_id "
-              "WHERE vm.agent_id = ANY($1) AND v.is_active = TRUE")
-        dparams = [agent_ids]
-        if exclude_vip_id is not None:
-            dq += " AND v.id <> $2"
-            dparams.append(exclude_vip_id)
-        dup = await conn.fetchrow(dq + " LIMIT 1", *dparams)
-        if dup:
-            raise HTTPException(status_code=409,
-                                detail=f"node '{dup['agent_name']}' is already a member of VIP "
-                                       f"'{dup['vip_name']}' — a node can belong to only one VIP")
+    # Issue #73: a node may belong to several VIPs. The delivery endpoint merges their applied
+    # snapshots into the node's one keepalived.conf; the pool-scoped VRID uniqueness
+    # (uq_vip_vrid_active) keeps their VRRP instances apart.
     # VIP must not be an existing agent's primary IP (INET cast, SQL-1)
     clash = await conn.fetchval("SELECT 1 FROM agents WHERE ip_address = $1::inet LIMIT 1", vip_virtual_ip)
     if clash:
@@ -826,6 +799,23 @@ async def apply_vip(vip_id: int, request: Request, authorization: str = Header(N
         master_prio = masters[0]["priority"]
         if any(m["role"] == "BACKUP" and m["priority"] >= master_prio for m in members):
             raise HTTPException(status_code=400, detail="MASTER priority must exceed every BACKUP")
+        # Issue #73: an adoption made before v1.12.0 may still be waiting for this Apply. Taking
+        # over a file with several vrrp_instance blocks would remove the others from the node.
+        multi = await conn.fetchrow("""
+            SELECT a.name AS agent_name, (d.analysis->>'instance_count')::int AS n
+            FROM vip_members m
+            JOIN vip_discoveries d ON d.agent_id = m.agent_id
+            JOIN agents a ON a.id = m.agent_id
+            WHERE m.vip_id = $1 AND m.takeover_expected_hash IS NOT NULL
+              AND d.config_hash = m.takeover_expected_hash
+              AND COALESCE((d.analysis->>'instance_count')::int, 0) > 1
+            LIMIT 1
+        """, vip_id)
+        if multi:
+            raise HTTPException(status_code=409, detail=(
+                f"{multi['agent_name']}'s keepalived.conf declares {multi['n']} vrrp_instance blocks; "
+                f"taking it over would remove the others from the node. Reject this adoption."))
+
 
         auth_plain = decrypt_vrrp_secret(v["auth_pass_encrypted"]) if v["auth_pass_encrypted"] else None
         # If a secret is set but can't be decrypted (SECRET_KEY/VIP_ENCRYPTION_KEY rotated or
@@ -1049,6 +1039,16 @@ def _discovery_row_to_api(row) -> dict:
             analysis = json.loads(analysis)
         except (json.JSONDecodeError, TypeError):
             analysis = None
+    # Issue #73: an analysis stored by an older parser does not carry the multi-instance
+    # blocker yet; show it here exactly as adopt_vip enforces it.
+    count = int((analysis or {}).get("instance_count") or 0) if isinstance(analysis, dict) else 0
+    if count > 1:
+        from services.keepalived_parser import MULTI_INSTANCE_MARKER, multi_instance_blocker
+        for cand in analysis.get("candidates") or []:
+            blockers = cand.setdefault("blockers", [])
+            if not any(MULTI_INSTANCE_MARKER in b for b in blockers):
+                blockers.append(multi_instance_blocker(count))
+            cand["adoptable"] = False
     return {
         "agent_id": row["agent_id"],
         "agent_name": row["agent_name"],
@@ -1133,6 +1133,7 @@ async def _collect_instance_participants(conn, *, pool_id: int, vrid: int, virtu
                     "agent_id": r["agent_id"], "agent_name": r["agent_name"],
                     "ip_address": r["ip_address"], "config_hash": r["config_hash"],
                     "auth_pass_encrypted": r["auth_pass_encrypted"],
+                    "instance_count": int((analysis or {}).get("instance_count") or 0),
                     "candidate": cand,
                 })
                 break
@@ -1206,7 +1207,8 @@ async def adopt_vip(payload: dict, request: Request, authorization: str = Header
             except (TypeError, ValueError):
                 raise HTTPException(status_code=400, detail="prefix_length must be an integer")
 
-        from services.keepalived_parser import remaining_blockers
+        from services.keepalived_parser import (
+            MULTI_INSTANCE_MARKER, multi_instance_blocker, remaining_blockers)
 
         vrid = vip_fields.get("virtual_router_id")
         virtual_ip = vip_fields.get("virtual_ip")
@@ -1236,6 +1238,9 @@ async def adopt_vip(payload: dict, request: Request, authorization: str = Header
                 prefix_supplied=vip_fields.get("prefix_length") is not None,
                 accept_data_loss=bool(payload.get("accept_data_loss")),
             )
+            # Issue #73: also for discoveries analysed before the parser reported this itself.
+            if p["instance_count"] > 1 and not any(MULTI_INSTANCE_MARKER in b for b in rem):
+                rem.append(multi_instance_blocker(p["instance_count"]))
             if rem:
                 raise HTTPException(status_code=422, detail={
                     "message": f"This keepalived config cannot be adopted as-is ({p['agent_name']})",

@@ -460,7 +460,8 @@ def test_discovery_cache_defers_to_the_server():
     assert agent_router.count('AS discovery_known') == 1, (
         "the keepalived-config query must report whether a discovery row exists"
     )
-    assert agent_router.count('"discovery_known": bool(agent["discovery_known"])') == 5, (
+    # 7 = the five original paths + the v1.12.0 merged-delivery and compose_error paths.
+    assert agent_router.count('"discovery_known": bool(agent["discovery_known"])') == 7, (
         "every response path that knows the agent must carry the flag — the adoptable nodes are "
         "precisely the not_configured ones"
     )

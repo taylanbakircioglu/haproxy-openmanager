@@ -931,16 +931,17 @@ async def delete_agent(agent_id: int, authorization: str = Header(None)):
         # with no way to be told to tear down (review MED-3). Make the operator remove it
         # from the VIP first — that stages a clean PENDING change they can apply.
         try:
-            vip_member = await conn.fetchrow(
+            # A node may belong to several VIPs (issue #73); name them all.
+            vip_names = [r["name"] for r in await conn.fetch(
                 "SELECT v.name FROM vip_members vm JOIN vip_instances v ON v.id = vm.vip_id "
-                "WHERE vm.agent_id = $1 AND v.is_active = TRUE LIMIT 1", agent_id)
+                "WHERE vm.agent_id = $1 AND v.is_active = TRUE ORDER BY v.name", agent_id)]
         except Exception:  # noqa: BLE001 — vip_* may not exist on older schemas; don't block delete
-            vip_member = None
-        if vip_member:
+            vip_names = []
+        if vip_names:
             await close_database_connection(conn)
             raise HTTPException(
                 status_code=409,
-                detail=(f"This node is a member of VIP '{vip_member['name']}'. Remove it from the "
+                detail=(f"This node is a member of VIP '{', '.join(vip_names)}'. Remove it from the "
                         f"VIP on the HA / VIP page (and apply) before deleting the agent."))
 
         await conn.execute("DELETE FROM agents WHERE id = $1", agent_id)
@@ -2281,6 +2282,37 @@ async def get_agent_ssl_certificates(agent_name: str, since: Optional[str] = Non
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def _node_applied_vips(conn, agent_id: int):
+    """Issue #73 — the active VIPs this node runs: every active membership that has an applied
+    snapshot, ordered by VIP id (the order compose_node_keepalived_conf writes them in)."""
+    return await conn.fetch("""
+        SELECT v.id AS vip_id, v.name AS vip_name, v.is_active, v.track_haproxy,
+               v.purge_on_teardown,
+               m.applied_config_content, m.applied_config_hash, m.takeover_expected_hash
+        FROM vip_members m JOIN vip_instances v ON v.id = m.vip_id
+        WHERE m.agent_id = $1 AND v.is_active = TRUE
+          AND m.applied_config_content IS NOT NULL AND m.applied_config_content <> ''
+        ORDER BY v.id
+    """, agent_id)
+
+
+async def _flag_compose_error(conn, agent_id: int, vip_ids, exc: Exception) -> None:
+    """Show a merge failure on the node's members. The agent never acks a status it does not
+    know, so without this the VIPs would sit at SYNCING with nothing saying why."""
+    if not vip_ids:
+        return
+    msg = f"cannot merge this node's VIPs into one keepalived.conf ({exc}); re-apply the VIPs"[:500]
+    try:
+        await conn.execute("""
+            UPDATE vip_members SET last_deploy_state='error', last_deploy_message=$3,
+                last_deploy_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+            WHERE agent_id=$1 AND vip_id = ANY($2::int[])
+              AND (last_deploy_state IS DISTINCT FROM 'error' OR last_deploy_message IS DISTINCT FROM $4)
+        """, agent_id, list(vip_ids), msg, msg)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"could not record the keepalived compose failure: {e}")
+
+
 @router.get("/{agent_name}/keepalived-config")
 async def get_agent_keepalived_config(agent_name: str, x_api_key: Optional[str] = Header(None)):
     """Issue #27 (v1.7.0) — deliver this agent's APPLIED keepalived snapshot, or a
@@ -2293,8 +2325,8 @@ async def get_agent_keepalived_config(agent_name: str, x_api_key: Optional[str] 
     the agent API key is a SHARED/global install token, so the config is resolved by the
     requested agent_name and a token/name mismatch is an advisory audit log, NOT a 403
     (a hard 403 would break every VIP member whose name isn't the one row the shared token
-    resolves to — review HIGH-1). Any unexpected error degrades to not_configured (B-7) so
-    the agent stays inert; a node with no membership row always gets not_configured.
+    resolves to — review HIGH-1). Any unexpected error degrades to a status the agent ignores
+    (B-7) so the agent stays inert; a node with no membership row always gets not_configured.
     """
     conn = None
     try:
@@ -2303,6 +2335,7 @@ async def get_agent_keepalived_config(agent_name: str, x_api_key: Optional[str] 
         # name mismatch — do not 403 (HIGH-1). Done before the agent lookup so an
         # unauthenticated caller can't probe which agent names exist.
         from auth_middleware import validate_agent_api_key
+        from services.keepalived_parser import ANALYSIS_VERSION
         if not x_api_key:
             raise HTTPException(status_code=401, detail="Agent API key required")
         agent_auth = await validate_agent_api_key(x_api_key)
@@ -2333,7 +2366,12 @@ async def get_agent_keepalived_config(agent_name: str, x_api_key: Optional[str] 
                    -- good: the file never changes, so the agent never speaks again. Telling it
                    -- what we actually hold lets it recover on its own, with no extra request and
                    -- no one having to touch the node.
-                   EXISTS (SELECT 1 FROM vip_discoveries vd WHERE vd.agent_id = a.id)
+                   --
+                   -- v1.12.0: only a discovery analysed by the CURRENT parser counts. An older
+                   -- analysis reads as unknown, so the agent re-reports once and the stored
+                   -- blockers/candidates catch up without anyone touching the node.
+                   EXISTS (SELECT 1 FROM vip_discoveries vd
+                           WHERE vd.agent_id = a.id AND vd.analysis_version >= $2)
                        AS discovery_known
             FROM agents a
             LEFT JOIN haproxy_clusters hc ON hc.pool_id = a.pool_id
@@ -2354,7 +2392,7 @@ async def get_agent_keepalived_config(agent_name: str, x_api_key: Optional[str] 
                       OR hc.keepalived_config_path = '/etc/keepalived/keepalived.conf'),
                      hc.id
             LIMIT 1
-        """, agent_name)
+        """, agent_name, ANALYSIS_VERSION)
         if not agent:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
         config_path = agent['keepalived_config_path'] or '/etc/keepalived/keepalived.conf'
@@ -2367,12 +2405,56 @@ async def get_agent_keepalived_config(agent_name: str, x_api_key: Optional[str] 
                    m.applied_config_content, m.applied_config_hash, m.takeover_expected_hash
             FROM vip_members m JOIN vip_instances v ON v.id = m.vip_id
             WHERE m.agent_id = $1
-            -- Active VIP first (an agent has at most one). With NO active VIP, pick the most
-            -- RECENTLY updated inactive membership so a teardown reflects the latest delete
-            -- (incl. its purge flag) — not a stale older VIP the node was once part of.
+            -- Active VIP first. With NO active VIP, pick the most RECENTLY updated inactive
+            -- membership so a teardown reflects the latest delete (incl. its purge flag) —
+            -- not a stale older VIP the node was once part of.
             ORDER BY v.is_active DESC, v.updated_at DESC, v.id DESC
             LIMIT 1
         """, agent['id'])
+
+        # Issue #73: a node may belong to several active VIPs. Their applied snapshots are
+        # merged into the one keepalived.conf the node deploys; a single VIP is served exactly
+        # as before (same content, same hash).
+        # Any failure in this block must answer with a status the agent ignores: on a node
+        # whose file is ours the agent treats not_configured as "tear keepalived down". Here
+        # the members are also flagged, so the operator sees why the node is not converging.
+        node_vips = []
+        merged = None
+        if row and row['is_active']:
+            try:
+                node_vips = await _node_applied_vips(conn, agent['id'])
+                if len(node_vips) > 1:
+                    from services.keepalived_config import (
+                        build_haproxy_check_script, compose_node_keepalived_conf)
+                    composed = compose_node_keepalived_conf(
+                        [(r['vip_id'], r['applied_config_content']) for r in node_vips])
+                    takeover = next((r['takeover_expected_hash'] for r in node_vips
+                                     if r['takeover_expected_hash']), None)
+                    merged = {
+                        "desired_state": "enabled",
+                        "install_if_missing": True,
+                        "vip_id": node_vips[0]['vip_id'],
+                        "vip_ids": [r['vip_id'] for r in node_vips],
+                        "vip_name": ", ".join(str(r['vip_name']) for r in node_vips),
+                        "config_content": composed,
+                        "config_hash": hashlib.md5(composed.encode("utf-8")).hexdigest(),
+                        "check_script": build_haproxy_check_script()
+                        if any(r['track_haproxy'] for r in node_vips) else "",
+                        "allow_takeover": bool(takeover),
+                        "takeover_expected_hash": takeover,
+                    }
+            except Exception as ce:  # noqa: BLE001
+                logger.error(f"keepalived compose failed for '{agent_name}': {ce}")
+                await _flag_compose_error(conn, agent['id'], [r['vip_id'] for r in node_vips], ce)
+                return {"agent_name": agent_name, "status": "compose_error", "config_path": config_path,
+                        "discovery_known": bool(agent["discovery_known"]), "keepalived": None}
+        if merged is not None:
+            return {"agent_name": agent_name, "status": "available", "config_path": config_path,
+                    "discovery_known": bool(agent["discovery_known"]), "keepalived": merged}
+        if len(node_vips) == 1:
+            # The most recently updated active VIP may be a pending one with nothing applied
+            # yet; serving it would read as not_configured and tear down the running VIP.
+            row = node_vips[0]
 
         if not row:
             return {"agent_name": agent_name, "status": "not_configured", "config_path": config_path, "discovery_known": bool(agent["discovery_known"]), "keepalived": None}
@@ -2413,8 +2495,10 @@ async def get_agent_keepalived_config(agent_name: str, x_api_key: Optional[str] 
         raise
     except Exception as e:
         logger.error(f"keepalived-config delivery failed for '{agent_name}': {e}")
-        # Degrade to no-op rather than 500 (B-7) — keeps the fleet inert on any error.
-        return {"agent_name": agent_name, "status": "not_configured",
+        # Degrade to a no-op rather than 500 (B-7). The status must be one the agent does not
+        # act on: not_configured is a teardown on a node whose file is ours, so a transient
+        # database error would have taken a running VIP down.
+        return {"agent_name": agent_name, "status": "unavailable",
                 "config_path": "/etc/keepalived/keepalived.conf", "keepalived": None}
     finally:
         if conn:
@@ -2476,12 +2560,54 @@ async def agent_keepalived_status(agent_name: str, status_data: dict, x_api_key:
                 WHERE agent_id=$1
             """, agent['id'], state, message, config_hash, config_hash)
         else:
-            await conn.execute(f"""
-                UPDATE vip_members SET last_deploy_state=$3, last_deploy_message=$4,
-                    last_deploy_hash=$5, last_deploy_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP,
-                    {_retire_takeover.format(p="$6")}
-                WHERE agent_id=$1 AND vip_id=$2
-            """, agent['id'], int(vip_id), state, message, config_hash, config_hash)
+            # Issue #73: a node running several VIPs acks the merged file once, with the first
+            # VIP's id and the merged file's hash. Spread the ack over every VIP in that file;
+            # each member is converged against its OWN applied hash.
+            node_vips = await _node_applied_vips(conn, agent['id'])
+            node_vip_ids = [r['vip_id'] for r in node_vips]
+            converged = False
+            if len(node_vips) > 1 and int(vip_id) in node_vip_ids:
+                from services.keepalived_config import compose_node_keepalived_conf
+                try:
+                    composed = compose_node_keepalived_conf(
+                        [(r['vip_id'], r['applied_config_content']) for r in node_vips])
+                    composed_hash = hashlib.md5(composed.encode("utf-8")).hexdigest()
+                except Exception:  # noqa: BLE001 — unmergeable means not converged, never a 500
+                    composed_hash = None
+                converged = bool(composed_hash) and config_hash == composed_hash
+                if converged:
+                    await conn.execute("""
+                        UPDATE vip_members SET last_deploy_state=$3, last_deploy_message=$4,
+                            last_deploy_hash=applied_config_hash, last_deploy_at=CURRENT_TIMESTAMP,
+                            updated_at=CURRENT_TIMESTAMP, takeover_expected_hash=NULL
+                        WHERE agent_id=$1 AND vip_id = ANY($2::int[])
+                    """, agent['id'], node_vip_ids, state, message)
+                else:
+                    await conn.execute("""
+                        UPDATE vip_members SET last_deploy_state=$3, last_deploy_message=$4,
+                            last_deploy_hash=$5, last_deploy_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+                        WHERE agent_id=$1 AND vip_id = ANY($2::int[])
+                    """, agent['id'], node_vip_ids, state, message, config_hash)
+            else:
+                await conn.execute(f"""
+                    UPDATE vip_members SET last_deploy_state=$3, last_deploy_message=$4,
+                        last_deploy_hash=$5, last_deploy_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP,
+                        {_retire_takeover.format(p="$6")}
+                    WHERE agent_id=$1 AND vip_id=$2
+                """, agent['id'], int(vip_id), state, message, config_hash, config_hash)
+                converged = any(r['vip_id'] == int(vip_id) and r['applied_config_hash'] == config_hash
+                                for r in node_vips)
+            if state == "enabled" and converged:
+                # The file the node now runs holds only its active VIPs, so a deleted VIP's
+                # membership on this node is torn down even though no teardown was sent for it.
+                await conn.execute("""
+                    UPDATE vip_members m SET last_deploy_state='disabled',
+                        last_deploy_message='removed from this node''s keepalived.conf',
+                        last_deploy_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+                    FROM vip_instances v
+                    WHERE v.id = m.vip_id AND m.agent_id=$1 AND v.is_active = FALSE
+                      AND m.last_deploy_state IS DISTINCT FROM 'disabled'
+                """, agent['id'])
         return {"status": "ok"}
     except HTTPException:
         raise
@@ -2539,7 +2665,8 @@ async def agent_keepalived_discovery(agent_name: str, payload: dict, x_api_key: 
         is_managed = bool(payload.get("is_managed"))
         config_hash = hashlib.md5(content.encode("utf-8", "replace")).hexdigest()
 
-        from services.keepalived_parser import analyse_keepalived_conf, KeepalivedParseError
+        from services.keepalived_parser import (
+            ANALYSIS_VERSION, analyse_keepalived_conf, KeepalivedParseError)
         from services.keepalived_config import encrypt_vrrp_secret
 
         parse_error = None
@@ -2562,8 +2689,8 @@ async def agent_keepalived_discovery(agent_name: str, payload: dict, x_api_key: 
         await conn.execute("""
             INSERT INTO vip_discoveries
                 (agent_id, config_path, config_hash, is_managed, raw_config_masked,
-                 auth_pass_encrypted, analysis, parse_error, reported_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CURRENT_TIMESTAMP)
+                 auth_pass_encrypted, analysis, parse_error, analysis_version, reported_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,CURRENT_TIMESTAMP)
             ON CONFLICT (agent_id) DO UPDATE SET
                 config_path = EXCLUDED.config_path,
                 config_hash = EXCLUDED.config_hash,
@@ -2572,9 +2699,11 @@ async def agent_keepalived_discovery(agent_name: str, payload: dict, x_api_key: 
                 auth_pass_encrypted = EXCLUDED.auth_pass_encrypted,
                 analysis = EXCLUDED.analysis,
                 parse_error = EXCLUDED.parse_error,
+                analysis_version = EXCLUDED.analysis_version,
                 reported_at = CURRENT_TIMESTAMP
         """, agent['id'], config_path, config_hash, is_managed, masked, auth_enc,
-            json.dumps(analysis) if analysis is not None else None, parse_error)
+            json.dumps(analysis) if analysis is not None else None, parse_error,
+            ANALYSIS_VERSION)
         return {"status": "recorded", "config_hash": config_hash}
     except HTTPException:
         raise

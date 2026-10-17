@@ -18,7 +18,7 @@ os.environ.setdefault("SECRET_KEY", "test-secret-key-for-keepalived-parser-tests
 from services import keepalived_config as kc  # noqa: E402
 from services.keepalived_parser import (  # noqa: E402
     KeepalivedParseError, analyse_keepalived_conf, build_adoption_candidate,
-    parse_keepalived_conf,
+    parse_keepalived_conf, remaining_blockers,
 )
 
 
@@ -237,7 +237,12 @@ vrrp_instance VI_2 {
     names = [c["instance_name"] for c in analysed["candidates"]]
     assert names == ["VI_1", "VI_2"]
     assert [c["vip"]["virtual_ip"] for c in analysed["candidates"]] == ["10.0.0.100", "10.0.0.200"]
-    assert all(c["adoptable"] for c in analysed["candidates"])
+    # Issue #73: adoption takes over the whole file, so adopting either instance would remove
+    # the other from the node. Neither may be adoptable, and no flag may waive it.
+    for c in analysed["candidates"]:
+        assert c["adoptable"] is False
+        assert remaining_blockers(c["blockers"], prefix_supplied=True, accept_data_loss=True)
+        assert any("2 vrrp_instance blocks" in b for b in c["blockers"])
 
 
 def test_unbalanced_braces_raise():
