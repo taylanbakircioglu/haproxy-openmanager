@@ -1,3 +1,59 @@
+# Upgrade Notes — v1.12.0 (several keepalived VIPs on one node, several addresses on one VIP)
+
+**Backend + UI change, schema `13` (delta), no agent change.** Agents of every version keep working;
+no agent upgrade is needed.
+
+- **Schema 12 → 13 is a delta.** A database at 12 adds two columns —
+  `vip_instances.additional_ips` (JSONB, default `[]`) and `vip_discoveries.analysis_version`
+  (SMALLINT, default `0`) — and nothing else runs. **Built-in roles are not re-seeded**, so role
+  customizations survive this upgrade (unlike v1.10.4 and v1.11.0). A database older than 12 runs the
+  full sequence as before, including the role re-seed.
+- **Nodes with one VIP see no change.** Their `keepalived.conf` keeps the same bytes and hash, so the
+  agent does not rewrite or reload anything.
+- **Check for nodes that already belong to several VIPs before upgrading.** Earlier versions refused
+  this when a VIP was saved, but without a lock, so two saves at the same moment could still create
+  it. Such a node switches from one VIP's file to the merged file on its first poll after the upgrade:
+  ```sql
+  SELECT a.name, count(*) FROM vip_members m
+    JOIN vip_instances v ON v.id = m.vip_id JOIN agents a ON a.id = m.agent_id
+   WHERE v.is_active GROUP BY a.name HAVING count(*) > 1;
+  ```
+- **Rolling deploy:** do not add a second VIP to a node until **every backend replica** runs v1.12.0.
+  An older replica serves a node only one of its VIPs, so the node would alternate between two files.
+  An older replica applying a VIP also drops that VIP's additional addresses.
+- **Rollback / downgrade:** first reduce every node to one VIP and remove the additional addresses
+  (edit, then Apply), then downgrade. The two new columns can stay; older versions ignore them.
+- **How a node with several VIPs is served.** Each VIP is still rendered and applied on its own; the
+  delivery endpoint merges the node's applied VIPs into one file: `global_defs` once, then per VIP a
+  `vrrp_script chk_haproxy_<id>` and a `vrrp_instance VI_<id>`, ordered by VIP id. VRIDs are unique per
+  pool, so the instances never collide. One acknowledgement from the node converges all of its VIPs.
+  Applying two VIPs one after the other reloads keepalived twice; measured on keepalived 2.0.19,
+  2.1.5 and 2.2.8, a reload that adds or removes a VIP does not drop the other VIPs' addresses.
+- **If the merge fails** (an applied snapshot that is not in the platform's own format), the node keeps
+  running what it has: the agent is told nothing new, and the node's members show
+  "cannot merge this node's VIPs …" with an ERROR status. Re-apply the VIPs to fix it.
+- **Delivery errors no longer tear keepalived down.** A database error while serving
+  `keepalived-config` answered `not_configured`, which on a node whose file is ours meant teardown. It
+  now answers `unavailable`, which agents of every version ignore.
+- **Additional addresses:** up to 19 per VIP (IPv4, prefix 1–32), on the VIP's interface on every node.
+  They must not be a node's IP or any address of another active VIP.
+- **Live state is per node, not per VIP.** The MASTER/BACKUP column comes from the node's heartbeat,
+  which reports one state for the node. A node that is MASTER for one VIP and BACKUP for another shows
+  the same state in both rows; with several VIPs on a node, the heartbeat's config-based fallback can
+  also report MASTER on a BACKUP node. Check `ip addr` on the node when it matters. The VIPs themselves
+  fail over correctly; only the display is affected.
+- **Adoption:** a `keepalived.conf` with several `vrrp_instance` blocks can no longer be adopted (it
+  replaces the whole file, so the other instances would be removed — earlier versions allowed it). An
+  adoption made before the upgrade from such a file is refused at Apply; reject it. An instance with
+  several addresses is now adoptable; the extra addresses become additional addresses. Files analysed
+  by an older version are re-reported once by v1.11.1+ agents; until then the list shows them with the
+  new blocker.
+
+**Rollback:** see the downgrade rule above. With one VIP per node and no additional addresses,
+rolling back is safe.
+
+---
+
 # Upgrade Notes — v1.11.3 (Config Import keeps `stick-table` and `stick` rules)
 
 **Backend change, no schema change, no agent change.** No `SCHEMA_VERSION` bump and no agent

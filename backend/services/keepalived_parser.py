@@ -31,6 +31,8 @@ import ipaddress
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from models.vip import MAX_ADDITIONAL_IPS
+
 # Stored with every discovery (vip_discoveries.analysis_version). Bump it whenever the
 # analysis or its blockers change: rows from an older parser make the agent re-report once.
 ANALYSIS_VERSION = 1
@@ -424,13 +426,43 @@ def build_adoption_candidate(parsed: Dict[str, Any], instance: Dict[str, Any]) -
     vips = instance.get("virtual_ips") or []
     if len(vips) == 0:
         blockers.append("the instance declares no virtual_ipaddress — nothing to adopt")
-    elif len(vips) > 1:
-        addrs = ", ".join(v["address"] for v in vips)
-        blockers.append(
-            f"the instance carries {len(vips)} addresses ({addrs}); a managed VIP holds exactly "
-            f"one, so adopting would drop all but the first")
 
     vip_entry = vips[0] if vips else None
+
+    # Issue #73: the addresses after the first become the VIP's additional addresses. Each one
+    # must render back exactly, so nothing about it may be guessed.
+    additional_ips: List[Dict[str, Any]] = []
+    extra_entries = vips[1:]
+    if len(extra_entries) > MAX_ADDITIONAL_IPS:
+        blockers.append(
+            f"the instance carries {len(vips)} addresses; a managed VIP holds at most "
+            f"{MAX_ADDITIONAL_IPS + 1}")
+    seen_addrs = {vip_entry["address"]} if vip_entry else set()
+    for extra in extra_entries:
+        addr = extra["address"]
+        if ipaddress.ip_address(addr).version != 4:
+            blockers.append(f"additional address `{addr}` is IPv6; only IPv4 addresses are managed")
+            continue
+        if addr in seen_addrs:
+            blockers.append(f"additional address `{addr}` is listed more than once")
+            continue
+        seen_addrs.add(addr)
+        prefix = extra.get("prefix_length")
+        if prefix is None:
+            blockers.append(
+                f"additional address `{addr}` has no /prefix in the file; add it there so the "
+                f"netmask cannot change on takeover, then let the agent report again")
+            continue
+        if not (1 <= int(prefix) <= 32):
+            blockers.append(f"additional address `{addr}/{prefix}` has an invalid prefix length")
+            continue
+        if extra.get("dev") and instance.get("interface") and extra["dev"] != instance["interface"]:
+            blockers.append(
+                f"additional address `{addr}` is bound to `dev {extra['dev']}` but the instance "
+                f"uses `interface {instance['interface']}`; the render always uses the instance "
+                f"interface")
+            continue
+        additional_ips.append({"address": addr, "prefix_length": int(prefix)})
 
     if instance.get("virtual_router_id") is None:
         blockers.append("no virtual_router_id — it cannot be guessed: a wrong VRID puts the "
@@ -490,6 +522,7 @@ def build_adoption_candidate(parsed: Dict[str, Any], instance: Dict[str, Any]) -
             "use_unicast": bool(peers),
             "track_haproxy": OUR_CHECK_SCRIPT_NAME in tracked,
             "auth_pass": instance.get("auth_pass"),
+            "additional_ips": additional_ips,
         },
         "member": {
             "network_interface": instance.get("interface"),

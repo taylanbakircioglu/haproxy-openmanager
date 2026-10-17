@@ -16,6 +16,7 @@ Every DB access is wrapped so a (pathological) missing vip_* relation degrades t
 empty/None result instead of a 500 (B-7) — preserving the fleet-wide no-op guarantee.
 """
 import hashlib
+import ipaddress
 import json
 import logging
 import re
@@ -171,7 +172,7 @@ async def render_vip_config_masked(conn, vip_id: int):
     vip_dict = {"id": v["id"], "name": v["name"], "virtual_ip": v["virtual_ip"],
                 "prefix_length": v["prefix_length"], "virtual_router_id": v["virtual_router_id"],
                 "advert_int": v["advert_int"], "use_unicast": v["use_unicast"],
-                "track_haproxy": v["track_haproxy"]}
+                "track_haproxy": v["track_haproxy"], "additional_ips": _extra_ips(v["additional_ips"])}
     member_dicts = [{"role": m["role"], "priority": m["priority"],
                      "network_interface": m["network_interface"], "agent_id": m["agent_id"],
                      "ip_address": str(m["ip_address"]) if m["ip_address"] else ""} for m in members]
@@ -241,7 +242,8 @@ async def _capture_vip_pending_state(conn, vip_id: int):
         "vip": {"name": v["name"], "description": v["description"], "virtual_ip": v["virtual_ip"],
                 "prefix_length": v["prefix_length"], "virtual_router_id": v["virtual_router_id"],
                 "advert_int": v["advert_int"], "use_unicast": v["use_unicast"],
-                "track_haproxy": v["track_haproxy"], "auth_pass_encrypted": v["auth_pass_encrypted"]},
+                "track_haproxy": v["track_haproxy"], "auth_pass_encrypted": v["auth_pass_encrypted"],
+                "additional_ips": _extra_ips(v["additional_ips"])},
         "members": [{"agent_id": m["agent_id"], "network_interface": m["network_interface"],
                      "role": m["role"], "priority": m["priority"]} for m in members],
     }
@@ -290,17 +292,23 @@ async def restore_vip_from_rejected_version(conn, version_id: int):
     prev = {r["agent_id"]: r for r in await conn.fetch(
         "SELECT agent_id, applied_config_content, applied_config_hash, last_deploy_state, "
         "last_deploy_message, last_deploy_hash, last_deploy_at FROM vip_members WHERE vip_id=$1", vip_id)}
+    # Captured before v1.12.0 → no additional addresses.
+    extras = _extra_ips(sv.get("additional_ips") or [])
     try:
         async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1, $2)", *_VIP_ADDRESS_LOCK)
+            reason = await _address_clash(conn, sv["virtual_ip"], extras, vip_id)
+            if reason:
+                return f"cannot restore — {reason}"
             await conn.execute("""
                 UPDATE vip_instances SET name=$2, description=$3, virtual_ip=$4, prefix_length=$5,
                     virtual_router_id=$6, advert_int=$7, use_unicast=$8, track_haproxy=$9,
                     auth_pass_encrypted=$10, is_active=TRUE, last_config_status='PENDING',
-                    updated_at=CURRENT_TIMESTAMP
+                    additional_ips=$11::jsonb, updated_at=CURRENT_TIMESTAMP
                 WHERE id=$1
             """, vip_id, sv["name"], sv.get("description"), sv["virtual_ip"], sv["prefix_length"],
                 sv["virtual_router_id"], sv["advert_int"], sv["use_unicast"], sv["track_haproxy"],
-                sv.get("auth_pass_encrypted"))
+                sv.get("auth_pass_encrypted"), json.dumps(extras))
             await conn.execute("DELETE FROM vip_members WHERE vip_id=$1", vip_id)
             for mm in sm:
                 o = prev.get(mm["agent_id"])
@@ -383,7 +391,7 @@ async def list_vips(cluster_id: Optional[int] = None, authorization: str = Heade
         if cluster_id is not None:
             vips = await conn.fetch(f"""
                 SELECT v.id, v.name, v.description, v.pool_id, v.virtual_ip, v.prefix_length,
-                       v.virtual_router_id, v.advert_int, v.use_unicast, v.track_haproxy,
+                       v.virtual_router_id, v.advert_int, v.use_unicast, v.track_haproxy, v.additional_ips,
                        v.is_active, v.last_config_status, v.pending_delete,
                        (v.auth_pass_encrypted IS NOT NULL) AS auth_pass_set,
                        v.created_at, v.updated_at, p.name AS pool_name
@@ -396,7 +404,7 @@ async def list_vips(cluster_id: Optional[int] = None, authorization: str = Heade
         else:
             vips = await conn.fetch(f"""
                 SELECT v.id, v.name, v.description, v.pool_id, v.virtual_ip, v.prefix_length,
-                       v.virtual_router_id, v.advert_int, v.use_unicast, v.track_haproxy,
+                       v.virtual_router_id, v.advert_int, v.use_unicast, v.track_haproxy, v.additional_ips,
                        v.is_active, v.last_config_status, v.pending_delete,
                        (v.auth_pass_encrypted IS NOT NULL) AS auth_pass_set,
                        v.created_at, v.updated_at, p.name AS pool_name
@@ -422,6 +430,7 @@ async def list_vips(cluster_id: Optional[int] = None, authorization: str = Heade
                 v["last_config_status"], members, v["pending_delete"], v["is_active"])
             result.append({
                 **dict(v),
+                "additional_ips": _extra_ips(v["additional_ips"]),
                 # Convergence-aware status for the table (issue #27 follow-up); the raw
                 # last_config_status is kept above for the PENDING gate / Apply button.
                 "deploy_status": deploy_status,
@@ -493,7 +502,7 @@ async def get_vip(vip_id: int, authorization: str = Header(None)):
     try:
         v = await conn.fetchrow("""
             SELECT v.id, v.name, v.description, v.pool_id, v.virtual_ip, v.prefix_length,
-                   v.virtual_router_id, v.advert_int, v.use_unicast, v.track_haproxy,
+                   v.virtual_router_id, v.advert_int, v.use_unicast, v.track_haproxy, v.additional_ips,
                    v.is_active, v.last_config_status,
                    (v.auth_pass_encrypted IS NOT NULL) AS auth_pass_set,
                    v.created_at, v.updated_at
@@ -508,7 +517,8 @@ async def get_vip(vip_id: int, authorization: str = Header(None)):
             FROM vip_members m LEFT JOIN agents a ON a.id = m.agent_id
             WHERE m.vip_id = $1 ORDER BY m.priority DESC
         """, vip_id)
-        return {**dict(v), "members": [dict(m) for m in members]}
+        return {**dict(v), "additional_ips": _extra_ips(v["additional_ips"]),
+                "members": [dict(m) for m in members]}
     finally:
         await close_database_connection(conn)
 
@@ -545,6 +555,57 @@ async def _validate_members_against_pool(conn, pool_id: int, members: List, vip_
         raise HTTPException(status_code=409, detail=f"{vip_virtual_ip} is already used by another VIP")
 
 
+# Serialises every write that sets a VIP's addresses. The primary address has a partial unique
+# index; the additional ones live in a JSON list no index can cover, so two concurrent writes
+# could otherwise both pass the clash check below with the same address.
+_VIP_ADDRESS_LOCK = (18181873, 0)
+
+
+def _norm_ip(value) -> str:
+    try:
+        return str(ipaddress.ip_address(str(value).strip()))
+    except ValueError:
+        return str(value)
+
+
+def _extra_ips(value) -> List[dict]:
+    """vip_instances.additional_ips (JSONB; asyncpg hands it over as a string) as a list."""
+    items = _jsonb_list(value)
+    return [{"address": str(i["address"]), "prefix_length": int(i["prefix_length"])}
+            for i in items if isinstance(i, dict) and i.get("address")]
+
+
+async def _address_clash(conn, primary: str, extras: List[dict],
+                         exclude_vip_id: Optional[int]) -> Optional[str]:
+    """Issue #73 — why these addresses cannot be used, or None. Covers what the primary-address
+    checks do not: every additional address against node IPs and every active VIP's addresses,
+    and the primary against the other VIPs' additional addresses. Call it inside the write's
+    transaction after taking _VIP_ADDRESS_LOCK."""
+    other = ("SELECT name FROM vip_instances WHERE is_active = TRUE "
+             "AND ($2::int IS NULL OR id <> $2::int) AND {cond} LIMIT 1")
+    in_extras = "additional_ips @> jsonb_build_array(jsonb_build_object('address', $1::text))"
+    hit = await conn.fetchval(other.format(cond=in_extras), primary, exclude_vip_id)
+    if hit:
+        return f"{primary} is already an additional address of VIP '{hit}'"
+    for e in extras:
+        addr = e["address"]
+        if await conn.fetchval("SELECT 1 FROM agents WHERE ip_address = $1::inet LIMIT 1", addr):
+            return f"{addr} is already a node's IP"
+        hit = await conn.fetchval(
+            other.format(cond=f"(virtual_ip = $1::text OR {in_extras})"), addr, exclude_vip_id)
+        if hit:
+            return f"{addr} is already used by VIP '{hit}'"
+    return None
+
+
+async def _lock_and_check_addresses(conn, primary: str, extras: List[dict],
+                                    exclude_vip_id: Optional[int]) -> None:
+    await conn.execute("SELECT pg_advisory_xact_lock($1, $2)", *_VIP_ADDRESS_LOCK)
+    reason = await _address_clash(conn, primary, extras, exclude_vip_id)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
+
+
 @router.post("")
 async def create_vip(payload: VIPCreate, request: Request, authorization: str = Header(None)):
     current_user = await _require(authorization, "create")
@@ -556,22 +617,25 @@ async def create_vip(payload: VIPCreate, request: Request, authorization: str = 
         await _validate_members_against_pool(conn, payload.pool_id, payload.members, payload.virtual_ip)
 
         enc = encrypt_vrrp_secret(payload.auth_pass) if payload.auth_pass else None
+        extras = [e.model_dump() for e in payload.additional_ips]
         # Allocate VRID + insert, retrying once on a unique-violation race (B-1).
         last_err = None
         for _attempt in range(2):
             vrid = await _alloc_free_vrid(conn, payload.pool_id, payload.virtual_router_id)
             try:
                 async with conn.transaction():
+                    await _lock_and_check_addresses(conn, payload.virtual_ip, extras, None)
                     vip_id = await conn.fetchval("""
                         INSERT INTO vip_instances
                           (name, description, pool_id, virtual_ip, prefix_length, virtual_router_id,
                            advert_int, auth_pass_encrypted, use_unicast, track_haproxy,
-                           is_active, last_config_status, created_by)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,'PENDING',$11)
+                           is_active, last_config_status, created_by, additional_ips)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,'PENDING',$11,$12::jsonb)
                         RETURNING id
                     """, payload.name, payload.description, payload.pool_id, payload.virtual_ip,
                         payload.prefix_length, vrid, payload.advert_int, enc,
-                        payload.use_unicast, payload.track_haproxy, current_user["id"])
+                        payload.use_unicast, payload.track_haproxy, current_user["id"],
+                        json.dumps(extras))
                     for m in payload.members:
                         await conn.execute("""
                             INSERT INTO vip_members (vip_id, agent_id, network_interface, role, priority)
@@ -579,6 +643,8 @@ async def create_vip(payload: VIPCreate, request: Request, authorization: str = 
                         """, vip_id, m.agent_id, m.network_interface, m.role, m.priority)
                 last_err = None
                 break
+            except HTTPException:
+                raise
             except Exception as ie:  # noqa: BLE001
                 if "unique" in str(ie).lower() or "duplicate" in str(ie).lower():
                     last_err = ie
@@ -623,10 +689,17 @@ async def update_vip(vip_id: int, payload: VIPUpdate, request: Request, authoriz
                 "SELECT 1 FROM vip_instances WHERE virtual_ip=$1 AND is_active=TRUE AND id<>$2", new_ip, vip_id)
             if dup:
                 raise HTTPException(status_code=409, detail=f"{new_ip} is already used by another VIP")
+        new_extras = ([e.model_dump() for e in payload.additional_ips]
+                      if payload.additional_ips is not None else None)
+        extras = new_extras if new_extras is not None else _extra_ips(v["additional_ips"])
+        if _norm_ip(new_ip) in {e["address"] for e in extras}:
+            raise HTTPException(status_code=400, detail="an additional address must differ from virtual_ip")
 
         enc_set = payload.auth_pass is not None and payload.auth_pass != ""
         try:
             async with conn.transaction():
+                if payload.virtual_ip or new_extras is not None:
+                    await _lock_and_check_addresses(conn, new_ip, extras, vip_id)
                 await conn.execute("""
                     UPDATE vip_instances SET
                         name = COALESCE($2, name),
@@ -638,6 +711,7 @@ async def update_vip(vip_id: int, payload: VIPUpdate, request: Request, authoriz
                         use_unicast = COALESCE($8, use_unicast),
                         track_haproxy = COALESCE($9, track_haproxy),
                         auth_pass_encrypted = CASE WHEN $10 THEN $11 ELSE auth_pass_encrypted END,
+                        additional_ips = COALESCE($12::jsonb, additional_ips),
                         last_config_status = 'PENDING',
                         -- Editing a VIP means you are KEEPING and changing it, so it cancels any
                         -- staged deletion (otherwise a later Apply would delete instead of applying
@@ -649,7 +723,8 @@ async def update_vip(vip_id: int, payload: VIPUpdate, request: Request, authoriz
                 """, vip_id, payload.name, payload.description, payload.virtual_ip,
                     payload.prefix_length, payload.virtual_router_id, payload.advert_int,
                     payload.use_unicast, payload.track_haproxy,
-                    enc_set, encrypt_vrrp_secret(payload.auth_pass) if enc_set else None)
+                    enc_set, encrypt_vrrp_secret(payload.auth_pass) if enc_set else None,
+                    json.dumps(new_extras) if new_extras is not None else None)
                 if members is not None:
                     # T-1: preserve the APPLIED snapshot + deploy ack for members that REMAIN,
                     # so a pending member edit never momentarily flips a running node to
@@ -816,7 +891,6 @@ async def apply_vip(vip_id: int, request: Request, authorization: str = Header(N
                 f"{multi['agent_name']}'s keepalived.conf declares {multi['n']} vrrp_instance blocks; "
                 f"taking it over would remove the others from the node. Reject this adoption."))
 
-
         auth_plain = decrypt_vrrp_secret(v["auth_pass_encrypted"]) if v["auth_pass_encrypted"] else None
         # If a secret is set but can't be decrypted (SECRET_KEY/VIP_ENCRYPTION_KEY rotated or
         # drifted between pods), FAIL the apply rather than silently rendering a config with NO
@@ -834,7 +908,7 @@ async def apply_vip(vip_id: int, request: Request, authorization: str = Header(N
         vip_dict = {"id": v["id"], "name": v["name"], "virtual_ip": v["virtual_ip"],
                     "prefix_length": v["prefix_length"], "virtual_router_id": v["virtual_router_id"],
                     "advert_int": v["advert_int"], "use_unicast": v["use_unicast"],
-                    "track_haproxy": v["track_haproxy"]}
+                    "track_haproxy": v["track_haproxy"], "additional_ips": _extra_ips(v["additional_ips"])}
 
         snapshot_members = []
         async with conn.transaction():
@@ -860,7 +934,8 @@ async def apply_vip(vip_id: int, request: Request, authorization: str = Header(N
                 "vip": {"name": v["name"], "description": v["description"], "virtual_ip": v["virtual_ip"],
                         "prefix_length": v["prefix_length"], "virtual_router_id": v["virtual_router_id"],
                         "advert_int": v["advert_int"], "use_unicast": v["use_unicast"],
-                        "track_haproxy": v["track_haproxy"], "auth_pass_encrypted": v["auth_pass_encrypted"]},
+                        "track_haproxy": v["track_haproxy"], "auth_pass_encrypted": v["auth_pass_encrypted"],
+                        "additional_ips": vip_dict["additional_ips"]},
                 "members": snapshot_members}
             await conn.execute(
                 "UPDATE vip_instances SET last_config_status='APPLIED', "
@@ -934,17 +1009,24 @@ async def reject_vip(vip_id: int, request: Request, authorization: str = Header(
 
         sv = snap["vip"]
         sm = snap.get("members", [])
+        # Applied before v1.12.0 → no additional addresses.
+        extras = _extra_ips(sv.get("additional_ips") or [])
         try:
             async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock($1, $2)", *_VIP_ADDRESS_LOCK)
+                reason = await _address_clash(conn, sv["virtual_ip"], extras, vip_id)
+                if reason:
+                    raise HTTPException(status_code=409, detail=f"Cannot restore — {reason}")
                 await conn.execute("""
                     UPDATE vip_instances SET
                         name=$2, description=$3, virtual_ip=$4, prefix_length=$5, virtual_router_id=$6,
                         advert_int=$7, use_unicast=$8, track_haproxy=$9, auth_pass_encrypted=$10,
+                        additional_ips=$11::jsonb,
                         last_config_status='APPLIED', updated_at=CURRENT_TIMESTAMP
                     WHERE id=$1
                 """, vip_id, sv["name"], sv.get("description"), sv["virtual_ip"], sv["prefix_length"],
                     sv["virtual_router_id"], sv["advert_int"], sv["use_unicast"], sv["track_haproxy"],
-                    sv.get("auth_pass_encrypted"))
+                    sv.get("auth_pass_encrypted"), json.dumps(extras))
                 await conn.execute("DELETE FROM vip_members WHERE vip_id=$1", vip_id)
                 for m in sm:
                     await conn.execute("""
@@ -1268,18 +1350,21 @@ async def adopt_vip(payload: dict, request: Request, authorization: str = Header
         #     this VRID in the pool (the clash check above would have refused first);
         #   * a node whose file carries our ownership marker (is_managed) is ours already.
         adopted_ids = [p["agent_id"] for p in participants]
+        # Issue #73: every address of the instance, not only the first.
+        extras = _extra_ips(vip_fields.get("additional_ips") or [])
+        all_addrs = [virtual_ip] + [e["address"] for e in extras]
         stranded = await conn.fetch("""
             SELECT a.name AS agent_name, a.pool_id, COALESCE(a.enabled, TRUE) AS enabled,
                    d.parse_error
             FROM vip_discoveries d
             JOIN agents a ON a.id = d.agent_id
             LEFT JOIN vip_instances av ON av.id = d.adopted_vip_id
-            WHERE d.raw_config_masked LIKE '%' || $1 || '%'
+            WHERE d.raw_config_masked LIKE ANY($1::text[])
               AND NOT (a.id = ANY($2::int[]))
               AND COALESCE(av.is_active, FALSE) = FALSE
               AND d.is_managed = FALSE
             ORDER BY a.name
-        """, virtual_ip, adopted_ids)
+        """, [f"%{a}%" for a in all_addrs], adopted_ids)
         if stranded:
             def _why(r):
                 if r["parse_error"]:
@@ -1291,7 +1376,7 @@ async def adopt_vip(payload: dict, request: Request, authorization: str = Header
                 return "it does not report this vrrp_instance"
             named = "; ".join(f"{r['agent_name']} — {_why(r)}" for r in stranded)
             raise HTTPException(status_code=422, detail=(
-                f"These node(s) also reference {virtual_ip} but cannot be taken over with the rest "
+                f"These node(s) also reference {', '.join(all_addrs)} but cannot be taken over with the rest "
                 f"of the instance, so adopting now would rewrite the others and leave them running "
                 f"an unmanaged config on the same address: {named}. Resolve that first, then adopt."))
 
@@ -1301,11 +1386,17 @@ async def adopt_vip(payload: dict, request: Request, authorization: str = Header
         # the sharpest: the design refuses to GUESS a netmask for a live VIP, and quietly copying
         # one node's netmask onto another is the same change by another name.
         def _vfield(p, key):
-            return (p["candidate"].get("vip") or {}).get(key)
+            value = (p["candidate"].get("vip") or {}).get(key)
+            if key == "additional_ips":
+                # Hashable and order-free; an analysis from before v1.12.0 has no key → none.
+                return tuple(sorted((e["address"], e["prefix_length"])
+                                    for e in _extra_ips(value or [])))
+            return value
 
         for key, label in (("prefix_length", "prefix length"),
                            ("use_unicast", "unicast/multicast mode"),
-                           ("track_haproxy", "HAProxy tracking")):
+                           ("track_haproxy", "HAProxy tracking"),
+                           ("additional_ips", "additional addresses")):
             seen = {}
             for p in participants:
                 seen.setdefault(_vfield(p, key), []).append(p["agent_name"])
@@ -1375,9 +1466,9 @@ async def adopt_vip(payload: dict, request: Request, authorization: str = Header
                     f"holding the VIP. Register those nodes as agents so they report their config, "
                     f"then adopt again."))
 
-        # One active VIP per agent — the delivery endpoint serves a single keepalived.conf per
-        # node, so a second active membership never converges. create/update enforce this via
-        # _validate_members_against_pool; adoption did not call it at all.
+        # Adoption hands a node's whole keepalived.conf over to OpenManager. A node that is
+        # already a member of a managed VIP is not taken over a second time (issue #73 allows
+        # several VIPs per node for VIPs created here, not for a second adoption).
         busy = await conn.fetchrow("""
             SELECT a.name AS agent_name, v.name AS vip_name
             FROM vip_members vm JOIN vip_instances v ON v.id = vm.vip_id
@@ -1401,19 +1492,20 @@ async def adopt_vip(payload: dict, request: Request, authorization: str = Header
                 f"config must keep its VRID, so resolve the collision first"))
 
         async with conn.transaction():
+            await _lock_and_check_addresses(conn, virtual_ip, extras, None)
             vip_id = await conn.fetchval("""
                 INSERT INTO vip_instances
                   (name, description, pool_id, virtual_ip, prefix_length, virtual_router_id,
                    advert_int, auth_pass_encrypted, use_unicast, track_haproxy,
-                   is_active, last_config_status, adopted_at, created_by)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,'PENDING',CURRENT_TIMESTAMP,$11)
+                   is_active, last_config_status, adopted_at, created_by, additional_ips)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,'PENDING',CURRENT_TIMESTAMP,$11,$12::jsonb)
                 RETURNING id
             """, name, payload.get("description") or f"Adopted from {disc['agent_name']}",
                 disc["pool_id"], virtual_ip, int(vip_fields["prefix_length"]), int(vrid),
                 int(vip_fields.get("advert_int") or 1),
                 disc["auth_pass_encrypted"],           # already Fernet-encrypted at ingest
                 bool(vip_fields.get("use_unicast")), bool(vip_fields.get("track_haproxy")),
-                current_user["id"])
+                current_user["id"], json.dumps(extras))
             # Every node of the instance becomes a member with the role/priority/interface ITS
             # OWN file declares, and each carries its own one-shot takeover authorisation pinned
             # to the hash of the file we analysed on THAT node. The guard stays per-node: a file

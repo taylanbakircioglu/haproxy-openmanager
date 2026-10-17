@@ -50,6 +50,38 @@ def _validate_ipv4(v: str) -> str:
     return s
 
 
+# Issue #73: a VIP may carry further addresses in the same VRRP instance. 20 addresses in
+# total keeps every advertisement within what VRRPv2 peers are known to accept.
+MAX_ADDITIONAL_IPS = 19
+
+
+class VIPAddressIn(BaseModel):
+    address: str
+    prefix_length: int = 24
+
+    @field_validator('address')
+    @classmethod
+    def _addr(cls, v):
+        return str(ipaddress.ip_address(_validate_ipv4(v)))
+
+    @field_validator('prefix_length')
+    @classmethod
+    def _prefix(cls, v):
+        if not isinstance(v, int) or not (1 <= v <= 32):
+            raise ValueError('prefix_length must be an integer between 1 and 32 (IPv4)')
+        return v
+
+
+def _validate_additional_ips(extras: List['VIPAddressIn'], primary: Optional[str]) -> None:
+    if len(extras) > MAX_ADDITIONAL_IPS:
+        raise ValueError(f'a VIP may carry at most {MAX_ADDITIONAL_IPS} additional addresses')
+    addrs = [e.address for e in extras]
+    if len(set(addrs)) != len(addrs):
+        raise ValueError('each additional address may appear only once')
+    if primary is not None and str(ipaddress.ip_address(primary)) in addrs:
+        raise ValueError('an additional address must differ from virtual_ip')
+
+
 class VIPMemberIn(BaseModel):
     agent_id: int
     network_interface: str
@@ -122,6 +154,7 @@ class VIPCreate(BaseModel):
     auth_pass: Optional[str] = None           # plaintext on the wire; stored Fernet-encrypted
     use_unicast: bool = True
     track_haproxy: bool = True
+    additional_ips: List[VIPAddressIn] = []
     members: List[VIPMemberIn]
 
     @field_validator('name')
@@ -172,6 +205,7 @@ class VIPCreate(BaseModel):
     @model_validator(mode='after')
     def _members_consistent(self):
         _validate_members(self.members)
+        _validate_additional_ips(self.additional_ips, self.virtual_ip)
         return self
 
 
@@ -187,6 +221,7 @@ class VIPUpdate(BaseModel):
     auth_pass: Optional[str] = None           # provide only to rotate; omit to keep existing
     use_unicast: Optional[bool] = None
     track_haproxy: Optional[bool] = None
+    additional_ips: Optional[List[VIPAddressIn]] = None   # None keeps them; [] clears them
     members: Optional[List[VIPMemberIn]] = None
 
     @field_validator('name')
@@ -242,4 +277,6 @@ class VIPUpdate(BaseModel):
     def _members_consistent(self):
         if self.members is not None:
             _validate_members(self.members)
+        if self.additional_ips is not None:
+            _validate_additional_ips(self.additional_ips, self.virtual_ip)
         return self

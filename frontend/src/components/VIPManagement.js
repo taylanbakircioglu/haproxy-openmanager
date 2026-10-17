@@ -6,7 +6,7 @@ import {
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, WarningOutlined,
   PlayCircleOutlined, SyncOutlined, CrownOutlined, ClockCircleOutlined, FileSearchOutlined,
-  InfoCircleOutlined
+  InfoCircleOutlined, MinusCircleOutlined
 } from '@ant-design/icons';
 import { useCluster } from '../contexts/ClusterContext';
 import { extractApiError } from '../utils/apiError';
@@ -75,6 +75,10 @@ const mergeBlockers = (lists) => {
   });
   return Array.from(seen.values());
 };
+
+// Mirrors backend/models/vip.py MAX_ADDITIONAL_IPS.
+const MAX_ADDITIONAL_IPS = 19;
+const IPV4_RE = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 
 // This component uses raw fetch(), but extractApiError expects an axios-shaped error
 // (err.response.data). Read the fetch Response body and reuse the envelope-aware extractor
@@ -351,7 +355,8 @@ const VIPManagement = () => {
     setSelectedPoolId(null);
     setMemberRows([]);
     form.resetFields();
-    form.setFieldsValue({ prefix_length: 24, advert_int: 1, use_unicast: true, track_haproxy: true });
+    form.setFieldsValue({ prefix_length: 24, advert_int: 1, use_unicast: true, track_haproxy: true,
+      additional_ips: [] });
     setModalVisible(true);
   };
 
@@ -365,6 +370,7 @@ const VIPManagement = () => {
       virtual_ip: vip.virtual_ip, prefix_length: vip.prefix_length,
       virtual_router_id: vip.virtual_router_id, advert_int: vip.advert_int,
       use_unicast: vip.use_unicast, track_haproxy: vip.track_haproxy,
+      additional_ips: (vip.additional_ips || []).map((a) => ({ ...a })),
     });
     setModalVisible(true);
   };
@@ -478,7 +484,19 @@ const VIPManagement = () => {
 
   const columns = [
     { title: 'Name', dataIndex: 'name', key: 'name' },
-    { title: 'Virtual IP', key: 'vip', render: (_, v) => <Text code>{v.virtual_ip}/{v.prefix_length}</Text> },
+    { title: 'Virtual IP', key: 'vip', render: (_, v) => {
+      const extra = v.additional_ips || [];
+      return (
+        <Space size={4}>
+          <Text code>{v.virtual_ip}/{v.prefix_length}</Text>
+          {extra.length > 0 && (
+            <Tooltip title={extra.map((a) => `${a.address}/${a.prefix_length}`).join(', ')}>
+              <Tag>+{extra.length}</Tag>
+            </Tooltip>
+          )}
+        </Space>
+      );
+    } },
     { title: 'Pool', dataIndex: 'pool_name', key: 'pool' },
     { title: 'VRID', dataIndex: 'virtual_router_id', key: 'vrid' },
     { title: 'Members / Live state', key: 'members', render: renderMembers },
@@ -842,6 +860,37 @@ const VIPManagement = () => {
               <Input.Password placeholder={editing ? '•••• (unchanged)' : 'optional'} maxLength={8} />
             </Form.Item>
           </Space>
+
+          <Form.List name="additional_ips">
+            {(fields, { add, remove }) => (
+              <div style={{ marginBottom: 16 }}>
+                <Text strong>Additional addresses</Text>
+                <div style={{ color: '#888', fontSize: 12, marginBottom: 8 }}>
+                  Optional. Extra IPv4 addresses carried by the same VRRP instance — they move between
+                  nodes together with the virtual IP, on the same interface (up to {MAX_ADDITIONAL_IPS}).
+                </div>
+                {fields.map(({ key, name, ...rest }) => (
+                  <Space key={key} align="baseline">
+                    <Form.Item {...rest} name={[name, 'address']}
+                      rules={[{ required: true, message: 'Address required' },
+                        { pattern: IPV4_RE, message: 'Enter an IPv4 address' }]}>
+                      <Input placeholder="10.0.0.101" style={{ width: 180 }} />
+                    </Form.Item>
+                    <Form.Item {...rest} name={[name, 'prefix_length']}
+                      rules={[{ required: true, message: 'Prefix required' }]}>
+                      <InputNumber min={1} max={32} addonBefore="/" />
+                    </Form.Item>
+                    <MinusCircleOutlined onClick={() => remove(name)} />
+                  </Space>
+                ))}
+                <Button type="dashed" size="small" icon={<PlusOutlined />}
+                  disabled={fields.length >= MAX_ADDITIONAL_IPS}
+                  onClick={() => add({ prefix_length: form.getFieldValue('prefix_length') || 24 })}>
+                  Add address
+                </Button>
+              </div>
+            )}
+          </Form.List>
 
           <Text strong>Participating nodes</Text>
           <div style={{ color: '#888', fontSize: 12, marginBottom: 8 }}>

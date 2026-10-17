@@ -183,6 +183,8 @@ def render_keepalived_conf(*, vip: dict, members: List[dict], this_agent: dict,
         lines.append("    }")
     lines.append("    virtual_ipaddress {")
     lines.append(f'        {vip["virtual_ip"]}/{int(vip.get("prefix_length", 24))} dev {iface}')
+    for extra in vip.get("additional_ips") or []:
+        lines.append(f'        {extra["address"]}/{int(extra["prefix_length"])} dev {iface}')
     lines.append("    }")
     if track:
         lines.append("    track_script {")

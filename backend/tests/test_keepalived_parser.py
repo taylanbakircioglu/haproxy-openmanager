@@ -78,6 +78,7 @@ def test_parses_a_handwritten_config_into_model_fields():
         "use_unicast": True,
         "track_haproxy": True,
         "auth_pass": "s3cr3t",
+        "additional_ips": [],
     }
     assert cand["member"] == {"network_interface": "eth0", "role": "MASTER", "priority": 150}
     assert cand["peers"] == ["10.0.0.12"] and cand["unicast_src_ip"] == "10.0.0.11"
@@ -141,11 +142,46 @@ def test_directives_we_cannot_render_block_adoption():
     assert _only_candidate(text)["adoptable"] is False
 
 
-def test_multiple_addresses_in_one_instance_block_adoption():
-    text = HANDWRITTEN.replace("        10.0.0.100/24 dev eth0",
-                               "        10.0.0.100/24 dev eth0\n        10.0.0.101/24 dev eth0")
-    blockers = _blockers_for(text)
-    assert "2 addresses" in blockers and "10.0.0.101" in blockers
+def _with_extra(line):
+    return HANDWRITTEN.replace("        10.0.0.100/24 dev eth0",
+                               "        10.0.0.100/24 dev eth0\n" + line)
+
+
+def test_multiple_addresses_in_one_instance_are_adopted_as_additional_ips():
+    """Issue #73: the addresses after the first become the VIP's additional addresses."""
+    cand = _only_candidate(_with_extra("        10.0.0.101/25 dev eth0\n        10.0.0.102/24"))
+    assert cand["adoptable"] is True, cand["blockers"]
+    assert cand["vip"]["virtual_ip"] == "10.0.0.100"
+    assert cand["vip"]["additional_ips"] == [
+        {"address": "10.0.0.101", "prefix_length": 25},
+        {"address": "10.0.0.102", "prefix_length": 24},
+    ]
+
+
+def test_an_additional_address_that_cannot_render_back_exactly_blocks_for_good():
+    """No prefix, another dev, IPv6 or a repeat cannot be reproduced. None of them may be
+    waivable: their wording must carry neither the loss nor the prefix marker."""
+    cases = {
+        "        10.0.0.101": "no /prefix",
+        "        10.0.0.101/24 dev eth1": "dev eth1",
+        "        fd00::1/64 dev eth0": "IPv6",
+        "        10.0.0.100/24 dev eth0": "more than once",
+        "        10.0.0.101/40 dev eth0": "invalid prefix",
+    }
+    for line, reason in cases.items():
+        cand = _only_candidate(_with_extra(line))
+        assert cand["adoptable"] is False, line
+        assert reason in " | ".join(cand["blockers"]), (line, cand["blockers"])
+        assert remaining_blockers(cand["blockers"], prefix_supplied=True,
+                                  accept_data_loss=True), line
+
+
+def test_too_many_addresses_block_adoption():
+    from models.vip import MAX_ADDITIONAL_IPS
+    lines = "\n".join(f"        10.0.1.{i}/24 dev eth0" for i in range(1, MAX_ADDITIONAL_IPS + 2))
+    cand = _only_candidate(_with_extra(lines))
+    assert cand["adoptable"] is False
+    assert f"at most {MAX_ADDITIONAL_IPS + 1}" in " | ".join(cand["blockers"])
 
 
 def test_missing_vrid_blocks_adoption_with_the_split_brain_reason():

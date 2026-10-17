@@ -1,6 +1,7 @@
-"""Issue #73 (v1.12.0) — several VIPs on one node.
+"""Issue #73 (v1.12.0) — several VIPs on one node, several addresses on one VIP.
 
-Pure tests for the merge of a node's applied single-VIP files, plus source-level guards for the delivery / ack / adoption / migration
+Pure tests for the merge of a node's applied single-VIP files, the extra-address rendering
+and validation, plus source-level guards for the delivery / ack / adoption / migration
 invariants that need a live database to exercise end to end.
 """
 from __future__ import annotations
@@ -14,6 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from models.vip import MAX_ADDITIONAL_IPS, VIPCreate, VIPUpdate  # noqa: E402
 from services import keepalived_config as kc  # noqa: E402
 from services.keepalived_parser import (  # noqa: E402
     ANALYSIS_VERSION, analyse_keepalived_conf, parse_keepalived_conf,
@@ -107,6 +109,58 @@ class TestCompose:
             kc.compose_node_keepalived_conf([])
 
 
+class TestAdditionalAddresses:
+    def test_empty_list_renders_byte_identical(self):
+        assert _applied({**A, "additional_ips": []}) == _applied(A)
+
+    def test_extras_follow_the_primary_on_the_same_interface(self):
+        conf = _applied({**A, "additional_ips": [
+            {"address": "10.0.0.101", "prefix_length": 24},
+            {"address": "192.168.5.9", "prefix_length": 32}]})
+        lines = [l.strip() for l in conf.splitlines()]
+        i = lines.index("10.0.0.100/24 dev eth0")
+        assert lines[i + 1:i + 3] == ["10.0.0.101/24 dev eth0", "192.168.5.9/32 dev eth0"]
+
+    def test_rendered_extras_are_adopted_back_unchanged(self):
+        extras = [{"address": "10.0.0.101", "prefix_length": 25}]
+        conf = _applied({**A, "additional_ips": extras})
+        cand = analyse_keepalived_conf(conf)["candidates"][0]
+        assert cand["adoptable"] is True, cand["blockers"]
+        assert cand["vip"]["additional_ips"] == extras
+
+
+def _members():
+    return [{"agent_id": 1, "network_interface": "eth0", "role": "MASTER", "priority": 150}]
+
+
+class TestModels:
+    def test_default_is_empty(self):
+        v = VIPCreate(name="v", pool_id=1, virtual_ip="10.0.0.100", members=_members())
+        assert v.additional_ips == []
+
+    def test_address_is_normalised_and_prefix_defaults(self):
+        v = VIPCreate(name="v", pool_id=1, virtual_ip="10.0.0.100", members=_members(),
+                      additional_ips=[{"address": " 10.0.0.101 "}])
+        assert v.additional_ips[0].model_dump() == {"address": "10.0.0.101", "prefix_length": 24}
+
+    @pytest.mark.parametrize("extras", [
+        [{"address": "10.0.0.100"}],
+        [{"address": "10.0.0.101"}, {"address": "10.0.0.101"}],
+        [{"address": "fd00::1"}],
+        [{"address": "nope"}],
+        [{"address": "10.0.0.101", "prefix_length": 33}],
+        [{"address": f"10.0.1.{i}"} for i in range(1, MAX_ADDITIONAL_IPS + 2)],
+    ])
+    def test_invalid_extras_are_rejected(self, extras):
+        with pytest.raises(ValueError):
+            VIPCreate(name="v", pool_id=1, virtual_ip="10.0.0.100", members=_members(),
+                      additional_ips=extras)
+
+    def test_update_omitted_keeps_and_empty_clears(self):
+        assert VIPUpdate().additional_ips is None
+        assert VIPUpdate(additional_ips=[]).additional_ips == []
+
+
 class TestDeliveryAndAckGuards:
     def test_failures_answer_with_statuses_the_agent_ignores(self):
         assert '"status": "compose_error"' in AGENT_ROUTER
@@ -145,6 +199,11 @@ class TestAdoptionGuards:
         assert VIP_ROUTER.count("multi_instance_blocker(") >= 2
         row_api = VIP_ROUTER.split("def _discovery_row_to_api", 1)[1].split("\ndef ", 1)[0]
         assert 'cand["adoptable"] = False' in row_api
+
+    def test_address_writes_take_the_address_lock(self):
+        for fn in ("create_vip", "update_vip", "adopt_vip"):
+            body = VIP_ROUTER.split(f"async def {fn}", 1)[1].split("\nasync def ", 1)[0]
+            assert "_lock_and_check_addresses(" in body, fn
 
 
 class TestDeltaMigration:

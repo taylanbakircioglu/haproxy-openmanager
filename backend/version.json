@@ -1,5 +1,5 @@
 {
-  "version": "1.11.3",
-  "releaseName": "Config Import keeps stick-table and stick rules instead of dropping them",
+  "version": "1.12.0",
+  "releaseName": "Several keepalived VIPs on one node, and several addresses on one VIP",
   "releaseDate": "2026-10-16"
 }
