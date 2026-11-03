@@ -65,7 +65,20 @@ const MultiLineDiffRenderer = ({ value, changeInfo }) => {
   
   // Calculate line-by-line diff
   const diff = calculateLineDiff(changeInfo.old, changeInfo.new);
-  
+
+  // Same lines, only reordered or re-spaced: the set-based diff above is empty.
+  if (diff.added.length === 0 && diff.removed.length === 0) {
+    return (
+      <div>
+        <Text type="secondary" style={{ fontSize: '10px' }}>Same lines, new order or spacing:</Text>
+        <br />
+        <Text code style={{ whiteSpace: 'pre-wrap', fontSize: '11px' }}>
+          {changeInfo.new || value}
+        </Text>
+      </div>
+    );
+  }
+
   return (
     <div>
       {diff.removed.length > 0 && (
@@ -1007,7 +1020,8 @@ backend web-backend
                         <ul style={{ marginBottom: 0 }}>
                           <li><strong>New entities:</strong> Will be created</li>
                           <li><strong>Existing entities:</strong> Will be compared - only actual changes updated</li>
-                          <li><strong>Preserved:</strong> SSL mappings, ACL rules, unchanged fields</li>
+                          <li><strong>Preserved:</strong> SSL mappings, unchanged fields, and lines named waf_* or used for ACME</li>
+                          <li><strong>ACL and routing rules:</strong> Replaced by the file's rules when the section has any; kept otherwise</li>
                           <li><strong>Servers:</strong> New servers added, existing servers preserved</li>
                           <li><strong>Note:</strong> "Existing" entities without changes will not be updated</li>
                         </ul>
@@ -1015,14 +1029,42 @@ backend web-backend
                     }
                     showIcon
                   />
-                ) : (
-                  <Alert
-                    type="success"
-                    message="All entities are new - no conflicts"
-                    description="All parsed entities will be created as new. No existing entities will be modified."
-                    showIcon
-                  />
-                )}
+                ) : (() => {
+                  // Existing entities whose values are unchanged are neither new nor updated.
+                  const s = parseResult.summary;
+                  const newCount = (s.new_frontends || 0) + (s.new_backends || 0);
+                  const unchanged = Math.max(0,
+                    (s.frontends_count || 0) - (s.new_frontends || 0) - (s.update_frontends || 0)) +
+                    Math.max(0, (s.backends_count || 0) - (s.new_backends || 0) - (s.update_backends || 0));
+                  if (unchanged > 0 && newCount === 0) {
+                    return (
+                      <Alert
+                        type="info"
+                        message="No changes detected"
+                        description="Every parsed entity already exists with the same values, so nothing will be created or modified."
+                        showIcon
+                      />
+                    );
+                  }
+                  if (unchanged > 0) {
+                    return (
+                      <Alert
+                        type="success"
+                        message={`${newCount} new entit${newCount === 1 ? 'y' : 'ies'} - no conflicts`}
+                        description="New entities will be created. Existing entities have no changes and will not be modified."
+                        showIcon
+                      />
+                    );
+                  }
+                  return (
+                    <Alert
+                      type="success"
+                      message="All entities are new - no conflicts"
+                      description="All parsed entities will be created as new. No existing entities will be modified."
+                      showIcon
+                    />
+                  );
+                })()}
                 
                 {/* Summary with New/Update Breakdown */}
                 <Descriptions bordered size="small" column={3}>
@@ -1207,8 +1249,24 @@ backend web-backend
                                     </Descriptions.Item>
                                   )}
                                   {frontend.acl_rules && frontend.acl_rules.length > 0 && (
-                                    <Descriptions.Item label={`ACL Rules (${frontend.acl_rules.length})`}>
-                                      {frontend.acl_rules.map((acl, idx) => (
+                                    <Descriptions.Item
+                                      label={
+                                        <span>
+                                          {`ACL Rules (${frontend.acl_rules.length})`}
+                                          {frontend._changes?.acl_rules && (
+                                            <Tag color="orange" style={{ marginLeft: 8, fontSize: '10px' }}>
+                                              {frontend._changes.acl_rules.old ? 'CHANGED' : 'NEW'}
+                                            </Tag>
+                                          )}
+                                        </span>
+                                      }
+                                    >
+                                      {frontend._changes?.acl_rules ? (
+                                        <MultiLineDiffRenderer
+                                          value={frontend.acl_rules.join('\n')}
+                                          changeInfo={frontend._changes.acl_rules}
+                                        />
+                                      ) : frontend.acl_rules.map((acl, idx) => (
                                         <div key={idx}>
                                           <Text code style={{ fontSize: '11px' }}>{acl}</Text>
                                         </div>
@@ -1216,8 +1274,24 @@ backend web-backend
                                     </Descriptions.Item>
                                   )}
                                   {frontend.use_backend_rules && frontend.use_backend_rules.length > 0 && (
-                                    <Descriptions.Item label={`Backend Routing Rules (${frontend.use_backend_rules.length})`}>
-                                      {frontend.use_backend_rules.map((rule, idx) => (
+                                    <Descriptions.Item
+                                      label={
+                                        <span>
+                                          {`Backend Routing Rules (${frontend.use_backend_rules.length})`}
+                                          {frontend._changes?.use_backend_rules && (
+                                            <Tag color="orange" style={{ marginLeft: 8, fontSize: '10px' }}>
+                                              {frontend._changes.use_backend_rules.old ? 'CHANGED' : 'NEW'}
+                                            </Tag>
+                                          )}
+                                        </span>
+                                      }
+                                    >
+                                      {frontend._changes?.use_backend_rules ? (
+                                        <MultiLineDiffRenderer
+                                          value={frontend.use_backend_rules.join('\n')}
+                                          changeInfo={frontend._changes.use_backend_rules}
+                                        />
+                                      ) : frontend.use_backend_rules.map((rule, idx) => (
                                         <div key={idx}>
                                           <Text code style={{ fontSize: '11px' }}>{rule}</Text>
                                         </div>

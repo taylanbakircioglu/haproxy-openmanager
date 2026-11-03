@@ -1,3 +1,56 @@
+# Upgrade Notes — v1.12.1 (ACLs used by tcp-request rules; ACL / routing changes on Config Import)
+
+**Backend + UI change, no schema change, no agent change.** No `SCHEMA_VERSION` bump and no agent
+upgrade is needed.
+
+- **Running configs do not change.** Only a frontend whose `tcp-request` rules reference an ACL
+  declared in the same frontend renders differently: its `acl` lines move above the `tcp-request`
+  rules. Earlier versions rendered them the other way round, which `haproxy -c` rejects with
+  `no such ACL`, so no working config contains such a frontend. HAProxy's predefined ACLs
+  (`LOCALHOST`, `TRUE`, `WAIT_END`, …) do not trigger the move, even when a frontend declares an
+  ACL with the same name. Every other frontend renders byte-for-byte as before: no Apply diff, no
+  reload, nothing different in an ACME auto-renewal.
+- **Config Import now updates ACL and routing rules of an existing frontend.** When the imported
+  section has `acl` or `use_backend` lines they replace the stored list, in file order. Rules that are
+  stored but not in the file are removed, and the preview lists them in a warning before you
+  confirm. A section without `acl` / `use_backend` lines keeps the stored rules, like every other
+  field Config Import merges, so an import cannot clear them; do that in the Frontend form. Earlier
+  versions ignored these rules on an existing frontend without a word. Reject restores the previous
+  rules.
+- **Generated lines are still not stored.** `is_acme_challenge`, `acl waf_*` and
+  `use_backend _acme_challenge_backend` lines in an imported file are skipped; such lines already
+  stored on the frontend are kept, in place.
+- **Lines named `waf_*` are skipped by name, and the preview now says so.** Config Import cannot tell
+  a line a WAF rule generated from a frontend's own rule that happens to use the `waf_` prefix, so
+  `acl waf_*` and `http-request ... waf_*` lines are never imported. The preview compares them with
+  what is currently rendered for that frontend and, when they differ, warns that the edit has no
+  effect and names the lines; an unedited export shows no such warning. For a new frontend it
+  states how many were skipped. Change WAF-generated lines in WAF Management; edit a frontend's own
+  `waf_*` rules in Frontend Management, or rename them without the prefix so Config Import handles
+  them.
+- **A frontend's own `http-request ... waf_*` rules are no longer deleted by an import.** When an
+  import updated a frontend's Request Headers, earlier versions wrote the header list without these
+  lines, so a rule such as `http-request deny if waf_x` stored on the frontend disappeared while its
+  ACLs stayed. The stored lines are now kept, in place. A consequence: duplicate WAF lines stored by
+  a very old import (before generated lines were filtered) are no longer removed by an import
+  either; they render today and keep rendering the same way.
+- **Import preview banner.** When every parsed entity already exists unchanged, the preview now says
+  "No changes detected" instead of "All entities are new"; with a mix of new and unchanged
+  entities it gives the number of new ones.
+- **Rules the import skips or warns about.** A rule with a line break, `$(` or a backtick is not
+  imported (the Frontend form already rejects the last two) and is named in a warning. A rule that
+  starts or ends with a quote or a square bracket gets a warning: the renderer strips that
+  character, so `acl api hdr(host) -i "api.example.com"` renders as `... -i "api.example.com` and
+  fails `haproxy -c`. Write such values without the quotes.
+- **Rolling deploy:** finish the rollout before running Config Import, and before applying a
+  frontend whose `tcp-request` rules use its own ACLs. An older replica ignores imported ACL changes
+  and renders those frontends in the old order; agents then reject that config and keep the previous
+  one running.
+- **Rollback / downgrade:** older versions render such frontends in the old order again, so agents
+  reject the next Apply and keep running the previous config. Remove the ACL reference from the
+  `tcp-request` rule (or use an inline condition) before downgrading. Rules imported by v1.12.1 stay
+  stored and render as before on older versions.
+
 # Upgrade Notes — v1.12.0 (several keepalived VIPs on one node, several addresses on one VIP)
 
 **Backend + UI change, schema `13` (delta), no agent change.** Agents of every version keep working;

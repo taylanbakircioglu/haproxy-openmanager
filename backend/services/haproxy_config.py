@@ -436,6 +436,10 @@ def _categorize_haproxy_directive(line: str) -> str:
         http-request → http-response → redirect → use_backend →
         default_backend
 
+    Exception (issue #78): when a tcp-request rule references an ACL
+    declared in the same frontend, the acl lines are emitted before the
+    tcp-request rules (see ``_tcp_rules_reference_declared_acls``).
+
     Comments (``# ...``) are routed to the same category as the next
     directive heuristically (they keep their semantic anchor in the
     rendered output). Unknown directives default to 'prelude' so
@@ -516,6 +520,74 @@ def _categorize_haproxy_directive(line: str) -> str:
     ):
         return "prelude"
     return "prelude"
+
+
+# HAProxy's predefined ACLs (union over 1.8-3.0; 1.8 and 2.0 lack HTTP_2.0,
+# releases before 3.0 lack HTTP_3.0). A frontend may declare an ACL with one of these names; a
+# tcp-request rule placed before that declaration resolves the predefined one,
+# so such a reference must not trigger the reordering below.
+_PREDEFINED_ACL_NAMES = frozenset({
+    "FALSE", "HTTP", "HTTP_1.0", "HTTP_1.1", "HTTP_2.0", "HTTP_3.0", "HTTP_CONTENT",
+    "HTTP_URL_ABS", "HTTP_URL_SLASH", "HTTP_URL_STAR", "LOCALHOST",
+    "METH_CONNECT", "METH_DELETE", "METH_GET", "METH_HEAD", "METH_OPTIONS",
+    "METH_POST", "METH_PUT", "METH_TRACE", "RDP_COOKIE", "REQ_CONTENT",
+    "TRUE", "WAIT_END",
+})
+
+
+def _tcp_rules_reference_declared_acls(tcp_lines: List[str], acl_lines: List[str]) -> List[str]:
+    """Return the ACL names declared in ``acl_lines`` that a ``tcp-request``
+    rule in ``tcp_lines`` references (sorted; empty when there are none).
+
+    Issue #78: the frontend buckets are flushed tcp_req before acl, so a
+    ``tcp-request ... if <name>`` whose ACL is declared in the same frontend
+    is rendered ahead of the declaration and ``haproxy -c`` rejects it. Only
+    the condition part (after the first ``if``/``unless``) is scanned, and
+    anonymous ``{ ... }`` blocks are skipped: HAProxy only accepts the braces
+    as separate words, and a word inside them (``-f blacklist``) is not an
+    ACL reference.
+    """
+    declared = set()
+    for line in acl_lines:
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "acl":
+            declared.add(parts[1])
+    declared -= _PREDEFINED_ACL_NAMES
+    if not declared:
+        return []
+    referenced = set()
+    for line in tcp_lines:
+        tokens = line.split()
+        for idx, tok in enumerate(tokens):
+            if tok in ("if", "unless"):
+                depth = 0
+                for cond in tokens[idx + 1:]:
+                    name = cond.lstrip("!")
+                    if name == "{":
+                        depth += 1
+                    elif name == "}":
+                        depth = max(depth - 1, 0)
+                    elif depth == 0 and name in declared:
+                        referenced.add(name)
+                break
+    return sorted(referenced)
+
+
+def _hoist_acls_for_tcp_rules(buckets: Dict[str, List[str]]) -> List[str]:
+    """Move the frontend's acl lines to the end of the stick bucket when a
+    tcp-request rule references one of them; return the referenced names.
+
+    The stick bucket is flushed right before tcp_req, so the declarations land
+    ahead of the rules and still after any stick-table they may read. Buckets
+    are left untouched otherwise, so every other frontend renders byte-for-byte
+    as before — the WAF config sync in routers/cluster.py reads the lines that
+    follow a `# WAF Rule:` comment and depends on that.
+    """
+    refs = _tcp_rules_reference_declared_acls(buckets["tcp_req"], buckets["acl"])
+    if refs:
+        buckets["stick"].extend(buckets["acl"])
+        buckets["acl"] = []
+    return refs
 
 
 def _resolve_frontend_client_ca_path(
@@ -1329,6 +1401,15 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                     f"STICK-TABLE AUTO-INJECT: frontend '{frontend['name']}' uses a stick "
                     f"counter (track-sc/sc_*_rate) but declared no stick-table; injected a "
                     f"default so the config stays valid.")
+
+            # Issue #78: a tcp-request rule that references an ACL declared in this
+            # frontend needs the declaration first, or `haproxy -c` fails.
+            _acl_refs = _hoist_acls_for_tcp_rules(_fe_buckets)
+            if _acl_refs:
+                logger.info(
+                    f"ACL HOIST: frontend '{frontend['name']}' has tcp-request rules "
+                    f"referencing {', '.join(_acl_refs)}; ACL declarations rendered "
+                    f"before the tcp-request rules.")
 
             # ─────────────────────────────────────────────────────────────
             # Flush the per-frontend buckets in canonical HAProxy order.
