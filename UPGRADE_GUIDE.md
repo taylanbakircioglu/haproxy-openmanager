@@ -1,3 +1,52 @@
+# Upgrade Notes — v1.12.2 (ACME wildcard certificate edit; why a certificate was not auto-renewed)
+
+**Backend + UI change, no schema change, no agent change.** No `SCHEMA_VERSION` bump and no agent
+upgrade is needed. Rendered HAProxy configs, certificate files and certificate names do not change.
+
+- **Editing an ACME wildcard certificate works.** ACME names a wildcard certificate
+  `le-*.<domain>`. The Edit form re-checked the locked name against the create-time pattern and
+  refused to save with "Only alphanumeric, dot, underscore and dash allowed". The pattern now
+  applies only to new certificates; the backend already accepted an unchanged name. Names created by
+  ACME stay as they are: `*` in the file name is quoted by the agent and is not a glob for HAProxy.
+- **Updating an ACME certificate does not renew it.** The Edit form says so and points to the new
+  **Renew Now** action. Such an update changes no content and creates no config version; the form
+  now reports it as a plain success instead of "updated with warnings — 0/1 cluster(s) have pending
+  versions".
+- **Scope and target clusters are locked in the Edit form.** `PUT /api/ssl/certificates/{id}` has
+  never applied `is_global` / `cluster_ids`, so changing them in Edit had no effect. The fields are
+  now shown read-only. Nothing changes for stored certificates.
+- **Auto-renewal has a global switch, and the Renewal Schedule now shows it.** The renewal task
+  checks `acme.auto_renew_enabled` (Settings > ACME / SSL Automation > Enable Auto-Renewal, default
+  **off**) before a certificate's own Auto-Renew. While it is off no certificate is renewed, but
+  the Renewal Schedule still showed "Enabled". It now shows **Paused (global off)** with a warning
+  above the table, "Next Renewal" shows **Off**, and a **Renewal Due** column shows the first day
+  the task renews the certificate: `acme.renew_before_days` before expiry, or the day after when the
+  expiry is not at midnight, since the task compares the expiry with the current date. The setting
+  itself and its default are unchanged: enable it if you rely on automatic renewal.
+- **Certificates the task cannot renew are marked.** While auto-renewal is on, a certificate whose
+  issuing ACME account is no longer valid is shown as **Blocked**, and one with no ACME order or no
+  expiry date (the task skips both) as **Not renewable**. Both show "Enabled" in earlier versions.
+- **Renewal failures are visible.** When the hourly task cannot start a renewal (for example the
+  issuing ACME account was deactivated, or the CA refused the order) or skips a DNS-01 certificate
+  whose retries failed, it records an event on the certificate's order, at most once per reason
+  every 24 hours, also with several uvicorn workers or replicas (each runs the task; an advisory
+  lock serialises the record). The Renewal Schedule shows the latest one for 48 hours, and it is
+  in the order's Diagnostics > Event Log. Earlier versions wrote these failures only to the backend
+  log.
+- **Renew Now** in the Renewal Schedule calls the existing `POST /api/letsencrypt/orders/{id}/renew`
+  (`ssl.create`). It is disabled while an order for the same domains is in progress, when the
+  issuing account is no longer valid, and for DNS-01 certificates while DNS-01 is disabled in
+  Settings (the same rule as Request Certificate; the hourly task keeps renewing existing DNS-01
+  certificates as before). That endpoint now returns the failure reason in the error detail; the
+  status code is still 500, and its behaviour is otherwise unchanged.
+- **API:** each `GET /api/letsencrypt/renewal-schedule` row gains `letsencrypt_order_id`,
+  `order_domains`, `account_status`, `global_auto_renew_enabled`, `renew_before_days`,
+  `renewal_due_date` (`YYYY-MM-DD`; `null` for certificates the task does not renew: Auto-Renew off,
+  no ACME order, no expiry date, manual DNS-01) and `last_renewal_issue`. Existing fields are
+  unchanged and the response is still a list.
+- **Rolling deploy / rollback:** a v1.12.2 UI against an older backend shows the Renewal Schedule as
+  before (no Paused state, no Renewal Due date, no Renew Now). Older versions ignore the new events.
+
 # Upgrade Notes — v1.12.1 (ACLs used by tcp-request rules; ACL / routing changes on Config Import)
 
 **Backend + UI change, no schema change, no agent change.** No `SCHEMA_VERSION` bump and no agent

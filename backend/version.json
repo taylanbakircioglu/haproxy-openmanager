@@ -1,5 +1,5 @@
 {
-  "version": "1.12.1",
-  "releaseName": "ACLs used by tcp-request rules, and ACL / routing changes on Config Import",
-  "releaseDate": "2026-11-03"
+  "version": "1.12.2",
+  "releaseName": "ACME certificate edit with wildcard names, and why a certificate was not auto-renewed",
+  "releaseDate": "2026-11-17"
 }

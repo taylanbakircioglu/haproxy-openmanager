@@ -36,6 +36,8 @@ const EVENT_LABELS = {
   'acme.dns01.validation': 'DNS-01 validation result',
   'acme.dns01.cleanup': 'Removed DNS TXT record',
   'acme.order.requested': 'Certificate requested',
+  'acme.renewal.failed': 'Automatic renewal failed',
+  'acme.renewal.skipped': 'Automatic renewal skipped',
 };
 const humanizeEventType = (t) => EVENT_LABELS[t] || t;
 
@@ -99,11 +101,13 @@ const ACMEAutomation = () => {
   const [registering, setRegistering] = useState(false);
   const [accountDetailVisible, setAccountDetailVisible] = useState(false);
   const [orderFilter, setOrderFilter] = useState('active');
+  const [renewingCertId, setRenewingCertId] = useState(null);
   const { token } = theme.useToken();
 
   // Issue #35: DNS-01 provider catalog + global enable flag (from GET /dns-providers).
   const [dnsProviders, setDnsProviders] = useState([]);
   const [dns01Enabled, setDns01Enabled] = useState(false);
+  const [dns01Known, setDns01Known] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const regChallengeType = Form.useWatch('challenge_type', registerForm);
   const regDnsProvider = Form.useWatch('dns_provider', registerForm);
@@ -164,6 +168,7 @@ const ACMEAutomation = () => {
       if (dnsRes.status === 'fulfilled') {
         setDnsProviders(dnsRes.value.data?.providers || []);
         setDns01Enabled(!!dnsRes.value.data?.dns01_enabled);
+        setDns01Known(true);
       }
     } catch (err) {
       console.error('Error loading ACME data:', err);
@@ -215,13 +220,24 @@ const ACMEAutomation = () => {
   // Manual DNS-01 certs are not auto-renewed (even a legacy row left at auto_renew=TRUE), so they
   // must not drive the "Next Renewal" countdown, which implies an automated event.
   const isManualDnsCert = (c) => c.challenge_type === 'dns-01' && (c.dns_provider || 'manual') === 'manual';
-  const nextRenewal = renewalSchedule.find(c => c.auto_renew && !isManualDnsCert(c) && calcDaysLeft(c.expiry_date) > 0);
+  // Issue #79: the renewal task checks the global Settings > ACME switch before a certificate's own
+  // auto_renew. Compared with `=== false` so a backend that does not send the field keeps the old view.
+  const globalAutoRenewOff = renewalSchedule.some(c => c.global_auto_renew_enabled === false);
+  const nextRenewal = globalAutoRenewOff ? null
+    : renewalSchedule.find(c => c.auto_renew && !isManualDnsCert(c) && c.letsencrypt_order_id !== null
+        && calcDaysLeft(c.expiry_date) > 0);
   const nextRenewalDays = nextRenewal ? calcDaysLeft(nextRenewal.expiry_date) : null;
   // Issue #11/#12: an order is "in progress" if it's pre-valid OR valid-but-not-downloaded (stuck).
   // Including 'ready' here ensures the dashboard counter & UI auto-refresh react to all in-flight states.
   const isOrderStuck = (o) => o.status === 'valid' && !o.ssl_certificate_id;
   const pendingOrders = orders.filter(o =>
     o.status === 'pending' || o.status === 'processing' || o.status === 'ready' || isOrderStuck(o)
+  );
+  // Same "in progress" rule the renewal task uses to skip a certificate, matched on the domain list.
+  const sameDomains = (a, b) => Array.isArray(a) && Array.isArray(b) && JSON.stringify(a) === JSON.stringify(b);
+  const findRenewalInProgress = (cert) => orders.find(o =>
+    (!['valid', 'invalid', 'cancelled'].includes(o.status) || isOrderStuck(o))
+    && sameDomains(o.domains, cert.order_domains)
   );
   // The account a request lands on when it carries no explicit account_id. This MUST match the
   // backend, which takes `ORDER BY created_at DESC LIMIT 1` (routers/letsencrypt.py). The list
@@ -338,6 +354,32 @@ const ACMEAutomation = () => {
     } catch (err) {
       message.error(getErrorMsg(err, 'Retry failed'));
     }
+  };
+
+  const handleRenewNow = (cert) => {
+    Modal.confirm({
+      title: 'Renew Certificate Now',
+      content: `Create a renewal order for ${cert.primary_domain}? The renewed certificate replaces the current one and is applied automatically once the CA issues it.`,
+      okText: 'Renew Now',
+      onOk: async () => {
+        setRenewingCertId(cert.id);
+        try {
+          const res = await axios.post(`/api/letsencrypt/orders/${cert.letsencrypt_order_id}/renew`);
+          const manualDns = isManualDnsCert(cert);
+          message.success(
+            manualDns
+              ? `Renewal order #${res.data?.new_order_id} created. Open it in Certificate Orders to see the DNS TXT record to publish.`
+              : `Renewal order #${res.data?.new_order_id} created. It completes in the background.`,
+            8
+          );
+          fetchData();
+        } catch (err) {
+          message.error(getErrorMsg(err, 'Renewal failed'));
+        } finally {
+          setRenewingCertId(null);
+        }
+      },
+    });
   };
 
   const handleCancel = (orderId) => {
@@ -904,17 +946,102 @@ const ACMEAutomation = () => {
       },
     },
     {
+      title: 'Renewal Due', key: 'renewal_due',
+      render: (_, record) => {
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(record.renewal_due_date || '');
+        if (!m) return '-';
+        if (!record.auto_renew || isManualDnsCert(record) || !record.letsencrypt_order_id) return '-';
+        // A calendar date from the backend (same rule as the renewal task), not a timestamp:
+        // build it locally so the browser's timezone cannot shift it by a day.
+        const due = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+        return (
+          <Tooltip title={`${record.renew_before_days} days before expiry (Settings > ACME / SSL Automation)`}>
+            {due.toLocaleDateString()}
+          </Tooltip>
+        );
+      },
+    },
+    {
       title: 'Auto-Renew', dataIndex: 'auto_renew', key: 'auto_renew',
       render: (v, record) => {
         const isManualDns = record.challenge_type === 'dns-01' && (record.dns_provider || 'manual') === 'manual';
+        let statusTag;
         if (isManualDns) {
-          return (
+          statusTag = (
             <Tooltip title="Manual DNS-01 cannot auto-renew unattended. Re-publish the TXT record and request renewal before expiry.">
               <Tag color="warning" icon={<ExclamationCircleOutlined />}>Manual (re-publish TXT)</Tag>
             </Tooltip>
           );
+        } else if (!v) {
+          statusTag = <Tag>Disabled</Tag>;
+        } else if (record.global_auto_renew_enabled === false) {
+          statusTag = (
+            <Tooltip title="Automatic renewal is turned off in Settings > ACME / SSL Automation (Enable Auto-Renewal), so this certificate will not be renewed automatically. Use Renew Now, or ask an admin to enable it.">
+              <Tag color="orange" icon={<ExclamationCircleOutlined />}>Paused (global off)</Tag>
+            </Tooltip>
+          );
+        } else if (record.account_status && record.account_status !== 'valid') {
+          statusTag = (
+            <Tooltip title={`The ACME account that issued this certificate is ${record.account_status}, so renewal orders will fail. Request a new certificate for this domain with an active account.`}>
+              <Tag color="red" icon={<CloseCircleOutlined />}>Blocked (account {record.account_status})</Tag>
+            </Tooltip>
+          );
+        } else if (record.global_auto_renew_enabled === true && (!record.letsencrypt_order_id || !record.expiry_date)) {
+          statusTag = (
+            <Tooltip title={`${record.letsencrypt_order_id
+              ? 'The expiry date of this certificate is unknown'
+              : 'This certificate is not linked to an ACME order'}, so the renewal task cannot renew it. Request a new certificate for this domain.`}>
+              <Tag color="red" icon={<CloseCircleOutlined />}>Not renewable</Tag>
+            </Tooltip>
+          );
+        } else {
+          statusTag = <Tag color="green">Enabled</Tag>;
         }
-        return v ? <Tag color="green">Enabled</Tag> : <Tag>Disabled</Tag>;
+        const issue = record.last_renewal_issue;
+        if (!issue) return statusTag;
+        return (
+          <Space size={4} wrap>
+            {statusTag}
+            <Tooltip title={`${issue.message || issue.event_type}${issue.created_at ? ` (${new Date(issue.created_at).toLocaleString()})` : ''}`}>
+              <Tag color={issue.severity === 'ERROR' ? 'red' : 'orange'} icon={<ExclamationCircleOutlined />}>
+                {issue.severity === 'ERROR' ? 'Last renewal failed' : 'Renewal skipped'}
+              </Tag>
+            </Tooltip>
+          </Space>
+        );
+      },
+    },
+    {
+      title: 'Actions', key: 'actions', width: 130,
+      render: (_, record) => {
+        if (!record.letsencrypt_order_id) return null;
+        const inProgress = findRenewalInProgress(record);
+        const accountBlocked = record.account_status && record.account_status !== 'valid';
+        // Same rule as Request Certificate: no new DNS-01 order from the UI while DNS-01 is off.
+        const dns01Off = record.challenge_type === 'dns-01' && dns01Known && !dns01Enabled;
+        const disabledReason = inProgress
+          ? `Order #${inProgress.id} for these domains is already in progress (${inProgress.status}).`
+          : accountBlocked
+            ? `The ACME account that issued this certificate is ${record.account_status}. Request a new certificate with an active account.`
+            : dns01Off
+              ? 'DNS-01 is disabled in Settings > ACME / SSL Automation, so no DNS-01 order can be created from here.'
+              : null;
+        const button = (
+          <Button
+            size="small"
+            icon={<SyncOutlined />}
+            loading={renewingCertId === record.id}
+            disabled={!!disabledReason || (renewingCertId !== null && renewingCertId !== record.id)}
+            onClick={() => handleRenewNow(record)}
+          >
+            Renew Now
+          </Button>
+        );
+        return (
+          <Tooltip title={disabledReason || 'Create a renewal order now'}>
+            {disabledReason ? <span>{button}</span> : button}
+          </Tooltip>
+        );
       },
     },
   ];
@@ -1228,9 +1355,9 @@ const ACMEAutomation = () => {
           <Card>
             <Statistic
               title="Next Renewal"
-              value={nextRenewalDays !== null ? `${nextRenewalDays}d` : 'N/A'}
+              value={globalAutoRenewOff ? 'Off' : nextRenewalDays !== null ? `${nextRenewalDays}d` : 'N/A'}
               prefix={<ClockCircleOutlined />}
-              valueStyle={{ color: nextRenewalDays !== null && nextRenewalDays <= 7 ? '#ff4d4f' : '#52c41a' }}
+              valueStyle={{ color: globalAutoRenewOff ? '#faad14' : nextRenewalDays !== null && nextRenewalDays <= 7 ? '#ff4d4f' : '#52c41a' }}
             />
           </Card>
         </Col>
@@ -1318,6 +1445,23 @@ const ACMEAutomation = () => {
       </Card>
 
       <Card title="Renewal Schedule">
+        {globalAutoRenewOff && renewalSchedule.some(c => c.auto_renew && !isManualDnsCert(c)) && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="Automatic renewal is turned off"
+            description={
+              <span>
+                Certificates marked Paused will expire without being renewed. Use Renew Now for a one-off renewal, or{' '}
+                <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate('/settings?tab=acme')}>
+                  enable Auto-Renewal in Settings &gt; ACME
+                </Button>{' '}
+                (admin only).
+              </span>
+            }
+          />
+        )}
         <Table
           columns={renewalColumns}
           dataSource={renewalSchedule}
@@ -1325,6 +1469,7 @@ const ACMEAutomation = () => {
           loading={loading}
           pagination={{ pageSize: 10 }}
           size="small"
+          scroll={{ x: 'max-content' }}
           locale={{ emptyText: 'No ACME-managed certificates yet' }}
         />
       </Card>

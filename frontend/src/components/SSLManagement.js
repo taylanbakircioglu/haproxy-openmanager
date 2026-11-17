@@ -453,7 +453,11 @@ const SSLManagement = () => {
       const totalNodes = syncResults.length;
       const successCount = syncResults.filter(result => result.success).length;
       
-      if (syncResults.length > 0) {
+      if (isEditing && response.data?.content_updated === false) {
+        // Metadata-only update: the backend creates no config version and its sync_results
+        // entry carries no `success` flag, which the branch below would report as a failure.
+        message.success('SSL certificate updated (no configuration change needed)');
+      } else if (syncResults.length > 0) {
         if (successCount === totalNodes) {
           message.success(
             <div>
@@ -1061,7 +1065,11 @@ const SSLManagement = () => {
                 label="Certificate Name"
                 rules={[
                   { required: true, message: 'Please enter certificate name' },
-                  { pattern: /^[a-zA-Z0-9_.-]+$/, message: 'Only alphanumeric, dot, underscore and dash allowed' }
+                  // The name is locked on edit and the backend accepts an unchanged name, so only a
+                  // new name is checked. ACME names a wildcard certificate le-*.<domain>.
+                  ...(selectedCertificate && selectedCertificate.id
+                    ? []
+                    : [{ pattern: /^[a-zA-Z0-9_.-]+$/, message: 'Only alphanumeric, dot, underscore and dash allowed' }])
                 ]}
                 extra={selectedCertificate && selectedCertificate.id ? "Certificate name cannot be changed (used as file path on servers)" : "Used as file path: /etc/ssl/haproxy/{name}.pem"}
                 tooltip={selectedCertificate && selectedCertificate.id ? "Certificate name is immutable after creation to maintain file system references" : null}
@@ -1094,9 +1102,11 @@ const SSLManagement = () => {
                 name="ssl_type"
                 label="SSL Certificate Scope"
                 rules={[{ required: true, message: 'Please select SSL scope' }]}
+                extra={selectedCertificate && selectedCertificate.id ? "Scope and target clusters cannot be changed on edit" : null}
               >
                 <Select
                   placeholder="Select SSL scope"
+                  disabled={selectedCertificate && selectedCertificate.id ? true : false}
                   onChange={(value) => {
                     form.setFieldsValue({ cluster_ids: undefined });
                   }}
@@ -1128,7 +1138,7 @@ const SSLManagement = () => {
                       <Select
                         mode="multiple"
                         placeholder="Select clusters for this SSL certificate"
-                        disabled={sslType === 'global'}
+                        disabled={sslType === 'global' || !!(selectedCertificate && selectedCertificate.id)}
                         showSearch
                         filterOption={(input, option) =>
                           option.children.toLowerCase().indexOf(input.toLowerCase()) >= 0
@@ -1161,6 +1171,7 @@ const SSLManagement = () => {
               showIcon
               icon={<SafetyCertificateOutlined />}
               message="This certificate is managed by ACME automation. Content updates happen automatically during renewals."
+              description="Updating it here does not renew it. To renew now, use Renew Now in the Renewal Schedule on the ACME Automation tab. Automatic renewal also requires Enable Auto-Renewal in Settings > ACME / SSL Automation."
               style={{ marginBottom: 16 }}
             />
           )}

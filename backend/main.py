@@ -670,32 +670,17 @@ async def check_letsencrypt_renewals():
                 await asyncio.sleep(3600)
                 continue
 
-            auto_renew_setting = await conn.fetchval(
-                "SELECT value FROM system_settings WHERE key = 'acme.auto_renew_enabled'"
+            from utils.acme_renewal import (
+                load_renewal_settings, record_renewal_issue,
+                RENEWAL_EVENT_FAILED, RENEWAL_EVENT_SKIPPED,
             )
-            auto_renew_enabled = False
-            if auto_renew_setting:
-                try:
-                    val = json.loads(auto_renew_setting) if isinstance(auto_renew_setting, str) else auto_renew_setting
-                    auto_renew_enabled = val in (True, 'true', 'True')
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            auto_renew_enabled, renew_days = await load_renewal_settings(conn)
 
             if not auto_renew_enabled:
                 await close_database_connection(conn)
                 conn = None
                 await asyncio.sleep(3600)
                 continue
-
-            renew_days_raw = await conn.fetchval(
-                "SELECT value FROM system_settings WHERE key = 'acme.renew_before_days'"
-            )
-            renew_days = 30
-            if renew_days_raw:
-                try:
-                    renew_days = int(json.loads(renew_days_raw) if isinstance(renew_days_raw, str) else renew_days_raw)
-                except (ValueError, TypeError, json.JSONDecodeError):
-                    pass
 
             expiring_certs = await conn.fetch("""
                 SELECT id, name, primary_domain, letsencrypt_order_id
@@ -760,6 +745,12 @@ async def check_letsencrypt_renewals():
                                     if exhausted:
                                         logger.warning(f"[ACME-RENEWAL] cert {cert['id']} DNS-01 renewal recently failed (check DNS); skipping re-mint for 24h")
                                         skip = True
+                                        await record_renewal_issue(
+                                            order_id, RENEWAL_EVENT_SKIPPED,
+                                            f"Automatic renewal paused for 24h: the DNS-01 renewal order {exhausted['id']} "
+                                            "failed validation after all retries. Check the DNS provider and the TXT record.",
+                                            details={"certificate_id": cert['id'], "failed_order_id": exhausted['id']},
+                                        )
                     finally:
                         await close_database_connection(conn2)
 
@@ -775,6 +766,13 @@ async def check_letsencrypt_renewals():
                     logger.info(f"[ACME-RENEWAL] Initiated renewal order {new_order['order_id']} ({challenge_type}) for cert {cert['id']} ({cert['name']})")
                 except Exception as cert_err:
                     logger.error(f"[ACME-RENEWAL] Failed to initiate renewal for cert {cert['id']}: {cert_err}")
+                    if cert['letsencrypt_order_id']:
+                        await record_renewal_issue(
+                            cert['letsencrypt_order_id'], RENEWAL_EVENT_FAILED,
+                            f"Automatic renewal failed: {cert_err}",
+                            severity="ERROR",
+                            details={"certificate_id": cert['id']},
+                        )
 
             # Phase 2: Warn about stuck orders (completion handled by complete_pending_acme_orders)
             conn3 = await get_database_connection()

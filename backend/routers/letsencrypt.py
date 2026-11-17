@@ -837,14 +837,20 @@ async def renew_order(order_id: int, authorization: str = Header(None)):
         cluster_ids = json.loads(order['cluster_ids']) if isinstance(order['cluster_ids'], str) else order['cluster_ids']
         challenge_type = order['challenge_type'] or 'http-01'
 
-        new_order = await acme_service.create_order(
-            account_id=order['account_id'], domains=domains, cluster_ids=cluster_ids,
-            challenge_type=challenge_type, created_by=current_user['id'],
-        )
-        # dns-01 is driven by the orchestrator after the TXT is published; only http-01 responds here.
-        challenges = []
-        if challenge_type != 'dns-01':
-            challenges = await acme_service.respond_to_challenges(new_order['order_id'])
+        try:
+            new_order = await acme_service.create_order(
+                account_id=order['account_id'], domains=domains, cluster_ids=cluster_ids,
+                challenge_type=challenge_type, created_by=current_user['id'],
+            )
+            # dns-01 is driven by the orchestrator after the TXT is published; only http-01 responds here.
+            challenges = []
+            if challenge_type != 'dns-01':
+                challenges = await acme_service.respond_to_challenges(new_order['order_id'])
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"ACME renewal for order {order_id} failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
         return {"message": "Renewal order created", "new_order_id": new_order['order_id'], "challenge_type": challenge_type, "challenges": challenges}
     finally:
         await close_database_connection(conn)
@@ -990,14 +996,43 @@ async def get_renewal_schedule(authorization: str = Header(None)):
         # legacy certs (no order link / pre-DNS-01 columns) rendering as http-01.
         certs = await conn.fetch("""
             SELECT c.id, c.name, c.primary_domain, c.expiry_date, c.auto_renew, c.days_until_expiry,
-                   o.challenge_type, a.dns_provider
+                   o.challenge_type, a.dns_provider,
+                   c.letsencrypt_order_id, o.domains AS order_domains, a.status AS account_status
             FROM ssl_certificates c
             LEFT JOIN letsencrypt_orders o ON o.id = c.letsencrypt_order_id
             LEFT JOIN letsencrypt_accounts a ON a.id = o.account_id
             WHERE c.source = 'letsencrypt' AND c.is_active = TRUE
             ORDER BY c.expiry_date ASC NULLS LAST
         """)
-        return [dict(c) for c in certs]
+        # Issue #79: the renewal task is gated by the global acme.auto_renew_enabled setting
+        # before it looks at a certificate's own auto_renew, and that setting is readable by
+        # admins only. Each row carries it so the schedule shows whether renewal will run.
+        from utils.acme_renewal import load_renewal_settings, fetch_latest_renewal_issues, renewal_due_date
+        try:
+            global_enabled, renew_days = await load_renewal_settings(conn)
+        except Exception as settings_err:
+            logger.warning(f"renewal-schedule: could not read ACME renewal settings: {settings_err}")
+            global_enabled, renew_days = None, None
+        issues = await fetch_latest_renewal_issues(conn, [c['letsencrypt_order_id'] for c in certs])
+        results = []
+        for c in certs:
+            d = dict(c)
+            raw_domains = d.get('order_domains')
+            try:
+                d['order_domains'] = json.loads(raw_domains) if isinstance(raw_domains, str) else raw_domains
+            except (json.JSONDecodeError, TypeError):
+                d['order_domains'] = None
+            d['global_auto_renew_enabled'] = global_enabled
+            d['renew_before_days'] = renew_days
+            # None for certificates the task skips: auto_renew off, no ACME order, manual DNS-01.
+            task_renews = (
+                d.get('auto_renew') and d.get('letsencrypt_order_id')
+                and not (d.get('challenge_type') == 'dns-01' and (d.get('dns_provider') or 'manual') == 'manual')
+            )
+            d['renewal_due_date'] = renewal_due_date(d.get('expiry_date'), renew_days) if task_renews else None
+            d['last_renewal_issue'] = issues.get(d['letsencrypt_order_id'])
+            results.append(d)
+        return results
     finally:
         await close_database_connection(conn)
 
