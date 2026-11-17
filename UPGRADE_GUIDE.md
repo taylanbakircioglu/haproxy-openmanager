@@ -1,3 +1,54 @@
+# Upgrade Notes — v1.12.3 (frontends with many SSL certificates: `crt-list`)
+
+**Backend + agent-script change, no schema change.** No `SCHEMA_VERSION` bump. The Linux and macOS
+agent scripts changed, so agents must be upgraded to benefit (see "Roll-out" below).
+
+- **The problem.** HAProxy reads at most 64 words per configuration line. Each certificate adds two
+  words (`crt <path>`) to the frontend's `bind` line, so about 30 certificates (fewer when `alpn`,
+  `npn`, `ciphers`, `ciphersuites`, `ssl-min-ver`, `ssl-max-ver` or `strict-sni` are set) made
+  `haproxy -c` fail with `too many words, truncating after word 64`. Nothing was applied. The
+  limit is the same on HAProxy 1.8, 2.0, 2.2, 2.4, 2.6, 2.8, 3.0 and 3.2 (64 words load, 65 do
+  not; 2.0 and 1.8 word the error `line too long`), and `crt-list` loads on all of them.
+- **The change.** Only when the rendered `bind` line would have **more than 64 words**, the config
+  uses `crt-list /etc/ssl/haproxy/crtlists/hom-<frontend>-<hash>.crtlist` instead of the `crt` list.
+  All other `bind` options stay on the line. The list content (one certificate path per line, same
+  order, first = default certificate) is carried in a `# HOM-CRTLIST-BEGIN … # HOM-CRTLIST-END`
+  comment block above the first frontend in the stored config version; the agent writes the file,
+  then validates the config with `haproxy -c`. The block is a comment, so older agents and the
+  Config Restore parser ignore it.
+- **Frontends that fit are unchanged.** A `bind` line of 64 words or fewer renders byte-for-byte as
+  before: no Apply diff, no reload after the upgrade. Frontends with a single certificate (the old
+  `ssl_certificate_id`) and non-SSL frontends are not touched.
+- **Safe by construction.** The file name contains a hash of its content. A candidate config that
+  fails validation therefore never alters a file the running config reads; the agent keeps running
+  the previous config as before. After a successful apply the agent removes `hom-*.crtlist` files
+  in `/etc/ssl/haproxy/crtlists/` that the active config no longer references. The agent only
+  writes files whose path matches `/…/crtlists/hom-<name>.crtlist` and whose entries are absolute
+  paths without whitespace or `..`; anything else is ignored and validation fails as it did before.
+- **Certificate renewal.** A certificate that is referenced only through a `crt-list` counts as
+  "in use": renewing it still reloads HAProxy.
+- **Roll-out.** After the backend is upgraded: **Agent Script Management → Reset to Defaults**
+  (or `POST /api/agents/sync-scripts-from-files`), then upgrade the agents. Until an agent is
+  upgraded, a frontend over the limit behaves exactly as in v1.12.2 (config rejected, previous
+  config keeps running). An upgraded agent against an older backend sees no block and changes
+  nothing.
+- **Rollback.** Downgrading the backend renders `crt` lines again; the next apply on an upgraded
+  agent validates them as before (and fails again for frontends over the limit) and removes the
+  unused `hom-*.crtlist` files.
+- **Apply, Restore and Config Import.** These read a stored or pasted config back with the config
+  parser. For a `crt-list` bind the parser returns the same bind address, port, `ssl_enabled`,
+  `ssl_port`, mode, default backend, `maxconn` and `timeout_client` as for the old multi-`crt` bind
+  (pinned by a test), so Apply's DB sync and Restore write the same values as before. The SSL
+  options on the line (`alpn`, `ciphers`, `strict-sni`, …) are now read from a `crt-list` bind too,
+  so an import does not mistake them for absent and clear them on an existing frontend. The
+  certificates inside the list file are not part of the pasted text and are not imported: the
+  import warnings say so, and an existing frontend keeps its assigned certificates (Bulk Import has
+  never changed them). A frontend created by an import from such text gets no certificates, like
+  one whose `crt` paths match no certificate in SSL Management. The header comment block is a plain
+  comment to the parser, and Restore applies a stored version's text as is, so the agent rewrites
+  its list file from the block.
+- **Not changed.** Config sync (the agent's report after an apply) reads names only.
+
 # Upgrade Notes — v1.12.2 (ACME wildcard certificate edit; why a certificate was not auto-renewed)
 
 **Backend + UI change, no schema change, no agent change.** No `SCHEMA_VERSION` bump and no agent

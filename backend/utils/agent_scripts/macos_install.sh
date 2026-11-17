@@ -1398,6 +1398,95 @@ reload_haproxy_service() {
     return 0
 }
 
+# Issue #80 — crt-list support for frontends with many certificates.
+# A bind line holds at most 64 words, so the backend moves the certificates of such a frontend
+# into a crt-list file and ships the file's lines in the config header as comments:
+#     # HOM-CRTLIST-BEGIN /etc/ssl/haproxy/crtlists/hom-<frontend>-<hash>.crtlist
+#     # /etc/ssl/haproxy/<cert>.pem
+#     # HOM-CRTLIST-END
+# The file name carries a hash of its content, so a rejected config can never change a file the
+# running config points at. A config without such a block (every config of a frontend that fits)
+# is untouched by all of this.
+hom_deploy_crtlists() {
+    local config_text="$1"
+    [[ "$config_text" == *"# HOM-CRTLIST-BEGIN "* ]] || return 0
+    local path_re='^/[A-Za-z0-9_./-]*/crtlists/hom-[A-Za-z0-9_.-]+\.crtlist$'
+    local line path="" body="" entry="" in_block=0 bad=0
+    while IFS= read -r line; do
+        if [[ $in_block -eq 0 ]]; then
+            # The blocks sit above the first section; stop looking once sections start.
+            if [[ "$line" =~ ^(global|defaults|frontend|backend|listen)([[:space:]]|$) ]]; then
+                break
+            fi
+            if [[ "$line" == "# HOM-CRTLIST-BEGIN "* ]]; then
+                path="${line#\# HOM-CRTLIST-BEGIN }"
+                body=""; bad=0; in_block=1
+                if [[ ! "$path" =~ $path_re || "$path" == *"/../"* ]]; then
+                    bad=1
+                fi
+            fi
+            continue
+        fi
+        if [[ "$line" == "# HOM-CRTLIST-END" ]]; then
+            in_block=0
+            if [[ $bad -eq 1 || -z "$body" ]]; then
+                log "WARN" "CRT-LIST: ignoring an invalid crt-list block (path: ${path:0:120})"
+                continue
+            fi
+            local dir="${path%/*}"
+            if [[ -f "$path" && "$(cat "$path" 2>/dev/null)" == "${body%$'\n'}" ]]; then
+                log "DEBUG" "CRT-LIST: unchanged $path"
+                continue
+            fi
+            mkdir -p "$dir" 2>/dev/null && chmod 755 "$dir" 2>/dev/null
+            local tmp_crtlist="${path}.tmp.$$"
+            if printf '%s' "$body" > "$tmp_crtlist" 2>/dev/null && mv -f "$tmp_crtlist" "$path" 2>/dev/null; then
+                chmod 644 "$path" 2>/dev/null
+                log "INFO" "CRT-LIST: wrote $path ($(printf '%s' "$body" | grep -c '') certificate(s))"
+            else
+                rm -f "$tmp_crtlist" 2>/dev/null
+                log "ERROR" "CRT-LIST: failed to write $path"
+            fi
+            continue
+        fi
+        if [[ "$line" == "# /"* ]]; then
+            entry="${line#\# }"
+            if [[ "$entry" =~ [[:space:]] || "$entry" == *"/../"* ]]; then
+                bad=1
+            else
+                body+="$entry"$'\n'
+            fi
+        else
+            bad=1
+        fi
+    done <<< "$config_text"
+    return 0
+}
+
+# Issue #80 — remove crt-list files the applied config no longer references (only ours: hom-*.crtlist).
+hom_cleanup_crtlists() {
+    local cfg="$1" f
+    [[ -f "$cfg" ]] || return 0
+    for f in /etc/ssl/haproxy/crtlists/hom-*.crtlist; do
+        [[ -f "$f" ]] || continue
+        grep -qF -- "$f" "$cfg" 2>/dev/null || rm -f -- "$f" 2>/dev/null
+    done
+    return 0
+}
+
+# Issue #80 — true when a certificate file is used by the config, directly (crt <file>) or
+# through a crt-list the config points at. Decides whether a changed certificate needs a reload.
+hom_cert_in_use() {
+    local cert="$1" cfg="$2" cl
+    [[ -f "$cfg" ]] || return 1
+    grep -qF -- "$cert" "$cfg" 2>/dev/null && return 0
+    while IFS= read -r cl; do
+        [[ -n "$cl" && -f "$cl" ]] || continue
+        grep -qxF -- "$cert" "$cl" 2>/dev/null && return 0
+    done < <(grep -oE 'crt-list[[:space:]]+[^[:space:]]+' "$cfg" 2>/dev/null | awk '{print $2}')
+    return 1
+}
+
 # Deploy SSL certificates to local filesystem
 deploy_ssl_certificates() {
     local ssl_certs_json="$1"
@@ -1492,7 +1581,8 @@ deploy_ssl_certificates() {
             # to disk but not used by any frontend/backend in this cluster's HAProxy configuration.
             # File is ALWAYS deployed (for future use), but reload is only triggered when needed.
             # Use -F for fixed-string matching (avoids regex interpretation of dots in filenames)
-            if [[ -f "$HAPROXY_CONFIG_PATH" ]] && grep -qF "$cert_file_path" "$HAPROXY_CONFIG_PATH" 2>/dev/null; then
+            # Issue #80: a certificate listed in a crt-list the config points at counts as in use too.
+            if [[ -f "$HAPROXY_CONFIG_PATH" ]] && hom_cert_in_use "$cert_file_path" "$HAPROXY_CONFIG_PATH"; then
                 SSL_CERTS_CHANGED_COUNT=$((SSL_CERTS_CHANGED_COUNT + 1))
                 log "INFO" "SSL certificate deployed (CHANGED & IN USE): $cert_file_path"
             else
@@ -1885,6 +1975,10 @@ check_config_updates() {
     log "INFO" "Config version changed ($last_applied_version → $CONFIG_VERSION), fetching SSL certificates..."
     fetch_and_deploy_ssl_certificates
     local _ssl_changed_in_config_update=${SSL_CERTS_CHANGED_COUNT:-0}
+
+    # Issue #80: write the crt-list files this config carries BEFORE it is validated
+    # (a frontend with many certificates binds with `ssl crt-list <file>`).
+    hom_deploy_crtlists "$CONFIG_CONTENT"
     
     # Create backup of current config (CRITICAL: Always backup before changes)
     if [[ -f "$HAPROXY_CONFIG_PATH" ]]; then
@@ -2022,6 +2116,7 @@ check_config_updates() {
         
         # Reload HAProxy service
         reload_haproxy_service
+        hom_cleanup_crtlists "$HAPROXY_CONFIG_PATH"
         
         # Update last applied version to prevent reapplying same config
         last_applied_version="$CONFIG_VERSION"
@@ -2074,6 +2169,7 @@ check_config_updates() {
                 
                 # Reload HAProxy service
                 reload_haproxy_service
+                hom_cleanup_crtlists "$HAPROXY_CONFIG_PATH"
                 
                 # Update last applied version to prevent reapplying same config
                 last_applied_version="$CONFIG_VERSION"
@@ -2907,6 +3003,84 @@ CONFIG_RESPONSE_EOF
     log "INFO" "DAEMON: Initialized HAProxy paths - bin: $HAPROXY_BIN, config: $HAPROXY_CONFIG"
     
     # Enhanced daemon loop with upgrade capability  
+    # Issue #80 — crt-list support (same helpers as the heredoc copy above; see there for the why).
+    hom_deploy_crtlists() {
+        local config_text="$1"
+        [[ "$config_text" == *"# HOM-CRTLIST-BEGIN "* ]] || return 0
+        local path_re='^/[A-Za-z0-9_./-]*/crtlists/hom-[A-Za-z0-9_.-]+\.crtlist$'
+        local line path="" body="" entry="" in_block=0 bad=0
+        while IFS= read -r line; do
+            if [[ $in_block -eq 0 ]]; then
+                # The blocks sit above the first section; stop looking once sections start.
+                if [[ "$line" =~ ^(global|defaults|frontend|backend|listen)([[:space:]]|$) ]]; then
+                    break
+                fi
+                if [[ "$line" == "# HOM-CRTLIST-BEGIN "* ]]; then
+                    path="${line#\# HOM-CRTLIST-BEGIN }"
+                    body=""; bad=0; in_block=1
+                    if [[ ! "$path" =~ $path_re || "$path" == *"/../"* ]]; then
+                        bad=1
+                    fi
+                fi
+                continue
+            fi
+            if [[ "$line" == "# HOM-CRTLIST-END" ]]; then
+                in_block=0
+                if [[ $bad -eq 1 || -z "$body" ]]; then
+                    log "WARN" "CRT-LIST: ignoring an invalid crt-list block (path: ${path:0:120})"
+                    continue
+                fi
+                local dir="${path%/*}"
+                if [[ -f "$path" && "$(cat "$path" 2>/dev/null)" == "${body%$'\n'}" ]]; then
+                    log "DEBUG" "CRT-LIST: unchanged $path"
+                    continue
+                fi
+                mkdir -p "$dir" 2>/dev/null && chmod 755 "$dir" 2>/dev/null
+                local tmp_crtlist="${path}.tmp.$$"
+                if printf '%s' "$body" > "$tmp_crtlist" 2>/dev/null && mv -f "$tmp_crtlist" "$path" 2>/dev/null; then
+                    chmod 644 "$path" 2>/dev/null
+                    log "INFO" "CRT-LIST: wrote $path ($(printf '%s' "$body" | grep -c '') certificate(s))"
+                else
+                    rm -f "$tmp_crtlist" 2>/dev/null
+                    log "ERROR" "CRT-LIST: failed to write $path"
+                fi
+                continue
+            fi
+            if [[ "$line" == "# /"* ]]; then
+                entry="${line#\# }"
+                if [[ "$entry" =~ [[:space:]] || "$entry" == *"/../"* ]]; then
+                    bad=1
+                else
+                    body+="$entry"$'\n'
+                fi
+            else
+                bad=1
+            fi
+        done <<< "$config_text"
+        return 0
+    }
+
+    hom_cleanup_crtlists() {
+        local cfg="$1" f
+        [[ -f "$cfg" ]] || return 0
+        for f in /etc/ssl/haproxy/crtlists/hom-*.crtlist; do
+            [[ -f "$f" ]] || continue
+            grep -qF -- "$f" "$cfg" 2>/dev/null || rm -f -- "$f" 2>/dev/null
+        done
+        return 0
+    }
+
+    hom_cert_in_use() {
+        local cert="$1" cfg="$2" cl
+        [[ -f "$cfg" ]] || return 1
+        grep -qF -- "$cert" "$cfg" 2>/dev/null && return 0
+        while IFS= read -r cl; do
+            [[ -n "$cl" && -f "$cl" ]] || continue
+            grep -qxF -- "$cert" "$cl" 2>/dev/null && return 0
+        done < <(grep -oE 'crt-list[[:space:]]+[^[:space:]]+' "$cfg" 2>/dev/null | awk '{print $2}')
+        return 1
+    }
+
     log "DEBUG" "DAEMON: Starting agent monitoring loop for $AGENT_NAME"
     
     while true; do
@@ -3029,7 +3203,8 @@ CONFIG_RESPONSE_EOF
                                         # OPTIMIZATION: Only count toward reload if cert is referenced in HAProxy config
                                         # Use cert_file_path (API path matching config) not ssl_file (local deploy path)
                                         # Prevents unnecessary reloads for certs not used by this cluster
-                                        if [[ -f "$HAPROXY_CONFIG" ]] && grep -qF "$cert_file_path" "$HAPROXY_CONFIG" 2>/dev/null; then
+                                        # Issue #80: a certificate listed in a crt-list the config points at is in use too
+                                        if [[ -f "$HAPROXY_CONFIG" ]] && hom_cert_in_use "$cert_file_path" "$HAPROXY_CONFIG"; then
                                             log "INFO" "DAEMON: SSL certificate deployed (CHANGED & IN USE): $ssl_file ($cert_domain)"
                                             ssl_deployed_count=$((ssl_deployed_count + 1))
                                         else
@@ -3284,6 +3459,10 @@ CONFIG_RESPONSE_EOF
                         fi
                     fi
                     
+                    # Issue #80: write the crt-list files this config carries BEFORE validating it
+                    # (a frontend with many certificates binds with `ssl crt-list <file>`).
+                    hom_deploy_crtlists "$daemon_config_content"
+
                     # CRITICAL FIX: Validate BEFORE applying (was: apply then validate)
                     # Test new config from temp file FIRST
                     if "$HAPROXY_BIN" -f /tmp/haproxy-new-config.cfg -c >/dev/null 2>&1; then
@@ -3293,6 +3472,7 @@ CONFIG_RESPONSE_EOF
                     
                         # Reload HAProxy
                         echo "reload" | socat "$STATS_SOCKET" stdio 2>/dev/null || true
+                        hom_cleanup_crtlists "$HAPROXY_CONFIG"
                         log "INFO" "DAEMON: Configuration applied and HAProxy reloaded"
                         
                         # CRITICAL: Notify backend of successful config application with version

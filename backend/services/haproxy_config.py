@@ -3,6 +3,7 @@ import logging
 import hashlib
 import time
 import json
+import re
 import urllib.parse
 from typing import Optional, List, Dict, Any
 from database.connection import get_database_connection, close_database_connection
@@ -37,6 +38,60 @@ def is_config_generation_error(config_content: Optional[str]) -> bool:
     if not config_content:
         return True
     return config_content.lstrip().startswith(CONFIG_GENERATION_ERROR_PREFIXES)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Issue #80 — frontends with many SSL certificates (crt-list)
+#
+# HAProxy parses a configuration line into at most 64 words. A multi-certificate
+# `bind` costs two words per certificate (`crt <path>`), so a frontend with 31
+# certificates (fewer with `alpn`, `strict-sni`, ...) is rejected with
+# "too many words, truncating after word 64" and the whole cluster config fails
+# `haproxy -c`. Measured on HAProxy 2.8: 64 words load, 65 do not.
+#
+# Past that limit — and ONLY past it — the certificates move into a crt-list
+# file and the bind becomes `ssl crt-list <file>`. Every bind line that fits
+# keeps rendering exactly as before, so no existing frontend changes.
+#
+# The agent has to put that file on disk before it validates the config, and a
+# config is the only thing delivered atomically with its version, so the file's
+# lines ride in the config's own header as comments (HAProxy ignores them):
+#
+#     # HOM-CRTLIST-BEGIN /etc/ssl/haproxy/crtlists/hom-<frontend>-<hash>.crtlist
+#     # /etc/ssl/haproxy/<cert-1>.pem
+#     # /etc/ssl/haproxy/<cert-2>.pem
+#     # HOM-CRTLIST-END
+#
+# The file name carries a hash of its content, so a candidate config that fails
+# validation can never alter the file the running config points at, and a
+# rollback finds its own file again.
+# ─────────────────────────────────────────────────────────────────────────────
+HAPROXY_MAX_LINE_WORDS = 64
+CRTLIST_DIR = "/etc/ssl/haproxy/crtlists"
+CRTLIST_BEGIN_MARKER = "# HOM-CRTLIST-BEGIN"
+CRTLIST_END_MARKER = "# HOM-CRTLIST-END"
+# A certificate path may go into a crt-list line only if HAProxy and the agent
+# read it back as exactly one token: no whitespace, no comment/quote/escape
+# characters. Anything else keeps the plain `crt` rendering (the legacy
+# behaviour, which such a name already broke on).
+_CRTLIST_UNSAFE_CHARS = re.compile(r"[\s#\"'\\\[\]]")
+
+
+def _plan_crtlist(frontend_name: str, cert_paths: List[str]):
+    """Return ``(crtlist_path, block_lines)`` for a frontend's certificates, or
+    ``None`` when the paths cannot be written safely to a crt-list file."""
+    if not cert_paths:
+        return None
+    for path in cert_paths:
+        if not path.startswith("/") or _CRTLIST_UNSAFE_CHARS.search(path):
+            return None
+    digest = hashlib.sha256("\n".join(cert_paths).encode("utf-8")).hexdigest()[:12]
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", str(frontend_name)).strip(".") or "frontend"
+    crtlist_path = f"{CRTLIST_DIR}/hom-{safe_name[:80]}-{digest}.crtlist"
+    block = [f"{CRTLIST_BEGIN_MARKER} {crtlist_path}"]
+    block.extend(f"# {path}" for path in cert_paths)
+    block.append(CRTLIST_END_MARKER)
+    return crtlist_path, block
 
 
 def select_acme_backend_source(candidates: List[tuple]):
@@ -829,6 +884,13 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
             "# ═══════════════════════════════════════════════════════════════════════",
             ""
         ]
+        # Issue #80: crt-list file bodies for frontends whose bind line would exceed
+        # HAProxy's 64-word limit. They are spliced in right after the header (see
+        # the end of this function) and stay empty - leaving the output
+        # byte-for-byte unchanged - for every cluster whose binds fit.
+        _config_header_len = len(config_lines)
+        crtlist_header_lines: List[str] = []
+        crtlist_paths_emitted = set()
         
         # CRITICAL: Build backend mode lookup for validation
         backend_modes = {backend['name']: backend['mode'] for backend in backends}
@@ -935,36 +997,67 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
                         # Generate single bind with SSL and multiple certificates
                         # Format: bind :443 ssl crt file1.pem crt file2.pem crt file3.pem [alpn h2,http/1.1] [ciphers ...]
                         crt_clause = ' '.join([f"crt {path}" for path in cert_paths])
-                        bind_line = f"    bind {frontend['bind_address']}:{frontend['bind_port']} ssl {crt_clause}"
-                        
-                        # Add SSL advanced options if present
-                        if frontend.get('ssl_alpn'):
-                            bind_line += f" alpn {frontend['ssl_alpn']}"
-                        if frontend.get('ssl_npn'):
-                            bind_line += f" npn {frontend['ssl_npn']}"
-                        if frontend.get('ssl_ciphers'):
-                            bind_line += f" ciphers {frontend['ssl_ciphers']}"
-                        if frontend.get('ssl_ciphersuites'):
-                            bind_line += f" ciphersuites {frontend['ssl_ciphersuites']}"
-                        if frontend.get('ssl_min_ver'):
-                            bind_line += f" ssl-min-ver {frontend['ssl_min_ver']}"
-                        if frontend.get('ssl_max_ver'):
-                            bind_line += f" ssl-max-ver {frontend['ssl_max_ver']}"
-                        if frontend.get('ssl_strict_sni'):
-                            bind_line += " strict-sni"
-                        # R11.A-2 fix (PR-1 hotfix): emit `verify required|optional`
-                        # on bind line ONLY when a client-CA bundle is resolvable.
-                        # Pre-fix the directive was emitted verbatim, but the
-                        # `frontends` schema has no client-CA bundle column yet
-                        # — so `bind ... ssl crt <server.pem> verify required`
-                        # produced HAProxy fatal ALERT
-                        # "verify is enabled but no CA file specified".
-                        # Symmetric to the server-side downgrade at line ~840.
-                        # Forward path: a future `ssl_client_ca_certificate_id`
-                        # column will resolve `client_ca_path`; until then the
-                        # directive is silently skipped with an ERROR log so
-                        # operator-facing diagnostics surface the cause.
-                        bind_line = _apply_bind_ssl_verify(bind_line, frontend, cluster_id)
+
+                        # Issue #80: the line is built by a helper so the very same
+                        # options can be rendered with either certificate clause.
+                        def _build_ssl_bind(cert_clause: str, _fe=frontend) -> str:
+                            bind_line = f"    bind {_fe['bind_address']}:{_fe['bind_port']} ssl {cert_clause}"
+
+                            # Add SSL advanced options if present
+                            if _fe.get('ssl_alpn'):
+                                bind_line += f" alpn {_fe['ssl_alpn']}"
+                            if _fe.get('ssl_npn'):
+                                bind_line += f" npn {_fe['ssl_npn']}"
+                            if _fe.get('ssl_ciphers'):
+                                bind_line += f" ciphers {_fe['ssl_ciphers']}"
+                            if _fe.get('ssl_ciphersuites'):
+                                bind_line += f" ciphersuites {_fe['ssl_ciphersuites']}"
+                            if _fe.get('ssl_min_ver'):
+                                bind_line += f" ssl-min-ver {_fe['ssl_min_ver']}"
+                            if _fe.get('ssl_max_ver'):
+                                bind_line += f" ssl-max-ver {_fe['ssl_max_ver']}"
+                            if _fe.get('ssl_strict_sni'):
+                                bind_line += " strict-sni"
+                            # R11.A-2 fix (PR-1 hotfix): emit `verify required|optional`
+                            # on bind line ONLY when a client-CA bundle is resolvable.
+                            # Pre-fix the directive was emitted verbatim, but the
+                            # `frontends` schema has no client-CA bundle column yet
+                            # — so `bind ... ssl crt <server.pem> verify required`
+                            # produced HAProxy fatal ALERT
+                            # "verify is enabled but no CA file specified".
+                            # Symmetric to the server-side downgrade at line ~840.
+                            # Forward path: a future `ssl_client_ca_certificate_id`
+                            # column will resolve `client_ca_path`; until then the
+                            # directive is silently skipped with an ERROR log so
+                            # operator-facing diagnostics surface the cause.
+                            bind_line = _apply_bind_ssl_verify(bind_line, _fe, cluster_id)
+                            return bind_line
+
+                        bind_line = _build_ssl_bind(crt_clause)
+
+                        # Issue #80: HAProxy rejects a line of more than 64 words. Only
+                        # then do the certificates move into a crt-list file; a line
+                        # that fits is left exactly as it has always been rendered.
+                        _bind_words = len(bind_line.split())
+                        if _bind_words > HAPROXY_MAX_LINE_WORDS:
+                            _crtlist_plan = _plan_crtlist(frontend['name'], cert_paths)
+                            if _crtlist_plan:
+                                _crtlist_path, _crtlist_block = _crtlist_plan
+                                bind_line = _build_ssl_bind(f"crt-list {_crtlist_path}")
+                                if _crtlist_path not in crtlist_paths_emitted:
+                                    crtlist_paths_emitted.add(_crtlist_path)
+                                    crtlist_header_lines.extend(_crtlist_block)
+                                logger.info(
+                                    f"SSL CRT-LIST: frontend '{frontend['name']}' bind would be "
+                                    f"{_bind_words} words (HAProxy limit {HAPROXY_MAX_LINE_WORDS}) with "
+                                    f"{len(cert_paths)} certificates - using crt-list {_crtlist_path}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"SSL CRT-LIST: frontend '{frontend['name']}' bind is {_bind_words} words "
+                                    f"(HAProxy limit {HAPROXY_MAX_LINE_WORDS}) but a certificate path cannot be "
+                                    "written to a crt-list file safely - keeping the plain 'crt' rendering"
+                                )
 
                         config_lines.append(bind_line)
                         bind_added = True
@@ -1869,6 +1962,16 @@ async def generate_haproxy_config_for_cluster(cluster_id: int, conn: Optional[An
         if not conn:
             await close_database_connection(db_conn)
         
+        # Issue #80: place the crt-list bodies directly under the header. The agent reads
+        # them from the full text before it merges the partial config (the merge keeps
+        # only the frontend/backend sections), so they never reach haproxy.cfg itself.
+        if crtlist_header_lines:
+            config_lines[_config_header_len:_config_header_len] = (
+                ["# crt-list files for frontends with many certificates (agent writes them before validation)"]
+                + crtlist_header_lines
+                + [""]
+            )
+
         # Join all lines
         config_content = "\n".join(config_lines)
         

@@ -1,5 +1,5 @@
 {
-  "version": "1.12.2",
-  "releaseName": "ACME certificate edit with wildcard names, and why a certificate was not auto-renewed",
+  "version": "1.12.3",
+  "releaseName": "Frontends with many SSL certificates (crt-list)",
   "releaseDate": "2026-11-17"
 }

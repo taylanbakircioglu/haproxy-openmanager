@@ -314,7 +314,12 @@ class HAProxyConfigParser:
                             frontend.bind_port = port  # Preserve port for SSL-disabled scenarios
                         
                         # Check if SSL certificate path is specified in bind directive
-                        if 'crt ' in line:
+                        # Issue #80: a `crt-list <file>` bind carries the same SSL options
+                        # (alpn, ciphers, strict-sni, ...) as a `crt` bind, so it goes through
+                        # the same option parsing; otherwise an import of such a line would read
+                        # them as absent and clear them on an existing frontend. It has no `crt`
+                        # word, so no certificate path is collected from it (see warning below).
+                        if 'crt ' in line or re.search(r'\bcrt-list\s+\S+', line):
                             ssl_cert_found = True
                             # Extract certificate paths and SSL parameters
                             # CRITICAL FIX: Parse multiple crt paths even with alpn/other params after them
@@ -393,6 +398,18 @@ class HAProxyConfigParser:
                                     f"Frontend '{name}': SSL parameters imported: {', '.join(ssl_params_detected)}. "
                                     "You can edit these in Frontend Management after import."
                                 )
+
+                        # Issue #80: a frontend with many certificates binds with
+                        # `ssl crt-list <file>`. The file is not part of the pasted text,
+                        # so its certificates (and the SSL options on this line) are not
+                        # imported - say so instead of staying silent. Nothing else about
+                        # the bind is affected: address, port and ssl_enabled are read above.
+                        if re.search(r'\bcrt-list\s+\S+', line):
+                            self.warnings.append(
+                                f"Frontend '{name}': this bind uses a crt-list file; its certificates and the "
+                                "SSL options on the line are not imported. Assign the certificates in "
+                                "SSL Management / Frontend Management after import."
+                            )
                     else:
                         # This is a regular HTTP bind - only set if not already set
                         # (to preserve the first non-SSL bind as primary)
